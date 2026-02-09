@@ -1,0 +1,88 @@
+#!/bin/bash
+
+###############################################################################
+# outlier_annotation.sh
+#
+# Wrapper for outlier_annotation.R: annotate outlier regions using BLAST
+# against multiple DBs (from config file). Per-region BLAST, then map hits
+# to GFF for genes/GO. Output: outlier_regions_genes.csv.
+#
+# BLAST config: YAML or JSON with list of { db_path, name, gff_path }.
+###############################################################################
+
+set -euo pipefail
+
+REGIONS=""
+REFERENCE=""
+BLAST_CONFIG=""
+OUTPUT_DIR="."
+RSCRIPT="Rscript"
+SAMTOOLS="samtools"
+BLAST_CMD="blastn"
+THREADS=1
+
+usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Required:
+  --regions FILE         Regions CSV/TSV (from identify_outliers: outlier_regions*.csv)
+  --reference FILE       Reference genome FASTA (must have .fai index)
+  --blast-config FILE    BLAST config YAML or JSON (list of db_path, name, gff_path)
+
+Optional:
+  --output-dir DIR       Output directory [default: .]
+  --rscript PATH         Path to Rscript [default: Rscript]
+  --samtools PATH        Path to samtools [default: samtools]
+  --blast-cmd NAME       BLAST command: blastn, blastp, etc. [default: blastn]
+  --threads N            BLAST threads [default: 1]
+  -h, --help             Show this help
+
+Example BLAST config (YAML, blast_config.yml):
+  databases:
+    - db_path: /path/to/nr
+      name: nr
+      gff_path: /path/to/annot.gff
+    - db_path: /path/to/uniprot
+      name: uniprot
+      gff_path: /path/to/genes.gff
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --regions) REGIONS="$2"; shift 2 ;;
+        --reference) REFERENCE="$2"; shift 2 ;;
+        --blast-config) BLAST_CONFIG="$2"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --rscript) RSCRIPT="$2"; shift 2 ;;
+        --samtools) SAMTOOLS="$2"; shift 2 ;;
+        --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
+        --threads) THREADS="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+done
+
+if [[ -z "$REGIONS" || -z "$REFERENCE" || -z "$BLAST_CONFIG" ]]; then
+    echo "ERROR: --regions, --reference, and --blast-config are required" >&2
+    usage
+    exit 1
+fi
+
+SCRIPT_DIR=$(dirname "$0")
+R_FILE="${SCRIPT_DIR}/outlier_annotation.R"
+if [[ ! -f "$R_FILE" ]]; then
+    echo "ERROR: outlier_annotation.R not found: $R_FILE" >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+"$RSCRIPT" "$R_FILE" \
+    --regions "$REGIONS" \
+    --reference "$REFERENCE" \
+    --blast-config "$BLAST_CONFIG" \
+    --output-dir "$OUTPUT_DIR" \
+    --samtools "$SAMTOOLS" \
+    --blast-cmd "$BLAST_CMD" \
+    --threads "$THREADS"

@@ -78,12 +78,14 @@ vcxproj.user
 packrat/
 renv/library/
 
-# --- Data files (CSV / TSV / H5): ignore all, then exceptions ---
+# --- Data, config, and metadata files: ignore all, then exceptions ---
 *.csv
 *.tsv
 *.h5
 *.hdf5
 *.he5
+*.yaml
+*.yml
 !sample_info.csv
 !popgen/stats/pbe_comparisons.csv
 
@@ -97,11 +99,29 @@ primers/*
 *.log
 *.out
 
+# --- Optional: pdfs, figures, images ---
+*.pdf
+*.png
+*.svg
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.heic
+*.heif
+
 # --- Optional: Jupyter ---
 .ipynb_checkpoints/
 
 # --- Optional: C++ / clangd ---
 compile_commands.json
+
+# --- Optional: Cursor ---
+.cursor
+AGENTS.md
 
 # --- Optional: BLAST databases (outliers/outlier_annotation) ---
 *.nin
@@ -113,7 +133,7 @@ compile_commands.json
 *.nhr2
 *.nsq2
 
-# --- Optional: large alignment/variant output files ---
+# --- Optional: large alignment/sequence/variant output files ---
 *.bam
 *.bai
 *.bcf
@@ -128,3 +148,11 @@ compile_commands.json
 *.vcf.gz.gzj
 *.vcf.gz.gzk
 *.vcf.gz.gzl
+*.fasta
+*.fastq
+*.fastq.gz
+*.fastq.gz.fai
+*.fastq.gz.gzi
+*.fastq.gz.gzj
+*.fastq.gz.gzk
+*.fastq.gz.gzl
