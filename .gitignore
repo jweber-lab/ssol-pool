@@ -1,0 +1,130 @@
+# --- OS and filesystem quirks (Windows / macOS / Linux) ---
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# Linux / generic
+*~
+.nfs*
+*.swp
+*.swo
+.directory
+# Cross-platform
+*.bak
+*.tmp
+.Trash-*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+venv/
+.venv/
+env/
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+
+# --- C++ ---
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+a.out
+*.out
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.user
+.qtc_clangd/
+*.suo
+*.sln.docstates
+.vs/
+vcxproj.user
+
+# --- R ---
+.RData
+.Rhistory
+.Rproj.user/
+*.Rproj.user
+*.tar.gz
+*.Rcheck/
+packrat/
+renv/library/
+
+# --- Data files (CSV / TSV / H5): ignore all, then exceptions ---
+*.csv
+*.tsv
+*.h5
+*.hdf5
+*.he5
+!sample_info.csv
+!popgen/stats/pbe_comparisons.csv
+
+# --- Project-specific ---
+scratch.md
+help/
+reads/*
+primers/*
+
+# --- Optional: job logs and large generated files ---
+*.log
+*.out
+
+# --- Optional: Jupyter ---
+.ipynb_checkpoints/
+
+# --- Optional: C++ / clangd ---
+compile_commands.json
+
+# --- Optional: BLAST databases (outliers/outlier_annotation) ---
+*.nin
+*.nhr
+*.nsq
+*.nog
+*.nsd
+*.nal
+*.nhr2
+*.nsq2
+
+# --- Optional: large alignment/variant output files ---
+*.bam
+*.bai
+*.bcf
+*.bcf.csi
+*.bcf.gz
+*.mpileup
+*.sync
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.gz.gzi
+*.vcf.gz.gzj
+*.vcf.gz.gzk
+*.vcf.gz.gzl

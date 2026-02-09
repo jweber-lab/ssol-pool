@@ -1,0 +1,35 @@
+# Sample Information CSV File
+# This file contains sample metadata for pool-seq analysis
+# 
+# Required columns:
+#   - sample_name: Unique identifier for the sample
+#   - read1_file: Path to R1 fastq.gz file (for process_poolseq.sh) or bam_file (for calculate_pi_theta.sh)
+#   - read2_file: Path to R2 fastq.gz file (for process_poolseq.sh, ignored for calculate_pi_theta.sh)
+#   - pool_size: Pool size (haploid chromosomes)
+#   - bam_file: Path to BAM file (required for calculate_*.sh scripts)
+#
+# Optional metadata columns (ignored by scripts but useful for documentation):
+#   - collection_date: Date or season of collection
+#   - collector: Person who collected the sample
+#   - permit_holder: Person/institution holding collection permit
+#   - location: Collection location
+#   - notes: Additional notes
+#
+# For process_poolseq.sh (BAM generation):
+#   Input format: sample_name, read1_file, read2_file, pool_size
+#   Output format: sample_name, read1_file, read2_file, pool_size, bam_file
+#   Note: process_poolseq.sh will append the bam_file column after successful BAM generation
+#
+# For calculate_*.sh (diversity, fst, etc. analyses):
+#   Input format: sample_name, read1_file, read2_file, pool_size, bam_file
+#   Note: read1_file and read2_file columns are ignored for diversity analysis
+#   Note: window_size, step_size, coverage are command-line parameters only
+#
+###############################################################################
+# Samples from Schistocephalus solidus poolseq analysis:
+#
+sample_name,read1_file,read2_file,pool_size,bam_file,collection_date,region,location,latitude,longitude,collector,permit_holder,notes
+Echo,reads/Echo_Pool_S1_L001_R1_001.fastq.gz,reads/Echo_Pool_S1_L001_R2_001.fastq.gz,200,popgen/alignment/Echo/Echo_All_seq.dedup.bam,Spring 2014,Vancouver Island,,,,Thor Veen,Dan Bolnick,Permit info available from Dan Bolnick
+Myv,reads/Myv_Pool_S2_L001_R1_001.fastq.gz,reads/Myv_Pool_S2_L001_R2_001.fastq.gz,180,popgen/alignment/Myv/Myv_All_seq.dedup.bam,June 2010-June 2020,Iceland,,,,Holar Univ collaborators,,Metadata with Emily; no permit required
+Cheney,reads/Cheney_Pool_S3_L001_R1_001.fastq.gz,reads/Cheney_Pool_S3_L001_R2_001.fastq.gz,192,popgen/alignment/Cheney/Cheney_All_seq.dedup.bam,Summer 2019 (likely July),Alaska,,,,Weber lab,Weber lab (amended permit),Permit attached
+Kjer,reads/Kjer_Pool_S4_L001_R1_001.fastq.gz,reads/Kjer_Pool_S4_L001_R2_001.fastq.gz,106,popgen/alignment/Kjer/Kjer_All_seq.dedup.bam,Sept 2022,Norway,,,,Cole Wolf,Joost Andre M Raeymaekers (PI) / Marijn Kuizenga (grad student) - Nord University,Permit/collection info attached
