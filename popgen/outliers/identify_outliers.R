@@ -1339,6 +1339,22 @@ selected_chrs <- chr_lengths$chr
 if (!is.null(diversity_data)) {
     diversity_data <- diversity_data %>%
         filter(.data$chr %in% selected_chrs)
+    if (opts$verbose) {
+        cat("Diversity data after chromosome filter: ", nrow(diversity_data), " rows, chr(s): ", paste(selected_chrs, collapse = ", "), "\n", sep = "")
+        if (nrow(diversity_data) > 0 && "pi" %in% colnames(diversity_data)) {
+            qcol <- "pi_quantile"
+            if (qcol %in% colnames(diversity_data)) {
+                q <- diversity_data[[qcol]]
+                q <- q[!is.na(q)]
+                cat("  pi_quantile: min=", if (length(q)) min(q) else NA, ", max=", if (length(q)) max(q) else NA, ", n_non_NA=", length(q), "\n", sep = "")
+                if (length(q) > 0) {
+                    cat("  Windows with pi_quantile >= 0.99: ", sum(q >= 0.99), ", <= 0.01: ", sum(q <= 0.01), "\n", sep = "")
+                }
+            }
+            cat("  Samples: ", paste(unique(diversity_data$sample), collapse = ", "), "\n", sep = "")
+            if ("window_size" %in% colnames(diversity_data)) cat("  Window sizes: ", paste(sort(unique(diversity_data$window_size[!is.na(diversity_data$window_size)])), collapse = ", "), "\n", sep = "")
+        }
+    }
 }
 
 if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) {
@@ -1368,6 +1384,9 @@ outlier_results <- list()
 expanded_region_results <- list()  # when expand_mode, holds expanded regions per key
 
 # Process diversity statistics
+if (is.null(diversity_data)) {
+    if (opts$verbose) cat("No diversity data (diversity_data is NULL); skipping diversity statistics.\n")
+}
 if (!is.null(diversity_data)) {
     for (stat in statistics) {
         stat_col <- switch(stat,
@@ -1394,6 +1413,7 @@ if (!is.null(diversity_data)) {
             if (opts$verbose) cat("Warning: No valid data for statistic '", stat, "', skipping\n", sep="")
             next
         }
+        if (opts$verbose) cat("Statistic '", stat, "': ", nrow(stat_data), " rows, samples: ", paste(unique(stat_data$sample), collapse = ", "), "\n", sep = "")
         
         # Identify outlier windows
         # Calculate quantile thresholds per sample and per window size
@@ -1422,7 +1442,10 @@ if (!is.null(diversity_data)) {
                     ws_data <- sample_data %>% filter(.data$window_size == ws)
                 }
                 
-                if (nrow(ws_data) == 0) next
+                if (nrow(ws_data) == 0) {
+                    if (opts$verbose) cat("  [", stat, "] sample=", sample_name, " window_size=", ws, " n=0 (skipping)\n", sep = "")
+                    next
+                }
                 
                 merge_dist_ws <- opts$`merge-distance`
                 if (!is.null(merge_dist_ws) && (merge_dist_ws == "auto" || merge_dist_ws == "0")) {
@@ -1434,6 +1457,15 @@ if (!is.null(diversity_data)) {
                 
                 quantile_col <- paste0(stat_col, "_quantile")
                 use_quantile <- quantile_col %in% colnames(ws_data) && !all(is.na(ws_data[[quantile_col]]))
+                if (opts$verbose) {
+                    cat("  [", stat, "] sample=", sample_name, " window_size=", ws, " n=", nrow(ws_data), " use_quantile_column=", use_quantile, sep = "")
+                    if (use_quantile && quantile_col %in% colnames(ws_data)) {
+                        qv <- ws_data[[quantile_col]]
+                        qv <- qv[!is.na(qv)]
+                        if (length(qv) > 0) cat(" quantile_range=[", min(qv), ",", max(qv), "]", sep = "")
+                    }
+                    cat("\n")
+                }
                 
                 if (expand_mode) {
                     if (use_quantile) {
@@ -1441,11 +1473,13 @@ if (!is.null(diversity_data)) {
                         seed_low <- ws_data %>% filter(.data[[quantile_col]] <= opts$`seed-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
                         expand_high <- ws_data %>% filter(.data[[quantile_col]] >= opts$`expand-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
                         expand_low <- ws_data %>% filter(.data[[quantile_col]] <= opts$`expand-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
+                        if (opts$verbose) cat("    seed_high(>=", opts$`seed-high-quantile`, ")=", nrow(seed_high), " seed_low(<=", opts$`seed-low-quantile`, ")=", nrow(seed_low), " expand_high(>=", opts$`expand-high-quantile`, ")=", nrow(expand_high), " expand_low(<=", opts$`expand-low-quantile`, ")=", nrow(expand_low), "\n", sep = "")
                     } else {
                         sh <- quantile(ws_data[[stat_col]], opts$`seed-high-quantile`, na.rm = TRUE)
                         sl <- quantile(ws_data[[stat_col]], opts$`seed-low-quantile`, na.rm = TRUE)
                         eh <- quantile(ws_data[[stat_col]], opts$`expand-high-quantile`, na.rm = TRUE)
                         el <- quantile(ws_data[[stat_col]], opts$`expand-low-quantile`, na.rm = TRUE)
+                        if (opts$verbose) cat("    Using value thresholds (no quantile column): seed_high>=", sh, " seed_low<=", sl, " expand_high>=", eh, " expand_low<=", el, "\n", sep = "")
                         seed_high <- ws_data %>% filter(.data[[stat_col]] >= sh) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
                         seed_low <- ws_data %>% filter(.data[[stat_col]] <= sl) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
                         expand_high <- ws_data %>% filter(.data[[stat_col]] >= eh) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
@@ -1456,6 +1490,7 @@ if (!is.null(diversity_data)) {
                         seed_low <- seed_low %>% filter(passes_quality_filters(seed_low, opts))
                         expand_high <- expand_high %>% filter(passes_quality_filters(expand_high, opts))
                         expand_low <- expand_low %>% filter(passes_quality_filters(expand_low, opts))
+                        if (opts$verbose) cat("    After quality filters: seed_high=", nrow(seed_high), " seed_low=", nrow(seed_low), " expand_high=", nrow(expand_high), " expand_low=", nrow(expand_low), "\n", sep = "")
                     }
                     if (!is.null(opts$`top-n-extreme`) && opts$`top-n-extreme` > 0) {
                         n_extreme <- as.integer(opts$`top-n-extreme`)
@@ -1464,6 +1499,7 @@ if (!is.null(diversity_data)) {
                     }
                     seed_windows <- bind_rows(if (nrow(seed_high) > 0) seed_high else NULL, if (nrow(seed_low) > 0) seed_low else NULL)
                     expand_windows <- bind_rows(if (nrow(expand_high) > 0) expand_high else NULL, if (nrow(expand_low) > 0) expand_low else NULL)
+                    if (opts$verbose) cat("    seed_windows=", nrow(seed_windows), " expand_windows=", nrow(expand_windows), " merge_dist_ws=", merge_dist_ws, "\n", sep = "")
                     if (nrow(seed_windows) > 0 && !is.null(merge_dist_ws) && merge_dist_ws > 0) {
                         res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws)
                         if (nrow(res$windows) > 0) {
