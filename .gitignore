@@ -93,6 +93,8 @@ renv/library/
 # --- Project-specific ---
 scratch.md
 help/
+*bak/
+*backup/
 reads/*
 primers/*
 
