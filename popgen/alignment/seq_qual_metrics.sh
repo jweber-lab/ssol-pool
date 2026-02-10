@@ -334,9 +334,10 @@ for i in "${!BAM_FILES[@]}"; do
         ) > "$out_tsv"
         rm -f "$depth_tsv" "$mapq_tsv"
         # Optional: sort by reference chromosome order (from .fai)
+        # Prepend order to header too so cut -f2- does not drop chr from the header
         if [[ -n "$REFERENCE_GENOME" ]] && [[ -f "${REFERENCE_GENOME}.fai" ]]; then
             log "  Sorting by reference chromosome order"
-            awk 'NR==FNR{ord[$1]=NR; next} FNR==1{print; next} {print (ord[$1]?ord[$1]:999999), $0}' \
+            awk 'NR==FNR{ord[$1]=NR; next} FNR==1{print 0, $0; next} {print (ord[$1]?ord[$1]:999999), $0}' \
                 "${REFERENCE_GENOME}.fai" "$out_tsv" | sort -k1,1n -k3,3n -k4,4n | cut -f2- > "${out_tsv}.tmp" && mv "${out_tsv}.tmp" "$out_tsv"
         fi
         log "  Wrote $out_tsv"
