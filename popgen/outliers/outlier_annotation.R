@@ -5,7 +5,12 @@
 #
 # Annotate outlier regions: extract sequences, BLAST per region against
 # multiple DBs (from config file), map hits to GFF annotations (genes, GO).
-# Output: overlapping genes, GO terms, and optional variant summary.
+# Output: overlapping genes with optional region metadata (Option A).
+#
+# Regions file (e.g. from identify_outliers outlier_regions*.csv) may contain
+# extra columns (outlier_stat, n_windows, region_mean_coverage, etc.); when
+# present they are preserved and included in the output so users can link
+# genes back to region statistics.
 #
 # BLAST config: YAML or JSON with list of entries:
 #   - db_path: path to BLAST DB (or FASTA for makeblastdb)
@@ -44,7 +49,9 @@ read_blast_config <- function(path) {
   dbs
 }
 
-# Read regions file (CSV/TSV from identify_outliers: chr, region_start, region_end, ...)
+# Read regions file (CSV/TSV from identify_outliers: chr, region_start, region_end, ...).
+# Retains extra columns when present (e.g. outlier_stat, n_windows, region_mean_coverage,
+# region_mean_mapping_quality, region_n_snps) for pass-through to output.
 read_regions <- function(path) {
   delim <- if (grepl("\t", readLines(path, n = 1))) "\t" else ","
   d <- if (delim == "\t") read_tsv(path, show_col_types = FALSE) else read_csv(path, show_col_types = FALSE)
@@ -57,7 +64,7 @@ read_regions <- function(path) {
   d <- d %>% rename(chr = !!chr_col, region_start = !!start_col, region_end = !!end_col)
   d$region_start <- as.numeric(d$region_start)
   d$region_end <- as.numeric(d$region_end)
-  d %>% filter(!is.na(chr), !is.na(region_start), !is.na(region_end))
+  d %>% filter(!is.na(.data$chr), !is.na(.data$region_start), !is.na(.data$region_end))
 }
 
 # Write region FASTA using samtools faidx (reference must be indexed)
@@ -120,7 +127,7 @@ hits_to_genes <- function(blast_tsv, gff_path) {
 
 # Main
 option_list <- list(
-  make_option(c("--regions"), type = "character", default = NULL, help = "Regions CSV/TSV (from identify_outliers outlier_regions*.csv)"),
+  make_option(c("--regions"), type = "character", default = NULL, help = "Regions CSV/TSV (from identify_outliers outlier_regions*.csv). Extra columns (outlier_stat, n_windows, region_mean_*, etc.) are preserved in output when present."),
   make_option(c("--reference"), type = "character", default = NULL, help = "Reference genome FASTA (indexed with samtools faidx)"),
   make_option(c("--blast-config"), type = "character", default = NULL, help = "BLAST config YAML/JSON (list of db_path, name, gff_path)"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory"),
@@ -165,6 +172,14 @@ for (db in config) {
 
 if (length(all_genes) > 0) {
   genes_out <- bind_rows(all_genes)
+  # Option A: add region columns to each row (region_chr, region_start, region_end, and
+  # any pass-through columns from the regions file when present)
+  region_pass <- c("outlier_stat", "n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")
+  region_lookup <- regions %>%
+    select("qseqid", "chr", "region_start", "region_end", any_of(region_pass)) %>%
+    rename(region_chr = .data$chr)
+  genes_out <- genes_out %>%
+    left_join(region_lookup, by = "qseqid", multiple = "first")
   genes_file <- file.path(opts$`output-dir`, "outlier_regions_genes.csv")
   write_csv(genes_out, genes_file)
   message("Wrote ", genes_file, " (", nrow(genes_out), " hit-gene rows)")

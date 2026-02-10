@@ -27,6 +27,8 @@ MIN_SNPS=""
 MAX_SNPS=""
 MIN_REGION_SNPS=""
 MAX_REGION_SNPS=""
+MIN_TOTAL_SITES=""
+MAX_TOTAL_SITES=""
 REFERENCE_GENOME=""
 HIGH_QUANTILE=""
 LOW_QUANTILE=""
@@ -61,7 +63,7 @@ Usage: $0 [OPTIONS]
 Required (at least one):
   --fst-dir DIR              Directory containing FST TSV files (from calculate_fst.sh)
   --diversity-dir DIR        Directory containing diversity TSV files (from calculate_pi_theta.sh)
-  --hdf5-dir DIR             Directory containing collated HDF5 (diversity_w*.h5, fst_w*.h5)
+  --hdf5-dir DIR             Directory containing collated HDF5 from collate.sh (diversity_w*_s*.h5, fst_w*.h5, pbe_*.h5; columns as in collate.R)
 
 Required:
   --output-dir DIR           Output directory for results
@@ -97,6 +99,8 @@ Optional:
   --max-snps N               Maximum SNPs per window for seed/expansion (optional)
   --min-region-snps N        Minimum total SNPs in a region to output (optional)
   --max-region-snps N        Maximum total SNPs in a region to output (optional)
+  --min-total-sites N       Minimum total sites per window, n_total (optional)
+  --max-total-sites N       Maximum total sites per window, n_total (optional)
   --verbose                  Enable verbose output for debugging
   --rscript PATH             Path to identify_outliers.R (default: same directory as this script)
   --dry-run                  Preview commands without executing (dry-run mode)
@@ -220,6 +224,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-region-snps)
             MAX_REGION_SNPS="$2"
+            shift 2
+            ;;
+        --min-total-sites)
+            MIN_TOTAL_SITES="$2"
+            shift 2
+            ;;
+        --max-total-sites)
+            MAX_TOTAL_SITES="$2"
             shift 2
             ;;
         --output-dir)
@@ -466,6 +478,8 @@ if [[ -n "$MERGE_DISTANCE" ]]; then
     [[ -n "$MAX_SNPS" ]] && R_CMD+=(--max-snps "$MAX_SNPS")
     [[ -n "$MIN_REGION_SNPS" ]] && R_CMD+=(--min-region-snps "$MIN_REGION_SNPS")
     [[ -n "$MAX_REGION_SNPS" ]] && R_CMD+=(--max-region-snps "$MAX_REGION_SNPS")
+    [[ -n "$MIN_TOTAL_SITES" ]] && R_CMD+=(--min-total-sites "$MIN_TOTAL_SITES")
+    [[ -n "$MAX_TOTAL_SITES" ]] && R_CMD+=(--max-total-sites "$MAX_TOTAL_SITES")
 fi
 
 if [[ -n "$REFERENCE_GENOME" ]]; then

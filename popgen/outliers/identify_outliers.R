@@ -10,6 +10,11 @@
 # Usage: Rscript identify_outliers.R --hdf5-dir DIR --output-dir DIR
 #        --high-quantile Q --low-quantile Q [--statistics pi,theta,tajima_d] [options]
 #
+# When using --hdf5-dir, expected files are collate output: diversity_w*_s*.h5,
+# fst_w*.h5 or fst_single.h5, pbe_*.h5, with group /windows or /sites and columns
+# as documented in collate.R (e.g. chr, start, end, sample/pop1,pop2, stat values,
+# *_rank, *_quantile, and where present: n_snps, n_total, mean_coverage, mean_mapping_quality).
+#
 # Output files (see identify_outliers.sh for option summary):
 #   outlier_windows_*.csv   One row per (chr, start, end) that is an outlier in at least one statistic.
 #     Columns: chr, start, end; then value columns samplename.statname (e.g. Cheney.pi),
@@ -89,6 +94,10 @@ option_list <- list(
                 help="Minimum total SNPs in a region to output the region [optional]", metavar="NUMBER"),
     make_option(c("--max-region-snps"), type="numeric", default=NULL,
                 help="Maximum total SNPs in a region to output the region [optional]", metavar="NUMBER"),
+    make_option(c("--min-total-sites"), type="numeric", default=NULL,
+                help="Minimum total sites per window (n_total: passed + invariant) for seed/expansion [optional]", metavar="NUMBER"),
+    make_option(c("--max-total-sites"), type="numeric", default=NULL,
+                help="Maximum total sites per window (n_total) for seed/expansion [optional]", metavar="NUMBER"),
     make_option(c("--verbose"), action="store_true", default=FALSE,
                 help="Enable verbose output for debugging", metavar="FLAG")
 )
@@ -289,7 +298,7 @@ read_diversity_from_h5 <- function(hdf5_dir, selected_window_size = NULL) {
             qcol <- paste0(col, "_quantile")
             if (qcol %in% names(grp)) d[[qcol]] <- grp[[qcol]][]
         }
-        for (col in c("mean_coverage", "mean_mapping_quality", "n_snps", "SNP", "total")) {
+        for (col in c("mean_coverage", "mean_mapping_quality", "n_snps", "n_total")) {
             if (col %in% names(grp)) d[[col]] <- grp[[col]][]
         }
         h5$close_all()
@@ -540,6 +549,20 @@ passes_quality_filters <- function(df, opts) {
     if (!is.null(opts$`max-snps`)) {
         if ("n_snps" %in% colnames(df)) {
             pass <- pass & (df$n_snps <= opts$`max-snps` | is.na(df$n_snps))
+        } else {
+            pass <- rep(FALSE, nrow(df))
+        }
+    }
+    if (!is.null(opts$`min-total-sites`)) {
+        if ("n_total" %in% colnames(df)) {
+            pass <- pass & (df$n_total >= opts$`min-total-sites` | is.na(df$n_total))
+        } else {
+            pass <- rep(FALSE, nrow(df))
+        }
+    }
+    if (!is.null(opts$`max-total-sites`)) {
+        if ("n_total" %in% colnames(df)) {
+            pass <- pass & (df$n_total <= opts$`max-total-sites` | is.na(df$n_total))
         } else {
             pass <- rep(FALSE, nrow(df))
         }

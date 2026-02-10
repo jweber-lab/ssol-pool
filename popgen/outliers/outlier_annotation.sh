@@ -26,7 +26,8 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Required:
-  --regions FILE         Regions CSV/TSV (from identify_outliers: outlier_regions*.csv)
+  --regions FILE         Regions CSV/TSV (from identify_outliers: outlier_regions*.csv).
+                          Extra columns (e.g. outlier_stat, n_windows, region_mean_*) are preserved in output.
   --reference FILE       Reference genome FASTA (must have .fai index)
   --blast-config FILE    BLAST config YAML or JSON (list of db_path, name, gff_path)
 
