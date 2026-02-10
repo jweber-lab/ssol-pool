@@ -84,6 +84,7 @@ renv/library/
 *.h5
 *.hdf5
 *.he5
+*.json
 *.yaml
 *.yml
 !sample_info.csv
@@ -156,3 +157,4 @@ AGENTS.md
 *.fastq.gz.gzj
 *.fastq.gz.gzk
 *.fastq.gz.gzl
+ 
