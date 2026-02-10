@@ -54,13 +54,7 @@ The analysis scripts calculate:
 
 ## Scripts
 
-### seq_qual_metrics.sh
-
-Computes per-window averages for **coverage** and **mapping quality** using samtools. Output TSV is compatible with collate (chr, start, end, sample, mean_coverage, mean_mapping_quality).
-
-- **Input**: BAM file(s) via `--bam` or `--sample-info` CSV (columns: sample_name, bam_file).
-- **Output**: `{output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv`.
-- **Options**: `--reference-genome` (optional; use .fai for chromosome order in output), `--window-size`, `--step-size`, `--threads`.
+**Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [popgen/alignment/](popgen/alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`.
 
 ### variant_call.sh
 
@@ -80,7 +74,7 @@ bcftools index -f calls_filtered.bcf
 - Haploid pools: use `--ploidy 1`.
 - Stricter quality: `bcftools view -i 'QUAL>=30 && DP>20' calls.bcf -Ob -o calls_strict.bcf`
 - Exclude very low-frequency alleles (e.g. AF &lt; 0.01): `bcftools view -i 'QUAL>=20 && DP>10 && INFO/AF>0.01' calls.bcf -Ob -o calls_af01.bcf` (requires AF in INFO; add with bcftools +fill-tags or similar if needed).
-- For very high coverage, increase `--max-depth` (e.g. 2000) or set it based on average depth from `seq_qual_metrics.sh` output.
+- For very high coverage, increase `--max-depth` (e.g. 2000) or set it based on average depth from `seq_qual_metrics.sh` (in popgen/alignment/) output.
 
 ### collate.sh / collate.R
 
@@ -88,6 +82,7 @@ Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s).
 
 - **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`.
 - **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`.
+- **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE) is NA/NaN before ranking and collation.
 - **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out -o collated`
 
 ### calculate_pi_theta.sh

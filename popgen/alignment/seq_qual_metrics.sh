@@ -27,6 +27,11 @@ THREADS=1
 DRY_RUN=false
 SAMPLE_NAMES=()
 
+# Log file (set after output-dir is known)
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE=""
+LOG_REDIRECT_ACTIVE=false
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -54,6 +59,7 @@ Optional:
 Output (per sample, per window/step combination):
   {output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv  (one file per --window-size)
   Columns: chr, start, end, sample, mean_coverage, mean_mapping_quality
+  Logs: {output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log
 
 Example:
   $0 --bam sample1.bam --bam sample2.bam -o out --window-size 10000 --step-size 5000
@@ -62,10 +68,30 @@ Example:
 EOF
 }
 
-log() { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_dry_run() { echo -e "${YELLOW}[DRY-RUN]${NC} $1"; }
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
+    if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    fi
+}
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+    if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        echo "[ERROR] $1" >> "$LOG_FILE"
+    fi
+}
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+    if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        echo "[WARN] $1" >> "$LOG_FILE"
+    fi
+}
+log_dry_run() {
+    echo -e "${YELLOW}[DRY-RUN]${NC} $1"
+    if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        echo "[DRY-RUN] $1" >> "$LOG_FILE"
+    fi
+}
 
 dry_run_cmd() {
     if [[ "$DRY_RUN" == true ]]; then
@@ -102,6 +128,28 @@ if [[ -z "$OUTPUT_DIR" ]]; then
     exit 1
 fi
 
+# Initialize log file
+mkdir -p "$OUTPUT_DIR"
+LOG_DIR="${OUTPUT_DIR}/log"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+LOG_FILE="${LOG_DIR}/${SCRIPT_NAME%.*}_${TIMESTAMP}.log"
+if [[ "$DRY_RUN" == false ]]; then
+    touch "$LOG_FILE"
+    {
+        echo "=========================================="
+        echo "$SCRIPT_NAME"
+        echo "Started: $(date +'%Y-%m-%d %H:%M:%S')"
+        echo "Log file: $LOG_FILE"
+        echo "=========================================="
+    } >> "$LOG_FILE"
+    log "Log file: $LOG_FILE"
+    exec 3>&1 4>&2
+    exec 1> >(tee -a "$LOG_FILE" >&3)
+    exec 2>&1
+    LOG_REDIRECT_ACTIVE=true
+fi
+
 # Resolve BAMs and sample names from CSV if provided
 if [[ -n "$SAMPLE_INFO_CSV" ]]; then
     if [[ ! -f "$SAMPLE_INFO_CSV" ]]; then
@@ -132,22 +180,24 @@ if [[ ${#BAM_FILES[@]} -eq 0 ]]; then
 fi
 
 check_command samtools
-mkdir -p "$OUTPUT_DIR"
 
-# Build window/step arrays (default: one scale 10000/5000)
+# Build window/step arrays (default: one scale 10000/5000; else step = window/2 when not specified)
 declare -a WINDOW_SIZE_ARRAY
 declare -a STEP_SIZE_ARRAY
 if [[ ${#WINDOW_SIZES[@]} -eq 0 ]]; then
     WINDOW_SIZE_ARRAY=(10000)
     STEP_SIZE_ARRAY=(5000)
+    log "Using default window=10000, step=5000 (step = window/2)"
 elif [[ ${#WINDOW_SIZES[@]} -gt 0 ]]; then
     WINDOW_SIZE_ARRAY=("${WINDOW_SIZES[@]}")
     STEP_SIZE_ARRAY=()
     for i in "${!WINDOW_SIZE_ARRAY[@]}"; do
         if [[ ${#STEP_SIZES[@]} -gt i && -n "${STEP_SIZES[$i]:-}" ]]; then
             STEP_SIZE_ARRAY[$i]="${STEP_SIZES[$i]}"
+            log "Window/step scale $((i+1)): window=${WINDOW_SIZE_ARRAY[$i]}, step=${STEP_SIZES[$i]} (from --step-size)"
         else
             STEP_SIZE_ARRAY[$i]=$((${WINDOW_SIZE_ARRAY[$i]} / 2))
+            log "Window/step scale $((i+1)): window=${WINDOW_SIZE_ARRAY[$i]}, step=${STEP_SIZE_ARRAY[$i]} (default: step = window/2)"
         fi
     done
 fi

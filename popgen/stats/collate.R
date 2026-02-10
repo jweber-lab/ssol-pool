@@ -9,12 +9,12 @@
 # dirs are skipped without failing.
 # Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR]
 #        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [options]
+# Options: --drop-all-na  Drop rows/sites where every statistic value is NA before ranking/collation.
 #
 # Output files:
 #   diversity_w{W}_s{S}.h5  (windowed only; single is not supported)
 #     Group /windows: chr, start, end, sample, pi, theta, tajima_d,
-#     *_rank, *_quantile, mean_coverage, mean_mapping_quality, n_snps,
-#     SNP (total.passed), total (total.passed + total.invariant)
+#     *_rank, *_quantile, mean_coverage, mean_mapping_quality, n_snps (total.passed), n_total (total.passed + total.invariant)
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
 #   fst_w{W}_s{S}.h5  (or fst_single.h5)
@@ -61,19 +61,24 @@ read_tab <- function(path, delim = NULL, na = c("", "NA", "nan", "NaN", "NAN")) 
 }
 
 # Rank and quantile within groups (0-1 quantile: (rank - 0.5) / n to avoid 0/1)
+# When n==0 (all NA in group), quantile is set to NA to avoid division by zero.
 add_rank_quantile <- function(data, group_vars, value_col) {
   if (length(group_vars) == 0) {
     r <- rank(data[[value_col]], ties.method = "average", na.last = "keep")
     n <- sum(!is.na(data[[value_col]]))
     data[[paste0(value_col, "_rank")]] <- r
-    data[[paste0(value_col, "_quantile")]] <- (r - 0.5) / n
+    data[[paste0(value_col, "_quantile")]] <- if (n > 0) (r - 0.5) / n else NA_real_
     return(data)
   }
   data %>%
     group_by(across(all_of(group_vars))) %>%
     mutate(
       !!paste0(value_col, "_rank") := rank(.data[[value_col]], ties.method = "average", na.last = "keep"),
-      !!paste0(value_col, "_quantile") := (rank(.data[[value_col]], ties.method = "average", na.last = "keep") - 0.5) / sum(!is.na(.data[[value_col]]))
+      !!paste0(value_col, "_quantile") := {
+        n_val <- sum(!is.na(.data[[value_col]]))
+        rv <- rank(.data[[value_col]], ties.method = "average", na.last = "keep")
+        ifelse(n_val > 0, (rv - 0.5) / n_val, NA_real_)
+      }
     ) %>%
     ungroup()
 }
@@ -215,8 +220,16 @@ find_diversity_files <- function(diversity_dir) {
       next
     }
     ps <- parse_window_step(basename(f))
-    sample_name <- sub("^([A-Za-z0-9_]+)_diversity.*", "\\1", tools::file_path_sans_ext(basename(f)), ignore.case = TRUE)
-    if (sample_name == basename(f)) sample_name <- "unknown"
+    base <- tools::file_path_sans_ext(basename(f))
+    sample_name <- base
+    if (grepl("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", base, ignore.case = TRUE)) {
+      sample_name <- sub("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", "\\1", base, ignore.case = TRUE)
+    } else if (grepl("^diversity_w[0-9]+_s[0-9]+_(.+)$", base, ignore.case = TRUE)) {
+      sample_name <- sub("^diversity_w[0-9]+_s[0-9]+_(.+)$", "\\1", base, ignore.case = TRUE)
+    } else {
+      sample_name <- sub("^([A-Za-z0-9_]+)_diversity.*", "\\1", base, ignore.case = TRUE)
+      if (sample_name == base) sample_name <- "unknown"
+    }
     out[[length(out) + 1L]] <- list(path = f, sample = sample_name, window_size = ps$window_size, step_size = ps$step_size)
   }
   out
@@ -240,16 +253,20 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   passed_col <- intersect(c("total.passed", "total_passed"), names(d))[1L]
   invariant_col <- intersect(c("total.invariant", "total_invariant"), names(d))[1L]
   if (!is.na(passed_col)) {
-    d$SNP <- as.numeric(d[[passed_col]])
-    d$n_snps <- d$SNP
+    d$n_snps <- as.numeric(d[[passed_col]])
   }
   if (!is.na(passed_col) && !is.na(invariant_col)) {
-    d$total <- as.numeric(d[[passed_col]]) + as.numeric(d[[invariant_col]])
+    d$n_total <- as.numeric(d[[passed_col]]) + as.numeric(d[[invariant_col]])
   }
-  d$sample <- sample_name
+  # Use sample from CSV if present and non-NA; otherwise use name derived from path/filename
+  if (!("sample" %in% names(d) && any(!is.na(d$sample)))) {
+    d$sample <- sample_name
+  } else {
+    d$sample <- as.character(d$sample)
+  }
   d$window_size <- window_size
   d$step_size <- step_size
-  d %>% select(any_of(c("chr", "pos", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "SNP", "total")))  # nolint: object_usage_linter
+  d %>% select(any_of(c("chr", "pos", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
 }
 
 collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, write_summary = TRUE) {
@@ -273,8 +290,8 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     d <- d %>% filter(!is.na(chr), !is.na(pos))
     if (!"start" %in% names(d)) d$start <- d$pos
     if (!"end" %in% names(d)) d$end <- d$pos
-    if (!"n_snps" %in% names(d) && !"SNP" %in% names(d)) {
-      message("Diversity: no SNP/total columns (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
+    if (!"n_snps" %in% names(d)) {
+      message("Diversity: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
     }
     for (stat in c("pi", "theta", "tajima_d")) {
       if (stat %in% names(d)) d <- add_rank_quantile(d, c("sample", "window_size", "step_size"), stat)
@@ -310,7 +327,7 @@ write_diversity_h5 <- function(d, path) {
   grp[["start"]] <- as.numeric(d$start)
   grp[["end"]] <- as.numeric(d$end)
   grp[["sample"]] <- as.character(d$sample)
-  for (col in c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile", "tajima_d_rank", "tajima_d_quantile", "mean_coverage", "mean_mapping_quality", "n_snps", "SNP", "total")) {
+  for (col in c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile", "tajima_d_rank", "tajima_d_quantile", "mean_coverage", "mean_mapping_quality", "n_snps", "n_total")) {
     if (col %in% names(d)) grp[[col]] <- as.numeric(d[[col]])
   }
   invisible()
@@ -341,7 +358,7 @@ find_fst_files <- function(fst_dir) {
   out
 }
 
-process_one_fst <- function(path, window_size = NULL, step_size = NULL) {
+process_one_fst <- function(path, window_size = NULL, step_size = NULL, drop_all_na = FALSE) {
   d <- read_tab(path)
   d <- d %>% rename_all(tolower)
   chr_col <- intersect(c("chr", "chromosome", "chrom"), names(d))[1L]
@@ -361,6 +378,13 @@ process_one_fst <- function(path, window_size = NULL, step_size = NULL) {
     d[[fc]] <- as.numeric(d[[fc]])
     pair_name <- gsub("\\.fst$|_fst$", "", fc, ignore.case = TRUE)
     names(d)[names(d) == fc] <- paste0("fst_", pair_name)
+  }
+  if (drop_all_na) {
+    fst_stat_cols <- grep("^fst_.+", names(d), value = TRUE)
+    fst_stat_cols <- fst_stat_cols[!grepl("_rank$|_quantile$", fst_stat_cols)]
+    if (length(fst_stat_cols) > 0) {
+      d <- d[rowSums(!is.na(d[, fst_stat_cols, drop = FALSE])) > 0, , drop = FALSE]
+    }
   }
   d
 }
@@ -398,14 +422,14 @@ write_fst_h5 <- function(d, out_path, group_name = "windows") {
   message("Wrote ", out_path)
 }
 
-collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_tsv_dir = NULL) {
+collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_tsv_dir = NULL, drop_all_na = FALSE) {
   infos <- find_fst_files(fst_dir)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
   for (scale in names(by_scale)) {
     scale_infos <- by_scale[[scale]]
     long_list <- lapply(scale_infos, function(x) {
-      d <- process_one_fst(x$path, x$window_size, x$step_size)
+      d <- process_one_fst(x$path, x$window_size, x$step_size, drop_all_na = drop_all_na)
       if (is.null(d)) return(NULL)
       fst_wide_to_long(d)
     })
@@ -417,9 +441,8 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
       group_vars <- intersect(group_vars, names(d_long))
       d_long <- add_rank_quantile(d_long, group_vars, "fst")
     }
-    if ("n_snps" %in% names(d_long) && !"SNP" %in% names(d_long)) d_long$SNP <- d_long$n_snps
-    if (!"n_snps" %in% names(d_long) && !"SNP" %in% names(d_long)) {
-      message("FST: no SNP column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
+    if (!"n_snps" %in% names(d_long)) {
+      message("FST: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
     }
     is_single <- scale == "single"
     if (is_single && single_position_merged && !is.null(single_position_data)) {
@@ -487,7 +510,7 @@ parse_trio_pops <- function(trio_name) {
   }
 }
 
-read_one_pbe <- function(path, trio_name) {
+read_one_pbe <- function(path, trio_name, drop_all_na = FALSE) {
   d <- read_tab(path)
   d <- d %>% rename_all(tolower)
   chr_col <- intersect(c("chr", "chromosome"), names(d))[1L]
@@ -498,6 +521,9 @@ read_one_pbe <- function(path, trio_name) {
   d$pos <- as.numeric(d$pos)
   if (!"start" %in% names(d)) d$start <- d$pos
   if (!"end" %in% names(d)) d$end <- d$pos
+  if (drop_all_na && "pbe" %in% names(d)) {
+    d <- d %>% filter(!is.na(.data$pbe))
+  }
   if ("pbe" %in% names(d)) d <- add_rank_quantile(d, character(0), "pbe")
   pops <- parse_trio_pops(trio_name)
   d$pop1 <- pops$pop1
@@ -541,14 +567,14 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   message("Wrote ", out_path)
 }
 
-collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL) {
+collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, drop_all_na = FALSE) {
   infos <- find_pbe_files(pbe_dir)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
   for (scale in names(by_scale)) {
     scale_infos <- by_scale[[scale]]
     tbl_list <- lapply(scale_infos, function(x) {
-      d <- read_one_pbe(x$path, x$trio_name)
+      d <- read_one_pbe(x$path, x$trio_name, drop_all_na = drop_all_na)
       if (is.null(d)) return(NULL)
       list(trio_name = x$trio_name, data = d)
     })
@@ -726,6 +752,7 @@ option_list <- list(
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
   make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Merge per-locus FST, PBE, and variant TSV into single_position.h5"),
   make_option(c("--no-summary"), action = "store_true", default = FALSE, help = "Do not write companion *_summary.tsv files"),
+  make_option(c("--drop-all-na"), action = "store_true", default = FALSE, help = "Drop rows/sites where every statistic value (FST or PBE) is NA before ranking and collation"),
   make_option(c("--verbose"), action = "store_true", default = FALSE, help = "Verbose")
 )
 parser <- OptionParser(usage = "usage: %prog [options]", option_list = option_list)
@@ -738,16 +765,17 @@ if (is.null(opts$`diversity-dir`) && is.null(opts$`fst-dir`) && is.null(opts$`pb
 dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
 write_summary <- !opts$`no-summary`
 single_position_merged <- opts$`single-position-merged`
+drop_all_na <- opts$`drop-all-na`
 single_position_data <- if (single_position_merged) list(fst = NULL, pbe = NULL, variants = NULL) else NULL
 
 if (!is.null(opts$`diversity-dir`) && dir.exists(opts$`diversity-dir`)) {
   collate_diversity(opts$`diversity-dir`, opts$`output-dir`, opts$`seq-qual-dir`, opts$`variant-tsv-dir`, write_summary = write_summary)
 }
 if (!is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`)) {
-  collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`)
+  collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`, drop_all_na = drop_all_na)
 }
 if (!is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
-  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data)
+  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, drop_all_na = drop_all_na)
 }
 if (!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) {
   collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data)

@@ -12,6 +12,7 @@
 #
 # Structure: input, calculation, and output are separated.
 # Output format: csv, tsv, or hdf5 (requires hdf5r when using hdf5).
+# Option --drop-all-na: drop rows where any of fst_12/fst_13/fst_23 is NA; skip output if no rows remain.
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -180,6 +181,8 @@ option_list <- list(
                 help = "Optional prefix for output files", metavar = "PREFIX"),
     make_option(c("--median-scope"), type = "character", default = "genome",
                 help = "Medians for PBE: genome or chromosome [default: %default]", metavar = "SCOPE"),
+    make_option(c("--drop-all-na"), action = "store_true", default = FALSE,
+                help = "Drop rows where any of fst_12/fst_13/fst_23 is NA (keep only rows with all three non-NA); skip output if no rows remain"),
     make_option(c("--verbose"), action = "store_true", default = FALSE,
                 help = "Verbose output")
 )
@@ -211,6 +214,16 @@ if (!dir.exists(opts$`output-dir`)) {
 if (opts$verbose) cat("Reading FST file:", opts$`fst-file`, "\n")
 dat <- read_fst_for_pbs(opts$`fst-file`, opts$`pop1-name`, opts$`pop2-name`, opts$`pop3-name`)
 
+if (opts$`drop-all-na`) {
+    n_before <- nrow(dat)
+    dat <- dat %>% filter(!is.na(fst_12) & !is.na(fst_13) & !is.na(fst_23))
+    n_dropped <- n_before - nrow(dat)
+    message("Dropped ", n_dropped, " rows with NA in any of fst_12/fst_13/fst_23")
+}
+
+if (nrow(dat) == 0) {
+    warning("No rows remaining after dropping NA; skipping output.")
+} else {
 # ---- CALCULATION ----
 dat$T12 <- fst_to_branch(dat$fst_12)
 dat$T13 <- fst_to_branch(dat$fst_13)
@@ -254,4 +267,5 @@ if (fmt == "hdf5") {
     write_table_format(out_names[, pbe_cols], pbe_path, format = fmt)
     cat("Written PBS:", pbs_path, "\n")
     cat("Written PBE:", pbe_path, "\n")
+}
 }

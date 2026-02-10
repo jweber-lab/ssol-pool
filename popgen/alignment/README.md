@@ -233,6 +233,16 @@ Optional: `--reference ref.fa` (with `ref.fa.fai`) adds an `estimated_mean_depth
 
 **Output:** Per-sample TSV under `{output_dir}/{sample}/mapq_threshold_counts.tsv` and a combined `mapq_threshold_counts_all.tsv` with columns: `mapq_threshold`, `n_mapped_reads`, `fraction_retained` (and optionally `estimated_mean_depth`). Plot these vs threshold to pick a cutoff; the pipeline mpileup (Step 7) and downstream variant calling typically use **MAPQ ≥ 20** by default.
 
+### Per-window coverage and mapping quality (seq_qual_metrics.sh)
+
+**`seq_qual_metrics.sh`** computes per-window averages for **coverage** and **mapping quality** using samtools. Output TSV is compatible with collate (in popgen/stats/) for merging into diversity HDF5 via `--seq-qual-dir`.
+
+- **Input**: BAM file(s) via `--bam` or `--sample-info` CSV (columns: sample_name, bam_file).
+- **Output**: `{output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv` (chr, start, end, sample, mean_coverage, mean_mapping_quality).
+- **Options**: `--reference-genome` (optional; use .fai for chromosome order), `--window-size`, `--step-size` (default: window/2), `--threads`. Logs: `{output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log`.
+
+Use the same window/step as your diversity runs (e.g. `--window-size 1000 --step-size 500`) so collate can join qual data to diversity windows.
+
 ### Optional: Sync File Generation
 Sync files can be generated using either grenedalf (recommended, faster) or popoolation2 (fallback, for backward compatibility). If `--use-grenedalf-sync` is specified and grenedalf is available, grenedalf will be used. Otherwise, if popoolation2 JAR is provided, it will be used. Sync files are optional if using grenedalf directly with BAM files for downstream analyses.
 

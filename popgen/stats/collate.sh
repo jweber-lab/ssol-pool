@@ -25,6 +25,7 @@ RSCRIPT=""
 DRY_RUN=false
 SINGLE_POSITION_MERGED=false
 NO_SUMMARY=false
+DROP_ALL_NA=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -47,6 +48,7 @@ Optional:
   --rscript PATH         Path to Rscript [default: Rscript]
   --single-position-merged  Merge per-locus FST, PBE, and variant TSV into single_position.h5
   --no-summary           Do not write companion *_summary.tsv files
+  --drop-all-na          Drop rows/sites where every statistic value (FST or PBE) is NA before ranking and collation
   --dry-run              Preview only
   -h, --help             Show this help
 
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --rscript) RSCRIPT="$2"; shift 2 ;;
         --single-position-merged) SINGLE_POSITION_MERGED=true; shift ;;
         --no-summary) NO_SUMMARY=true; shift ;;
+        --drop-all-na) DROP_ALL_NA=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
@@ -108,6 +111,7 @@ ARGS=()
 ARGS+=(--output-dir "$OUTPUT_DIR")
 [[ "$SINGLE_POSITION_MERGED" == true ]] && ARGS+=(--single-position-merged)
 [[ "$NO_SUMMARY" == true ]] && ARGS+=(--no-summary)
+[[ "$DROP_ALL_NA" == true ]] && ARGS+=(--drop-all-na)
 
 if [[ "$DRY_RUN" == true ]]; then
     log_dry_run "Would run: $RSCRIPT $COLLATE_R ${ARGS[*]}"

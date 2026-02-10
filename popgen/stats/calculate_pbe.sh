@@ -36,6 +36,7 @@ OUTPUT_DIR=""
 FILE_PREFIX=""
 OUTPUT_FORMAT="tsv"
 MEDIAN_SCOPE="genome"   # genome or chromosome
+DROP_ALL_NA=false
 DRY_RUN=false
 
 # Colors, used in logging messages
@@ -79,6 +80,7 @@ Optional:
   --file-prefix PREFIX        Prefix for output files (default: none)
   --output-format FMT         Output format: tsv, csv, or hdf5 (default: tsv)
   --median-scope SCOPE        Medians for PBE: genome (default) or chromosome
+  --drop-all-na               Drop rows with NA in any FST pair; skip output if no rows remain
   --dry-run                   Preview only, do not run
   -h, --help                  Show this help
 
@@ -315,6 +317,7 @@ while [[ $# -gt 0 ]]; do
         --file-prefix)   FILE_PREFIX="$2"; shift 2 ;;
         --output-format) OUTPUT_FORMAT="$2"; shift 2 ;;
         --median-scope)  MEDIAN_SCOPE="$2"; shift 2 ;;
+        --drop-all-na)   DROP_ALL_NA=true; shift ;;
         --dry-run)       DRY_RUN=true; shift ;;
         -h|--help)       usage; exit 0 ;;
         *)
@@ -518,6 +521,7 @@ for fi in "${!FST_FILES[@]}"; do
             --file-prefix "$out_prefix"
             --median-scope "$MEDIAN_SCOPE"
         )
+        [[ "$DROP_ALL_NA" == true ]] && R_ARGS+=(--drop-all-na)
         log "Running PBS/PBE for $fst_path | $p1 / $p2 / $p3 (prefix: $out_prefix)"
         if ! Rscript "$R_SCRIPT" "${R_ARGS[@]}"; then
             log_error "R script failed for $fst_path ($p1 / $p2 / $p3)"
