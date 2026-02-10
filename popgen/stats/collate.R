@@ -83,6 +83,58 @@ add_rank_quantile <- function(data, group_vars, value_col) {
     ungroup()
 }
 
+# Verbose diagnostics: NA consistency and value vs rank/quantile distinct counts.
+# Checks that NA does not propagate incorrectly (value NA => rank/quantile NA; value non-NA => rank/quantile non-NA when n>0).
+# Flags groups where n_distinct(value) > 1 but n_distinct(quantile) == 1 (repeated quantile despite varying values).
+diagnose_rank_quantile <- function(data, value_col, group_vars, label = value_col, verbose = FALSE) {
+  if (!verbose || is.null(data) || nrow(data) == 0) return(invisible(NULL))
+  rank_col <- paste0(value_col, "_rank")
+  quantile_col <- paste0(value_col, "_quantile")
+  if (!value_col %in% names(data) || !rank_col %in% names(data) || !quantile_col %in% names(data)) return(invisible(NULL))
+  # NA consistency: value NA should imply rank/quantile NA; value non-NA should imply rank/quantile non-NA (when group has n>0)
+  val_na <- is.na(data[[value_col]])
+  rank_na <- is.na(data[[rank_col]])
+  q_na <- is.na(data[[quantile_col]])
+  n_val_na_but_rank_ok <- sum(val_na & !rank_na)
+  n_val_na_but_q_ok <- sum(val_na & !q_na)
+  n_val_ok_but_rank_na <- sum(!val_na & rank_na)
+  n_val_ok_but_q_na <- sum(!val_na & q_na)
+  message("[verbose] ", label, " NA check: value_NA but rank_non-NA = ", n_val_na_but_rank_ok,
+          ", value_NA but quantile_non-NA = ", n_val_na_but_q_ok,
+          ", value_non-NA but rank_NA = ", n_val_ok_but_rank_na,
+          ", value_non-NA but quantile_NA = ", n_val_ok_but_q_na)
+  if (n_val_na_but_rank_ok > 0 || n_val_na_but_q_ok > 0 || n_val_ok_but_rank_na > 0 || n_val_ok_but_q_na > 0) {
+    message("[verbose] ", label, " WARNING: NA inconsistency between value and rank/quantile")
+  }
+  # Per-group distinct counts (or overall if no groups)
+  group_vars <- intersect(group_vars, names(data))
+  if (length(group_vars) == 0) {
+    n_val <- dplyr::n_distinct(data[[value_col]][!val_na])
+    n_rank <- dplyr::n_distinct(data[[rank_col]][!rank_na])
+    n_q <- dplyr::n_distinct(data[[quantile_col]][!q_na])
+    message("[verbose] ", label, " overall: n_row=", nrow(data), " n_distinct(value)=", n_val, " n_distinct(rank)=", n_rank, " n_distinct(quantile)=", n_q)
+    if (n_val > 1 && n_q == 1) message("[verbose] ", label, " WARNING: values vary but only one quantile (possible bug)")
+    return(invisible(NULL))
+  }
+  diag <- data %>%
+    group_by(across(all_of(group_vars))) %>%
+    summarise(
+      n = dplyr::n(),
+      n_distinct_val = length(unique(.data[[value_col]][!is.na(.data[[value_col]])])),
+      n_distinct_rank = length(unique(.data[[rank_col]][!is.na(.data[[rank_col]])])),
+      n_distinct_q = length(unique(.data[[quantile_col]][!is.na(.data[[quantile_col]])])),
+      .groups = "drop"
+    )
+  bad <- diag %>% filter(.data$n_distinct_val > 1 & .data$n_distinct_q == 1)
+  if (nrow(bad) > 0) {
+    message("[verbose] ", label, " WARNING: ", nrow(bad), " group(s) have n_distinct(value)>1 but n_distinct(quantile)=1 (first 3):")
+    print(head(bad, 3))
+  }
+  message("[verbose] ", label, " per-group summary (first 5 groups): n, n_distinct(value), n_distinct(rank), n_distinct(quantile)")
+  print(head(diag, 5))
+  invisible(NULL)
+}
+
 # Skewness (moment-based, base R)
 skewness <- function(x) {
   x <- x[!is.na(x)]
@@ -269,7 +321,7 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   d %>% select(any_of(c("chr", "pos", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
 }
 
-collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, write_summary = TRUE) {
+collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, write_summary = TRUE, verbose = FALSE) {
   infos <- find_diversity_files(diversity_dir)
   if (length(infos) == 0) return(invisible(NULL))
   scale_key <- vapply(infos, function(x) {
@@ -293,10 +345,25 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     if (!"n_snps" %in% names(d)) {
       message("Diversity: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
     }
+    n_before_rank <- nrow(d)
+    if (verbose) message("[verbose] diversity ", key, " before rank/quantile: n_row=", n_before_rank, " samples=", paste(unique(d$sample), collapse = ", "))
     for (stat in c("pi", "theta", "tajima_d")) {
-      if (stat %in% names(d)) d <- add_rank_quantile(d, c("sample", "window_size", "step_size"), stat)
+      if (stat %in% names(d)) {
+        d <- add_rank_quantile(d, c("sample", "window_size", "step_size"), stat)
+        diagnose_rank_quantile(d, stat, c("sample", "window_size", "step_size"), label = paste0("diversity_", key, "_", stat), verbose = verbose)
+      }
+    }
+    if (verbose && nrow(d) != n_before_rank) message("[verbose] WARNING: row count changed after add_rank_quantile: ", n_before_rank, " -> ", nrow(d))
+    if (verbose && "pi_quantile" %in% names(d)) {
+      by_sample_chr <- d %>% group_by(.data$sample, .data$chr) %>% summarise(n = dplyr::n(), n_distinct_pi = dplyr::n_distinct(.data$pi, na.rm = TRUE), n_distinct_pi_q = dplyr::n_distinct(.data$pi_quantile, na.rm = TRUE), .groups = "drop")
+      bad_sample_chr <- by_sample_chr %>% filter(.data$n_distinct_pi > 1 & .data$n_distinct_pi_q == 1)
+      if (nrow(bad_sample_chr) > 0) {
+        message("[verbose] diversity ", key, " sample+chr with varying pi but single pi_quantile: ", nrow(bad_sample_chr), " (first 5)")
+        print(head(bad_sample_chr, 5))
+      }
     }
     if (!is.null(seq_qual_dir) && dir.exists(seq_qual_dir)) {
+      n_before_join <- nrow(d)
       sq_files <- list.files(seq_qual_dir, pattern = "seq_qual_metrics.*\\.tsv$", full.names = TRUE, recursive = TRUE)
       sq_list <- lapply(sq_files, function(f) {
         x <- read_tab(f)
@@ -308,6 +375,7 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
         sq <- bind_rows(sq_list)
         d <- d %>% left_join(sq %>% select(all_of(c("chr", "start", "end", "sample", "mean_coverage", "mean_mapping_quality"))),
                              by = c("chr", "start", "end", "sample"))
+        if (verbose) message("[verbose] diversity ", key, " after seq_qual join: n_row ", n_before_join, " -> ", nrow(d), " (duplicates if >before)")
       }
     }
     out_path <- file.path(output_dir, paste0("diversity_", key, ".h5"))
@@ -422,7 +490,7 @@ write_fst_h5 <- function(d, out_path, group_name = "windows") {
   message("Wrote ", out_path)
 }
 
-collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_tsv_dir = NULL, drop_all_na = FALSE) {
+collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_tsv_dir = NULL, drop_all_na = FALSE, verbose = FALSE) {
   infos <- find_fst_files(fst_dir)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
@@ -436,10 +504,12 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
     long_list <- long_list[!vapply(long_list, is.null, logical(1L))]
     if (length(long_list) == 0) next
     d_long <- bind_rows(long_list)
+    if (verbose) message("[verbose] FST ", scale, " n_row=", nrow(d_long), " n_NA_fst=", sum(is.na(d_long$fst)), " (of ", length(d_long$fst), ")")
     if ("fst" %in% names(d_long)) {
       group_vars <- c("pop1", "pop2", "window_size", "step_size")
       group_vars <- intersect(group_vars, names(d_long))
       d_long <- add_rank_quantile(d_long, group_vars, "fst")
+      diagnose_rank_quantile(d_long, "fst", group_vars, label = paste0("fst_", scale), verbose = verbose)
     }
     if (!"n_snps" %in% names(d_long)) {
       message("FST: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
@@ -567,7 +637,7 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   message("Wrote ", out_path)
 }
 
-collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, drop_all_na = FALSE) {
+collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, drop_all_na = FALSE, verbose = FALSE) {
   infos <- find_pbe_files(pbe_dir)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
@@ -584,6 +654,11 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
     if (is_single && single_position_merged && !is.null(single_position_data)) {
       single_position_data$pbe <- tbl_list
       next
+    }
+    if (verbose && length(tbl_list) > 0) {
+      all_pbe <- bind_rows(lapply(tbl_list, function(x) x$data))
+      message("[verbose] PBE ", scale, " n_row=", nrow(all_pbe), " n_NA_pbe=", sum(is.na(all_pbe$pbe)), " (of ", length(all_pbe$pbe), ")")
+      diagnose_rank_quantile(all_pbe, "pbe", c("pop1", "pop2", "pop3"), label = paste0("pbe_", scale), verbose = verbose)
     }
     out_path <- file.path(output_dir, if (is_single) "pbe_single.h5" else paste0("pbe_", scale, ".h5"))
     grp_name <- if (is_single) "sites" else "windows"
@@ -769,13 +844,13 @@ drop_all_na <- opts$`drop-all-na`
 single_position_data <- if (single_position_merged) list(fst = NULL, pbe = NULL, variants = NULL) else NULL
 
 if (!is.null(opts$`diversity-dir`) && dir.exists(opts$`diversity-dir`)) {
-  collate_diversity(opts$`diversity-dir`, opts$`output-dir`, opts$`seq-qual-dir`, opts$`variant-tsv-dir`, write_summary = write_summary)
+  collate_diversity(opts$`diversity-dir`, opts$`output-dir`, opts$`seq-qual-dir`, opts$`variant-tsv-dir`, write_summary = write_summary, verbose = opts$verbose)
 }
 if (!is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`)) {
-  collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`, drop_all_na = drop_all_na)
+  collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
 }
 if (!is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
-  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, drop_all_na = drop_all_na)
+  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, drop_all_na = drop_all_na, verbose = opts$verbose)
 }
 if (!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) {
   collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data)
