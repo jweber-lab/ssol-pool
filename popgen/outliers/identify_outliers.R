@@ -210,15 +210,18 @@ get_chr_lengths <- function(data, reference_genome=NULL) {
 }
 
 # Strip diversity subdir-style prefix from sample name (e.g. diversity_w1000_s500_sampleCheney -> Cheney)
+# Vectorized: safe to use in mutate(sample = normalize_diversity_sample_from_h5(.data$sample))
 normalize_diversity_sample_from_h5 <- function(sample_name) {
-    s <- as.character(sample_name)
-    if (grepl("^diversity_w[0-9]+_s[0-9]+_sample", s, ignore.case = TRUE)) {
-        s <- sub("^diversity_w[0-9]+_s[0-9]+_sample", "", s, ignore.case = TRUE)
-    }
-    if (nchar(trimws(s)) == 0 || s == sample_name) {
-        return(normalize_sample_name(sample_name))
-    }
-    normalize_sample_name(s)
+    vapply(as.character(sample_name), function(one) {
+        s <- one
+        if (grepl("^diversity_w[0-9]+_s[0-9]+_sample", s, ignore.case = TRUE)) {
+            s <- sub("^diversity_w[0-9]+_s[0-9]+_sample", "", s, ignore.case = TRUE)
+        }
+        if (nchar(trimws(s)) == 0 || s == one) {
+            return(normalize_sample_name(one))
+        }
+        normalize_sample_name(s)
+    }, character(1), USE.NAMES = FALSE)
 }
 
 # Helper function to normalize sample names (from plot_fst.R)
