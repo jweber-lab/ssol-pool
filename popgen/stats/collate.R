@@ -61,26 +61,34 @@ read_tab <- function(path, delim = NULL, na = c("", "NA", "nan", "NaN", "NAN")) 
 }
 
 # Rank and quantile within groups (0-1 quantile: (rank - 0.5) / n to avoid 0/1)
-# When n==0 (all NA in group), quantile is set to NA to avoid division by zero.
+# When n==0 (all NA in group), quantile is set to NA. Where value is NA, rank and quantile are NA.
+# Uses one rank() call and case_when (not ifelse) so result is a proper vector per group.
 add_rank_quantile <- function(data, group_vars, value_col) {
+  rank_col <- paste0(value_col, "_rank")
+  quantile_col <- paste0(value_col, "_quantile")
   if (length(group_vars) == 0) {
     r <- rank(data[[value_col]], ties.method = "average", na.last = "keep")
     n <- sum(!is.na(data[[value_col]]))
-    data[[paste0(value_col, "_rank")]] <- r
-    data[[paste0(value_col, "_quantile")]] <- if (n > 0) (r - 0.5) / n else NA_real_
+    data[[rank_col]] <- r
+    data[[quantile_col]] <- if (n > 0) (r - 0.5) / n else NA_real_
+    data[[rank_col]][is.na(data[[value_col]])] <- NA_real_
+    data[[quantile_col]][is.na(data[[value_col]])] <- NA_real_
     return(data)
   }
   data %>%
     group_by(across(all_of(group_vars))) %>%
     mutate(
-      !!paste0(value_col, "_rank") := rank(.data[[value_col]], ties.method = "average", na.last = "keep"),
-      !!paste0(value_col, "_quantile") := {
-        n_val <- sum(!is.na(.data[[value_col]]))
-        rv <- rank(.data[[value_col]], ties.method = "average", na.last = "keep")
-        ifelse(n_val > 0, (rv - 0.5) / n_val, NA_real_)
-      }
+      .rv = rank(.data[[value_col]], ties.method = "average", na.last = "keep"),
+      .n_val = sum(!is.na(.data[[value_col]])),
+      !!rank_col := replace(.data$.rv, is.na(.data[[value_col]]), NA_real_),
+      !!quantile_col := case_when(
+        is.na(.data[[value_col]]) ~ NA_real_,
+        .data$.n_val == 0 ~ NA_real_,
+        TRUE ~ (.data$.rv - 0.5) / .data$.n_val
+      )
     ) %>%
-    ungroup()
+    ungroup() %>%
+    select(-any_of(c(".rv", ".n_val")))
 }
 
 # Verbose diagnostics: NA consistency and value vs rank/quantile distinct counts.
@@ -109,9 +117,9 @@ diagnose_rank_quantile <- function(data, value_col, group_vars, label = value_co
   # Per-group distinct counts (or overall if no groups)
   group_vars <- intersect(group_vars, names(data))
   if (length(group_vars) == 0) {
-    n_val <- dplyr::n_distinct(data[[value_col]][!val_na])
-    n_rank <- dplyr::n_distinct(data[[rank_col]][!rank_na])
-    n_q <- dplyr::n_distinct(data[[quantile_col]][!q_na])
+    n_val <- dplyr::n_distinct(data[[value_col]], na.rm = TRUE)
+    n_rank <- dplyr::n_distinct(data[[rank_col]], na.rm = TRUE)
+    n_q <- dplyr::n_distinct(data[[quantile_col]], na.rm = TRUE)
     message("[verbose] ", label, " overall: n_row=", nrow(data), " n_distinct(value)=", n_val, " n_distinct(rank)=", n_rank, " n_distinct(quantile)=", n_q)
     if (n_val > 1 && n_q == 1) message("[verbose] ", label, " WARNING: values vary but only one quantile (possible bug)")
     return(invisible(NULL))
@@ -120,9 +128,9 @@ diagnose_rank_quantile <- function(data, value_col, group_vars, label = value_co
     group_by(across(all_of(group_vars))) %>%
     summarise(
       n = dplyr::n(),
-      n_distinct_val = length(unique(.data[[value_col]][!is.na(.data[[value_col]])])),
-      n_distinct_rank = length(unique(.data[[rank_col]][!is.na(.data[[rank_col]])])),
-      n_distinct_q = length(unique(.data[[quantile_col]][!is.na(.data[[quantile_col]])])),
+      n_distinct_val = dplyr::n_distinct(.data[[value_col]], na.rm = TRUE),
+      n_distinct_rank = dplyr::n_distinct(.data[[rank_col]], na.rm = TRUE),
+      n_distinct_q = dplyr::n_distinct(.data[[quantile_col]], na.rm = TRUE),
       .groups = "drop"
     )
   bad <- diag %>% filter(.data$n_distinct_val > 1 & .data$n_distinct_q == 1)
@@ -170,6 +178,14 @@ h5_preview <- function(path, group_name = "windows") {
   message("  Preview (first 2 rows):")
   print(preview_df)
   invisible(NULL)
+}
+
+# Write a data frame to an HDF5 group: one dataset per column, character vs numeric by type.
+# Use for FST, PBE, variant, and single_position H5 writes so behavior is consistent.
+write_df_to_h5_group <- function(grp, d) {
+  for (col in names(d)) {
+    grp[[col]] <- if (is.character(d[[col]])) as.character(d[[col]]) else as.numeric(d[[col]])
+  }
 }
 
 # Summary companion: mean, median, variance, skew, q01, q05, q95, q99, n per stat (and optional group)
@@ -244,17 +260,24 @@ parse_window_step <- function(basename_file) {
   )
 }
 
+# Extract sample name from diversity subdir or filename (e.g. diversity_w1000_s500_sampleCheney -> Cheney).
+# If no pattern matches and default_if_no_match is set, return it (e.g. "unknown" for root-level files).
+normalize_diversity_sample_name <- function(name, default_if_no_match = NULL) {
+  if (grepl("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", name, ignore.case = TRUE))
+    return(sub("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", "\\1", name, ignore.case = TRUE))
+  if (grepl("^diversity_w[0-9]+_s[0-9]+_(.+)$", name, ignore.case = TRUE))
+    return(sub("^diversity_w[0-9]+_s[0-9]+_(.+)$", "\\1", name, ignore.case = TRUE))
+  out <- sub("^([A-Za-z0-9_]+)_diversity.*", "\\1", name, ignore.case = TRUE)
+  if (out != name) return(out)
+  if (!is.null(default_if_no_match)) return(default_if_no_match)
+  name
+}
+
 find_diversity_files <- function(diversity_dir) {
   dirs <- list.dirs(diversity_dir, recursive = FALSE)
   out <- list()
   for (d in dirs) {
-    sample_name <- basename(d)
-    # Normalize subdir-derived sample name: e.g. diversity_w1000_s500_sampleCheney -> Cheney
-    if (grepl("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", sample_name, ignore.case = TRUE)) {
-      sample_name <- sub("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", "\\1", sample_name, ignore.case = TRUE)
-    } else if (grepl("^diversity_w[0-9]+_s[0-9]+_(.+)$", sample_name, ignore.case = TRUE)) {
-      sample_name <- sub("^diversity_w[0-9]+_s[0-9]+_(.+)$", "\\1", sample_name, ignore.case = TRUE)
-    }
+    sample_name <- normalize_diversity_sample_name(basename(d))
     files <- list.files(d, pattern = ".*diversity.*\\.(tsv|csv)$", full.names = TRUE, ignore.case = TRUE)
     for (f in files) {
       if (grepl("single", basename(f), ignore.case = TRUE)) {
@@ -273,15 +296,7 @@ find_diversity_files <- function(diversity_dir) {
     }
     ps <- parse_window_step(basename(f))
     base <- tools::file_path_sans_ext(basename(f))
-    sample_name <- base
-    if (grepl("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", base, ignore.case = TRUE)) {
-      sample_name <- sub("^diversity_w[0-9]+_s[0-9]+_sample(.+)$", "\\1", base, ignore.case = TRUE)
-    } else if (grepl("^diversity_w[0-9]+_s[0-9]+_(.+)$", base, ignore.case = TRUE)) {
-      sample_name <- sub("^diversity_w[0-9]+_s[0-9]+_(.+)$", "\\1", base, ignore.case = TRUE)
-    } else {
-      sample_name <- sub("^([A-Za-z0-9_]+)_diversity.*", "\\1", base, ignore.case = TRUE)
-      if (sample_name == base) sample_name <- "unknown"
-    }
+    sample_name <- normalize_diversity_sample_name(base, default_if_no_match = "unknown")
     out[[length(out) + 1L]] <- list(path = f, sample = sample_name, window_size = ps$window_size, step_size = ps$step_size)
   }
   out
@@ -395,9 +410,12 @@ write_diversity_h5 <- function(d, path) {
   grp[["start"]] <- as.numeric(d$start)
   grp[["end"]] <- as.numeric(d$end)
   grp[["sample"]] <- as.character(d$sample)
-  for (col in c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile", "tajima_d_rank", "tajima_d_quantile", "mean_coverage", "mean_mapping_quality", "n_snps", "n_total")) {
-    if (col %in% names(d)) grp[[col]] <- as.numeric(d[[col]])
-  }
+  num_cols <- intersect(
+    c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile",
+      "tajima_d_rank", "tajima_d_quantile", "mean_coverage", "mean_mapping_quality", "n_snps", "n_total"),
+    names(d)
+  )
+  for (col in num_cols) grp[[col]] <- as.numeric(d[[col]])
   invisible()
 }
 
@@ -484,7 +502,7 @@ write_fst_h5 <- function(d, out_path, group_name = "windows") {
   h5 <- hdf5r::H5File$new(out_path, mode = "w")
   on.exit(h5$close_all(), add = TRUE)
   grp <- h5$create_group(group_name)
-  for (col in names(d)) grp[[col]] <- if (is.character(d[[col]])) as.character(d[[col]]) else as.numeric(d[[col]])
+  write_df_to_h5_group(grp, d)
   h5$close_all()
   on.exit()
   message("Wrote ", out_path)
@@ -612,7 +630,7 @@ write_pbe_groups_h5 <- function(tbl_list, out_path, group_prefix = "windows_trio
     trio_safe <- gsub("[^A-Za-z0-9_]", "_", substr(x$trio_name, 1L, 50L))
     grp_name <- paste0(inner_name, "_", trio_safe)
     grp <- h5$create_group(grp_name)
-    for (col in names(d)) grp[[col]] <- if (is.character(d[[col]])) as.character(d[[col]]) else as.numeric(d[[col]])
+    write_df_to_h5_group(grp, d)
   }
   h5$close_all()
   on.exit()
@@ -631,7 +649,7 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   h5 <- hdf5r::H5File$new(out_path, mode = "w")
   on.exit(h5$close_all(), add = TRUE)
   grp <- h5$create_group(group_name)
-  for (col in names(all_d)) grp[[col]] <- if (is.character(all_d[[col]])) as.character(all_d[[col]]) else as.numeric(all_d[[col]])
+  write_df_to_h5_group(grp, all_d)
   h5$close_all()
   on.exit()
   message("Wrote ", out_path)
@@ -733,7 +751,8 @@ collate_variant_tsv <- function(variant_tsv_dir, output_dir, single_position_mer
   depth_cols <- depth_cols[!grepl("_rank$|_quantile$", depth_cols)]
   quality_cols <- grep("qual|quality|mapping|mapq", names(d), ignore.case = TRUE, value = TRUE)
   quality_cols <- quality_cols[!grepl("_rank$|_quantile$", quality_cols)]
-  for (col in c(depth_cols, quality_cols)) {
+  stat_cols_to_rank <- unique(c(depth_cols, quality_cols))
+  for (col in stat_cols_to_rank) {
     if (col %in% names(d) && is.numeric(d[[col]])) d <- add_rank_quantile(d, character(0), col)
   }
   if (single_position_merged && !is.null(single_position_data)) {
@@ -744,7 +763,7 @@ collate_variant_tsv <- function(variant_tsv_dir, output_dir, single_position_mer
   h5 <- hdf5r::H5File$new(out_path, mode = "w")
   on.exit(h5$close_all(), add = TRUE)
   grp <- h5$create_group("sites")
-  for (col in names(d)) grp[[col]] <- if (is.character(d[[col]])) as.character(d[[col]]) else as.numeric(d[[col]])
+  write_df_to_h5_group(grp, d)
   h5$close_all()
   on.exit()
   message("Wrote ", out_path)
@@ -800,9 +819,7 @@ write_single_position_merged <- function(single_position_data, output_dir, write
   h5 <- hdf5r::H5File$new(h5_path, mode = "w")
   on.exit(h5$close_all(), add = TRUE)
   grp <- h5$create_group("sites")
-  for (col in names(merged)) {
-    if (is.character(merged[[col]])) grp[[col]] <- as.character(merged[[col]]) else grp[[col]] <- as.numeric(merged[[col]])
-  }
+  write_df_to_h5_group(grp, merged)
   h5$close_all()
   on.exit()
   message("Wrote ", h5_path)
