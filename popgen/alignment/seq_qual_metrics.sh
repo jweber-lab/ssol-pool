@@ -4,8 +4,8 @@
 # seq_qual_metrics.sh
 #
 # Compute per-window averages for coverage and mapping quality using samtools.
-# Output TSV compatible with collate (chr, start, end, sample, mean_coverage,
-# mean_mapping_quality).
+# Output TSV compatible with collate: chr, start, end, sample, mean_coverage,
+# mean_mapping_quality. Coordinates are 1-based inclusive (genome convention).
 #
 # Uses:
 #   - samtools depth: per-base depth, aggregated to windowed mean coverage
@@ -59,6 +59,7 @@ Optional:
 Output (per sample, per window/step combination):
   {output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv  (one file per --window-size)
   Columns: chr, start, end, sample, mean_coverage, mean_mapping_quality
+  (start/end are 1-based inclusive)
   Logs: {output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log
 
 Example:
@@ -239,20 +240,22 @@ for i in "${!BAM_FILES[@]}"; do
         STEP_SIZE="${STEP_SIZE_ARRAY[$scale_idx]}"
         out_tsv="${sample_out}/seq_qual_metrics_w${WINDOW_SIZE}_s${STEP_SIZE}.tsv"
 
+        # Coordinates: 1-based inclusive (genome convention). Window start = int((pos-1)/step)*step + 1; end = start + window_size - 1.
         log "Processing sample: $sample_name (window=$WINDOW_SIZE, step=$STEP_SIZE)"
         log "  BAM: $bam"
         log "  Window size: $WINDOW_SIZE bp"
         log "  Step size: $STEP_SIZE bp"
 
-        # 1) Coverage: samtools depth -> windowed mean (window start = step-aligned)
+        # 1) Coverage: samtools depth (1-based pos) -> windowed mean. Windows 1-based inclusive.
         log "  Computing per-window mean coverage..."
         depth_tsv=$(mktemp -t depth.XXXXXX.tsv)
         if [[ "$DRY_RUN" != true ]]; then
+            # Window start 1-based: int((pos-1)/s)*s + 1; end inclusive: start + w - 1
             samtools depth -aa -@ "$THREADS" "$bam" | awk -v w="$WINDOW_SIZE" -v s="$STEP_SIZE" '
         BEGIN { OFS="\t" }
         {
             chr=$1; pos=$2+0; depth=$3+0
-            win = int(pos/s)*s
+            win = int((pos-1)/s)*s + 1
             key = chr "\t" win
             sum[key] += depth
             cnt[key] += 1
@@ -260,7 +263,7 @@ for i in "${!BAM_FILES[@]}"; do
         END {
             for (k in sum) {
                 split(k, a, "\t")
-                print a[1], a[2], a[2]+w, sum[k]/cnt[k]
+                print a[1], a[2], a[2]+w-1, sum[k]/cnt[k]
             }
         }
         ' | sort -k1,1 -k2,2n > "$depth_tsv"
@@ -272,6 +275,7 @@ for i in "${!BAM_FILES[@]}"; do
     log "  Computing per-window mean mapping quality..."
     mapq_tsv=$(mktemp -t mapq.XXXXXX.tsv)
     if [[ "$DRY_RUN" != true ]]; then
+        # BAM pos is 1-based; window start = int((pos-1)/s)*s+1; overlap when win <= end && (win+w-1) >= pos
         samtools view -F 4 -@ "$THREADS" "$bam" | awk -v w="$WINDOW_SIZE" -v s="$STEP_SIZE" '
         function ref_len(cig) {
             r = 0
@@ -292,10 +296,9 @@ for i in "${!BAM_FILES[@]}"; do
             mapq = $5+0
             len = ref_len(cig)
             end = pos + len - 1
-            win = int(pos/s)*s
-            while (win < end) {
-                win_end = win + w
-                if (win_end > pos && win < end) {
+            win = int((pos-1)/s)*s + 1
+            while (win <= end) {
+                if ((win + w - 1) >= pos) {
                     key = chr "\t" win
                     sum[key] += mapq
                     cnt[key] += 1
@@ -306,7 +309,7 @@ for i in "${!BAM_FILES[@]}"; do
         END {
             for (k in sum) {
                 split(k, a, "\t")
-                print a[1], a[2], a[2]+w, sum[k]/cnt[k]
+                print a[1], a[2], a[2]+w-1, sum[k]/cnt[k]
             }
         }
         ' | sort -k1,1 -k2,2n > "$mapq_tsv"
@@ -314,10 +317,10 @@ for i in "${!BAM_FILES[@]}"; do
         log_dry_run "samtools view -F 4 $bam | awk ... | sort > mapq_tsv"
     fi
 
-    # 3) Merge coverage and MAPQ by (chr, start); add sample column (awk merge avoids join sort-order issues)
+    # 3) Merge coverage and MAPQ by (chr, start); add sample column. Output: chr, start, end (1-based inclusive), sample, mean_coverage, mean_mapping_quality.
     if [[ "$DRY_RUN" != true ]]; then
         (
-            echo -e "chr\tstart\tend\tsample\tmean_coverage\tmean_mapping_quality"
+            printf '%s\n' 'chr	start	end	sample	mean_coverage	mean_mapping_quality'
             awk -v sn="$sample_name" '
                 BEGIN { OFS="\t" }
                 NR==FNR {
