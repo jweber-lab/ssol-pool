@@ -24,7 +24,9 @@ REFERENCE_GENOME=""
 WINDOW_SIZES=()
 STEP_SIZES=()
 THREADS=1
+MAX_JOBS=1
 DRY_RUN=false
+VERBOSE=false
 SAMPLE_NAMES=()
 
 # Log file (set after output-dir is known)
@@ -53,7 +55,9 @@ Optional:
   -w, --window-size N         Window size in bp (can be specified multiple times; default: 10000)
   --step-size N               Step size in bp (can be specified multiple times; default: 5000 or window/2)
   -t, --threads N             Threads for samtools (default: 1)
+  -j, --max-jobs N            Run up to N samples in parallel (default: 1)
   --dry-run                   Preview commands without executing
+  --verbose                   Verbose diagnostics (temp file preview, column counts)
   -h, --help                  Show this help
 
 Output (per sample, per window/step combination):
@@ -70,9 +74,9 @@ EOF
 }
 
 log() {
-    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} ${LOG_PREFIX:-}$1"
     if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] ${LOG_PREFIX:-}$1" >> "$LOG_FILE"
     fi
 }
 log_error() {
@@ -117,7 +121,9 @@ while [[ $# -gt 0 ]]; do
         -w|--window-size) WINDOW_SIZES+=("$2"); shift 2 ;;
         --step-size) STEP_SIZES+=("$2"); shift 2 ;;
         -t|--threads) THREADS="$2"; shift 2 ;;
+        -j|--max-jobs) MAX_JOBS="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -125,6 +131,11 @@ done
 
 if [[ -z "$OUTPUT_DIR" ]]; then
     log_error "Missing --output-dir"
+    usage
+    exit 1
+fi
+if ! [[ "$MAX_JOBS" =~ ^[0-9]+$ ]] || [[ "$MAX_JOBS" -lt 1 ]]; then
+    log_error "Invalid --max-jobs (must be a positive integer): $MAX_JOBS"
     usage
     exit 1
 fi
@@ -205,28 +216,14 @@ fi
 if [[ ${#WINDOW_SIZE_ARRAY[@]} -gt 1 ]]; then
     log "Multi-scale mode: ${#WINDOW_SIZE_ARRAY[@]} window/step combinations"
 fi
-
-# Start processing
-if [[ "$DRY_RUN" == true ]]; then
-    log_dry_run "DRY-RUN MODE: Commands will be previewed but not executed"
-    log_dry_run ""
-    log_dry_run "Samples to process: ${#BAM_FILES[@]}"
-    for i in "${!BAM_FILES[@]}"; do
-        log_dry_run "  Sample $((i+1)): ${BAM_FILES[$i]}"
-    done
-    log_dry_run "Window/step combinations: ${#WINDOW_SIZE_ARRAY[@]}"
-    log_dry_run ""
+if [[ "$MAX_JOBS" -gt 1 ]]; then
+    log "Parallel mode: up to $MAX_JOBS samples at a time"
 fi
 
-for i in "${!BAM_FILES[@]}"; do
-    bam="${BAM_FILES[$i]}"
-    if [[ ${#SAMPLE_NAMES[@]} -gt i && -n "${SAMPLE_NAMES[$i]:-}" ]]; then
-        sample_name="${SAMPLE_NAMES[$i]}"
-    else
-        sample_name=$(basename "$bam" .bam)
-        sample_name="${sample_name%_All_seq.dedup}"
-        sample_name="${sample_name%.dedup}"
-    fi
+# Process one sample: index BAM (if needed), then run all window/step scales for that sample.
+process_one_sample() {
+    local bam="$1" sample_name="$2"
+    local sample_out out_tsv depth_tsv mapq_tsv scale_idx WINDOW_SIZE STEP_SIZE
     sample_out="${OUTPUT_DIR}/${sample_name}"
     mkdir -p "$sample_out"
 
@@ -267,6 +264,11 @@ for i in "${!BAM_FILES[@]}"; do
             }
         }
         ' | sort -k1,1 -k2,2n > "$depth_tsv"
+            if [[ "$VERBOSE" == true ]]; then
+                log "  [verbose] depth_tsv first 3 lines:"
+                head -n 3 "$depth_tsv" | while IFS= read -r line; do log "    $line"; done
+                log "  [verbose] depth_tsv columns: $(head -n 1 "$depth_tsv" | awk '{print NF}')"
+            fi
     else
         log_dry_run "samtools depth -aa $bam | awk ... | sort > depth_tsv"
     fi
@@ -313,6 +315,11 @@ for i in "${!BAM_FILES[@]}"; do
             }
         }
         ' | sort -k1,1 -k2,2n > "$mapq_tsv"
+            if [[ "$VERBOSE" == true ]]; then
+                log "  [verbose] mapq_tsv first 3 lines:"
+                head -n 3 "$mapq_tsv" | while IFS= read -r line; do log "    $line"; done
+                log "  [verbose] mapq_tsv columns: $(head -n 1 "$mapq_tsv" | awk '{print NF}')"
+            fi
     else
         log_dry_run "samtools view -F 4 $bam | awk ... | sort > mapq_tsv"
     fi
@@ -334,20 +341,70 @@ for i in "${!BAM_FILES[@]}"; do
                 }
             ' "$mapq_tsv" "$depth_tsv" | sort -k1,1 -k2,2n
         ) > "$out_tsv"
+        if [[ "$VERBOSE" == true ]]; then
+            log "  [verbose] Merged output (before ref-order sort) first 3 lines:"
+            head -n 3 "$out_tsv" | while IFS= read -r line; do log "    $line"; done
+            log "  [verbose] Merged columns: $(head -n 1 "$out_tsv" | awk '{print NF}'), first data col1: $(sed -n '2p' "$out_tsv" | cut -f1)"
+        fi
         rm -f "$depth_tsv" "$mapq_tsv"
         # Optional: sort by reference chromosome order (from .fai)
         # Prepend order to header too so cut -f2- does not drop chr from the header
         if [[ -n "$REFERENCE_GENOME" ]] && [[ -f "${REFERENCE_GENOME}.fai" ]]; then
             log "  Sorting by reference chromosome order"
+            if [[ "$VERBOSE" == true ]]; then
+                log "  [verbose] Before ref-order sort: first data col1 = $(sed -n '2p' "$out_tsv" | cut -f1)"
+            fi
             awk 'NR==FNR{ord[$1]=NR; next} FNR==1{print 0, $0; next} {print (ord[$1]?ord[$1]:999999), $0}' \
                 "${REFERENCE_GENOME}.fai" "$out_tsv" | sort -k1,1n -k3,3n -k4,4n | cut -f2- > "${out_tsv}.tmp" && mv "${out_tsv}.tmp" "$out_tsv"
+            if [[ "$VERBOSE" == true ]]; then
+                log "  [verbose] After ref-order sort: first 3 lines:"
+                head -n 3 "$out_tsv" | while IFS= read -r line; do log "    $line"; done
+                log "  [verbose] After ref-order columns: $(head -n 1 "$out_tsv" | awk '{print NF}'), first data col1: $(sed -n '2p' "$out_tsv" | cut -f1)"
+            fi
         fi
         log "  Wrote $out_tsv"
     else
         log_dry_run "Merge depth and MAPQ -> $out_tsv"
     fi
     done
+}
+
+# Start processing
+if [[ "$DRY_RUN" == true ]]; then
+    log_dry_run "DRY-RUN MODE: Commands will be previewed but not executed"
+    log_dry_run ""
+    log_dry_run "Samples to process: ${#BAM_FILES[@]}"
+    for i in "${!BAM_FILES[@]}"; do
+        log_dry_run "  Sample $((i+1)): ${BAM_FILES[$i]}"
+    done
+    log_dry_run "Window/step combinations: ${#WINDOW_SIZE_ARRAY[@]}"
+    log_dry_run ""
+fi
+
+for i in "${!BAM_FILES[@]}"; do
+    bam="${BAM_FILES[$i]}"
+    if [[ ${#SAMPLE_NAMES[@]} -gt i && -n "${SAMPLE_NAMES[$i]:-}" ]]; then
+        sample_name="${SAMPLE_NAMES[$i]}"
+    else
+        sample_name=$(basename "$bam" .bam)
+        sample_name="${sample_name%_All_seq.dedup}"
+        sample_name="${sample_name%.dedup}"
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        process_one_sample "$bam" "$sample_name"
+    elif [[ "$MAX_JOBS" -gt 1 ]]; then
+        while (( $(jobs -r | wc -l) >= MAX_JOBS )); do
+            wait -n 2>/dev/null || true
+        done
+        ( export LOG_PREFIX="[$sample_name] "; process_one_sample "$bam" "$sample_name" ) &
+    else
+        process_one_sample "$bam" "$sample_name"
+    fi
 done
+if [[ "$MAX_JOBS" -gt 1 && "$DRY_RUN" != true ]]; then
+    wait
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     log_dry_run ""
