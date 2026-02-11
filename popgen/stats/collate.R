@@ -193,6 +193,8 @@ write_df_to_h5_group <- function(grp, d) {
 write_summary_companion <- function(data, summary_path, stat_cols = NULL, group_cols = character(0), quantile_probs = c(0.01, 0.05, 0.95, 0.99), return_df = FALSE) {
   num_cols <- names(data)[vapply(data, is.numeric, logical(1L))]
   num_cols <- num_cols[!grepl("_rank$|_quantile$", num_cols)]
+  # Exclude coordinate columns (window/site positions), not statistics
+  num_cols <- num_cols[!num_cols %in% c("start", "end", "pos")]
   if (length(num_cols) == 0) return(if (return_df) NULL else invisible(NULL))
   if (!is.null(stat_cols)) num_cols <- intersect(num_cols, stat_cols)
   group_cols <- intersect(group_cols, names(data))
@@ -306,11 +308,16 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   d <- read_tab(path)
   d <- d %>% rename_all(tolower)
   chr_col <- intersect(c("chr", "chromosome", "chrom"), names(d))[1L]
-  pos_col <- intersect(c("position", "pos", "start", "end"), names(d))[1L]
+  start_col <- intersect(c("start", "begin"), names(d))[1L]
+  end_col <- intersect(c("end", "stop"), names(d))[1L]
+  pos_col <- intersect(c("position", "pos"), names(d))[1L]
+  if (is.na(pos_col)) pos_col <- start_col  # fallback: window start as position
   if (is.na(chr_col) || is.na(pos_col)) return(NULL)
-  d <- d %>% rename(chr = !!chr_col, pos = !!pos_col)
+  d <- d %>% rename(chr = !!chr_col)
   d$chr <- as.character(d$chr)
-  d$pos <- as.numeric(d$pos)
+  d$pos <- as.numeric(d[[pos_col]])
+  if (!is.na(start_col)) d$start <- as.numeric(d[[start_col]])
+  if (!is.na(end_col)) d$end <- as.numeric(d[[end_col]])
   pi_col <- grep("\\.theta_pi$", names(d), value = TRUE)[1L]
   th_col <- grep("\\.theta_watterson$", names(d), value = TRUE)[1L]
   td_col <- grep("\\.tajimas?_d$", names(d), value = TRUE)[1L]
@@ -333,7 +340,7 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   }
   d$window_size <- window_size
   d$step_size <- step_size
-  d %>% select(any_of(c("chr", "pos", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
+  d %>% select(any_of(c("chr", "pos", "start", "end", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
 }
 
 collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, write_summary = TRUE, verbose = FALSE) {
@@ -355,8 +362,9 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     if (length(tbls) == 0) next
     d <- bind_rows(tbls)
     d <- d %>% filter(!is.na(chr), !is.na(pos))
+    # Fallback when input has no start/end (e.g. position-only format)
     if (!"start" %in% names(d)) d$start <- d$pos
-    if (!"end" %in% names(d)) d$end <- d$pos
+    if (!"end" %in% names(d)) d$end <- if (all(!is.na(d$window_size))) d$start + d$window_size - 1 else d$pos
     if (!"n_snps" %in% names(d)) {
       message("Diversity: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
     }
@@ -454,7 +462,10 @@ process_one_fst <- function(path, window_size = NULL, step_size = NULL, drop_all
   d$chr <- as.character(d$chr)
   d$pos <- as.numeric(d$pos)
   if (!"start" %in% names(d)) d$start <- d$pos
-  if (!"end" %in% names(d)) d$end <- d$pos
+  if (!"end" %in% names(d)) {
+    if (!is.null(window_size) && !is.na(window_size)) d$end <- d$start + as.numeric(window_size) - 1
+    else d$end <- d$pos
+  }
   if (!is.null(window_size)) d$window_size <- as.numeric(window_size)
   if (!is.null(step_size)) d$step_size <- as.numeric(step_size)
   n_snps_col <- intersect(c("total.passed", "total_passed"), names(d))[1L]
