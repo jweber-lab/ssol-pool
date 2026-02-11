@@ -317,23 +317,22 @@ for i in "${!BAM_FILES[@]}"; do
         log_dry_run "samtools view -F 4 $bam | awk ... | sort > mapq_tsv"
     fi
 
-    # 3) Merge coverage and MAPQ by (chr, start); add sample column. Output: chr, start, end (1-based inclusive), sample, mean_coverage, mean_mapping_quality.
+    # 3) Merge coverage and MAPQ by (chr, start); add sample column. Drive from depth so chr is always present. Output: chr, start, end (1-based inclusive), sample, mean_coverage, mean_mapping_quality.
     if [[ "$DRY_RUN" != true ]]; then
         (
             printf '%s\n' 'chr	start	end	sample	mean_coverage	mean_mapping_quality'
             awk -v sn="$sample_name" '
                 BEGIN { OFS="\t" }
                 NR==FNR {
-                    depth[$1"\t"$2]=$4
-                    end[$1"\t"$2]=$3
+                    mapq[$1"\t"$2]=$4
                     next
                 }
                 {
                     key=$1"\t"$2
-                    if (key in depth)
-                        print $1, $2, end[key], sn, depth[key], $4
+                    mapq_val = (key in mapq) ? mapq[key] : ""
+                    print $1, $2, $3, sn, $4, mapq_val
                 }
-            ' "$depth_tsv" "$mapq_tsv" | sort -k1,1 -k2,2n
+            ' "$mapq_tsv" "$depth_tsv" | sort -k1,1 -k2,2n
         ) > "$out_tsv"
         rm -f "$depth_tsv" "$mapq_tsv"
         # Optional: sort by reference chromosome order (from .fai)
