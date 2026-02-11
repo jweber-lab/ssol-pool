@@ -354,7 +354,7 @@ process_one_sample() {
             if [[ "$VERBOSE" == true ]]; then
                 log "  [verbose] Before ref-order sort: first data col1 = $(sed -n '2p' "$out_tsv" | cut -f1)"
             fi
-            awk 'NR==FNR{ord[$1]=NR; next} FNR==1{print 0, $0; next} {print (ord[$1]?ord[$1]:999999), $0}' \
+            awk -v OFS="\t" 'NR==FNR{ord[$1]=NR; next} FNR==1{print 0, $0; next} {print (ord[$1]?ord[$1]:999999), $0}' \
                 "${REFERENCE_GENOME}.fai" "$out_tsv" | sort -k1,1n -k3,3n -k4,4n | cut -f2- > "${out_tsv}.tmp" && mv "${out_tsv}.tmp" "$out_tsv"
             if [[ "$VERBOSE" == true ]]; then
                 log "  [verbose] After ref-order sort: first 3 lines:"
@@ -381,6 +381,7 @@ if [[ "$DRY_RUN" == true ]]; then
     log_dry_run ""
 fi
 
+declare -a PIDS=()
 for i in "${!BAM_FILES[@]}"; do
     bam="${BAM_FILES[$i]}"
     if [[ ${#SAMPLE_NAMES[@]} -gt i && -n "${SAMPLE_NAMES[$i]:-}" ]]; then
@@ -394,16 +395,28 @@ for i in "${!BAM_FILES[@]}"; do
     if [[ "$DRY_RUN" == true ]]; then
         process_one_sample "$bam" "$sample_name"
     elif [[ "$MAX_JOBS" -gt 1 ]]; then
-        while (( $(jobs -r | wc -l) >= MAX_JOBS )); do
-            wait -n 2>/dev/null || true
+        while (( ${#PIDS[@]} >= MAX_JOBS )); do
+            for pid_idx in "${!PIDS[@]}"; do
+                if ! kill -0 "${PIDS[$pid_idx]}" 2>/dev/null; then
+                    wait "${PIDS[$pid_idx]}" 2>/dev/null || true
+                    unset 'PIDS[$pid_idx]'
+                fi
+            done
+            PIDS=("${PIDS[@]}")
+            if (( ${#PIDS[@]} >= MAX_JOBS )); then
+                sleep 0.1
+            fi
         done
         ( export LOG_PREFIX="[$sample_name] "; process_one_sample "$bam" "$sample_name" ) &
+        PIDS+=($!)
     else
         process_one_sample "$bam" "$sample_name"
     fi
 done
 if [[ "$MAX_JOBS" -gt 1 && "$DRY_RUN" != true ]]; then
-    wait
+    for pid in "${PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
 fi
 
 if [[ "$DRY_RUN" == true ]]; then
