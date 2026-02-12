@@ -130,7 +130,7 @@ Examples:
     --low-quantile 0.05
 
 Output files:
-  - {output_dir}/outlier_windows*.csv: Wide table (chr, start, end, samplename.stat columns, outlier_stat)
+  - {output_dir}/outlier_windows*.csv: Wide table: chr, start, end; window_size; optional mean_coverage, mean_mapping_quality, n_snps; outlier_stat, outlier_direction (high/low); optional window_type (seed/expanded); samplename.stat and samplename.stat_quantile columns.
   - {output_dir}/outlier_regions*.csv: Merged/expanded regions when --merge-distance or seed-expand used. Filename includes _across_samples or _within_samples and _seed_expand or _merge_only. Columns include per-stat region mean (overlap-corrected), max value, and quantile of the most extreme window.
 
 EOF

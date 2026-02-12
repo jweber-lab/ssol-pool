@@ -17,9 +17,11 @@
 #
 # Output files (see identify_outliers.sh for option summary):
 #   outlier_windows_*.csv   One row per (chr, start, end) that is an outlier in at least one statistic.
-#     Columns: chr, start, end; then value columns samplename.statname (e.g. Cheney.pi),
-#     sample1:sample2.fst, sample1:sample2:sample3.pbe; then outlier_stat (colon-separated
-#     list of statistics in which this window passed the threshold, e.g. pi:fst:pbe).
+#     Columns: chr, start, end; window_size; optional mean_coverage, mean_mapping_quality, n_snps;
+#     outlier_stat (colon-separated stats, e.g. pi:fst); outlier_direction (high, low, or high:low);
+#     optional window_type (seed/expanded when seed-expand mode); then value columns
+#     samplename.statname (e.g. Cheney.pi) and samplename.statname_quantile (window quantile 0-1);
+#     sample1:sample2.fst, sample1:sample2:sample3.pbe and their _quantile columns.
 #   outlier_regions_*.csv   One row per merged/expanded region when --merge-distance or
 #     seed-expand is used. Filename includes _across_samples or _within_samples and
 #     _seed_expand or _merge_only. Columns: chr, region_start, region_end, n_windows,
@@ -542,11 +544,9 @@ add_region_stat_summaries <- function(regions, windows_by_value_col) {
                 out_maxs[i] <- NA_real_
                 next
             }
-            # Overlap count: for each window, how many windows in sub overlap it
-            n_overlap <- vapply(seq_len(nrow(sub)), function(k) {
-                sum(sub$start <= sub$end[k] & sub$end >= sub$start[k], na.rm = TRUE)
-            }, integer(1L))
-            weight <- 1 / pmax(n_overlap, 1L)
+            # Overlap count: window i overlaps j when start[i] <= end[j] and end[i] >= start[j]; vectorized
+            n_overlap <- colSums(outer(sub$start, sub$end, "<=") & outer(sub$end, sub$start, ">="))
+            weight <- 1 / pmax(n_overlap, 1)
             out_means[i] <- sum(sub$value * weight, na.rm = TRUE) / sum(weight, na.rm = TRUE)
             idx_max <- which.max(sub$value)
             out_maxs[i] <- sub$value[idx_max]
@@ -604,6 +604,15 @@ build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe
         }
     }
     out
+}
+
+# Standardize outlier table: add quantile from source column, rename value column, select out_cols + extra_cols.
+# Use when building outlier_results so all branches produce the same column set.
+standardize_outlier_columns <- function(outliers, value_col, quantile_col, out_cols, extra_cols) {
+    outliers %>%
+        mutate(quantile = if (quantile_col %in% colnames(outliers)) !!sym(quantile_col) else NA_real_) %>%
+        rename(value = !!sym(value_col)) %>%
+        select(any_of(c(out_cols, extra_cols)))
 }
 
 # Apply region-level depth, mapping quality, and region SNP filters from opts. Returns filtered regions df.
@@ -1668,9 +1677,9 @@ if (!is.null(diversity_data)) {
                     mutate(statistic = stat, sample_pair = NA_character_)
                 if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
                 if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-                out_cols <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile_type", "quantile_value", "window_type")
+                out_cols <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value", "window_type")
                 extra_cols <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps"), colnames(outliers))
-                outliers <- outliers %>% rename(value = all_of(stat_col)) %>% select(any_of(c(out_cols, extra_cols)))
+                outliers <- standardize_outlier_columns(outliers, stat_col, paste0(stat_col, "_quantile"), out_cols, extra_cols)
                 outlier_results[[paste0("diversity_", stat, "_", sample_name)]] <- outliers
                 if (length(all_expanded_regions) > 0) {
                     expanded_region_results[[paste0("diversity_", stat, "_", sample_name)]] <- bind_rows(all_expanded_regions)
@@ -1683,9 +1692,9 @@ if (!is.null(diversity_data)) {
                     mutate(statistic = stat, sample_pair = NA_character_)
                 if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
                 if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-                out_cols <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile_type", "quantile_value")
+                out_cols <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value")
                 extra_cols <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps"), colnames(outliers))
-                outliers <- outliers %>% rename(value = all_of(stat_col)) %>% select(any_of(c(out_cols, extra_cols)))
+                outliers <- standardize_outlier_columns(outliers, stat_col, paste0(stat_col, "_quantile"), out_cols, extra_cols)
                 outlier_results[[paste0("diversity_", stat, "_", sample_name)]] <- outliers
             }
         }
@@ -1820,9 +1829,9 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
             outliers <- bind_rows(all_tagged_fst) %>% mutate(statistic = "fst", sample = NA_character_)
             if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
             if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-            out_cols_fst <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile_type", "quantile_value", "window_type")
+            out_cols_fst <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value", "window_type")
             extra_cols_fst <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps"), colnames(outliers))
-            outliers <- outliers %>% rename(value = fst) %>% select(any_of(c(out_cols_fst, extra_cols_fst)))
+            outliers <- standardize_outlier_columns(outliers, "fst", "fst_quantile", out_cols_fst, extra_cols_fst)
             outlier_results[[paste0("fst_", pair_name)]] <- outliers
             if (length(all_expanded_regions_fst) > 0) {
                 expanded_region_results[[paste0("fst_", pair_name)]] <- bind_rows(all_expanded_regions_fst)
@@ -1834,9 +1843,9 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
             ) %>% mutate(statistic = "fst", sample = NA_character_)
             if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
             if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-            out_cols_fst <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile_type", "quantile_value")
+            out_cols_fst <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value")
             extra_cols_fst <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps"), colnames(outliers))
-            outliers <- outliers %>% rename(value = fst) %>% select(any_of(c(out_cols_fst, extra_cols_fst)))
+            outliers <- standardize_outlier_columns(outliers, "fst", "fst_quantile", out_cols_fst, extra_cols_fst)
             outlier_results[[paste0("fst_", pair_name)]] <- outliers
         }
     }
@@ -1944,9 +1953,9 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
             outliers <- bind_rows(all_tagged_pbe) %>% mutate(statistic = "pbe", sample = NA_character_, sample_pair = trio_id)
             if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
             if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-            out_cols_pbe <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile_type", "quantile_value", "window_type")
+            out_cols_pbe <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value", "window_type")
             extra_cols_pbe <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps"), colnames(outliers))
-            outliers <- outliers %>% rename(value = pbe) %>% select(any_of(c(out_cols_pbe, extra_cols_pbe)))
+            outliers <- standardize_outlier_columns(outliers, "pbe", "pbe_quantile", out_cols_pbe, extra_cols_pbe)
             outlier_results[[paste0("pbe_", trio_id)]] <- outliers
             if (length(all_expanded_regions_pbe) > 0) {
                 expanded_region_results[[paste0("pbe_", trio_id)]] <- bind_rows(all_expanded_regions_pbe)
@@ -1958,9 +1967,9 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
             ) %>% mutate(statistic = "pbe", sample = NA_character_, sample_pair = trio_id)
             if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
             if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-            out_cols_pbe <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile_type", "quantile_value")
+            out_cols_pbe <- c("statistic", "sample", "sample_pair", "window_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value")
             extra_cols_pbe <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps"), colnames(outliers))
-            outliers <- outliers %>% rename(value = pbe) %>% select(any_of(c(out_cols_pbe, extra_cols_pbe)))
+            outliers <- standardize_outlier_columns(outliers, "pbe", "pbe_quantile", out_cols_pbe, extra_cols_pbe)
             outlier_results[[paste0("pbe_", trio_id)]] <- outliers
         }
     }
@@ -1978,16 +1987,39 @@ if (length(outlier_results) > 0) {
                paste0(ifelse(is.na(all_outliers$sample_pair), "unknown", all_outliers$sample_pair), ".fst"),
                paste0(ifelse(is.na(all_outliers$sample_pair), "unknown", all_outliers$sample_pair), ".pbe"))
     )
+    qtype_col <- if ("quantile_type" %in% colnames(all_outliers)) "quantile_type" else NULL
     stats_per_window <- all_outliers %>%
         group_by(.data$chr, .data$start, .data$end) %>%
-        summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop")
+        summarise(
+            outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"),
+            outlier_direction = if (!is.null(qtype_col)) {
+                dir <- paste(sort(unique(.data$quantile_type[!is.na(.data$quantile_type)])), collapse = ":")
+                ifelse(nchar(dir) == 0, NA_character_, dir)
+            } else NA_character_,
+            .groups = "drop"
+        )
     wide_long <- all_outliers %>% select(.data$chr, .data$start, .data$end, .data$value_col, .data$value)
     wide_long <- wide_long %>% distinct(.data$chr, .data$start, .data$end, .data$value_col, .keep_all = TRUE)
     wide_outliers <- wide_long %>%
         pivot_wider(names_from = .data$value_col, values_from = .data$value) %>%
         left_join(stats_per_window, by = c("chr", "start", "end"))
-    value_cols <- sort(setdiff(names(wide_outliers), c("chr", "start", "end", "outlier_stat")))
-    wide_outliers <- wide_outliers %>% select(.data$chr, .data$start, .data$end, all_of(value_cols), .data$outlier_stat)
+    if ("quantile" %in% colnames(all_outliers)) {
+        wide_quantile <- all_outliers %>%
+            select(.data$chr, .data$start, .data$end, .data$value_col, .data$quantile) %>%
+            distinct(.data$chr, .data$start, .data$end, .data$value_col, .keep_all = TRUE) %>%
+            pivot_wider(names_from = .data$value_col, values_from = .data$quantile, names_glue = "{.name}_quantile")
+        wide_outliers <- wide_outliers %>% left_join(wide_quantile, by = c("chr", "start", "end"))
+    }
+    window_meta <- all_outliers %>%
+        group_by(.data$chr, .data$start, .data$end) %>%
+        slice(1L) %>%
+        ungroup() %>%
+        select(.data$chr, .data$start, .data$end, any_of(c("window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "window_type")))
+    wide_outliers <- wide_outliers %>% left_join(window_meta, by = c("chr", "start", "end"))
+    value_cols <- sort(setdiff(names(wide_outliers), c("chr", "start", "end", "outlier_stat", "outlier_direction", "window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "window_type")))
+    meta_cols <- c("window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "outlier_stat", "outlier_direction", "window_type")
+    meta_cols <- intersect(meta_cols, names(wide_outliers))
+    wide_outliers <- wide_outliers %>% select(.data$chr, .data$start, .data$end, any_of(meta_cols), all_of(value_cols))
 
     unique_windows_outliers <- if ("window_size" %in% colnames(all_outliers)) {
         sort(unique(all_outliers$window_size[!is.na(all_outliers$window_size)]))
@@ -2024,7 +2056,8 @@ if (length(outlier_results) > 0) {
         quantile_suffix <- paste0(quantile_suffix, "_top", opts$`top-n-extreme`)
     }
     merge_suffix <- if (opts$merge_across_samples) "_across_samples" else "_within_samples"
-    value_cols_for_regions <- sort(setdiff(names(wide_outliers), c("chr", "start", "end", "outlier_stat")))
+    value_cols_for_regions <- setdiff(names(wide_outliers), c("chr", "start", "end", "outlier_stat", "outlier_direction", "window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "window_type"))
+    value_cols_for_regions <- sort(value_cols_for_regions[!grepl("_quantile$", value_cols_for_regions)])
     windows_by_value_col <- build_windows_by_value_col(
         value_cols_for_regions,
         diversity_data,
