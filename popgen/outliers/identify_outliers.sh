@@ -19,6 +19,7 @@ DIVERSITY_DIR=""
 HDF5_DIR=""
 OUTPUT_DIR=""
 MERGE_DISTANCE="auto"
+MERGE_ACROSS_SAMPLES="true"
 MIN_DEPTH=""
 MAX_DEPTH=""
 MIN_MAPPING_QUALITY=""
@@ -91,6 +92,7 @@ Optional:
   --sample-pairs LIST        Comma-separated list of FST pairs to process (default: all)
   --top-n-extreme N          Return only the N most extreme values in each quantile (optional)
   --merge-distance N         Merge nearby windows into regions: bp or 'auto' = max(2*window, 2000) [default: auto]
+  --merge-across-samples true|false   Merge regions across samples (true) or only within each sample (false) [default: true]
   --min-depth N              Minimum mean coverage for a window to be a seed or in expansion (optional)
   --max-depth N              Maximum mean coverage for a window to be a seed or in expansion (optional)
   --min-mapping-quality N    Minimum mean mapping quality for a window (optional)
@@ -129,7 +131,7 @@ Examples:
 
 Output files:
   - {output_dir}/outlier_windows*.csv: Wide table (chr, start, end, samplename.stat columns, outlier_stat)
-  - {output_dir}/outlier_regions*.csv: Merged/expanded regions when --merge-distance or seed-expand used
+  - {output_dir}/outlier_regions*.csv: Merged/expanded regions when --merge-distance or seed-expand used. Filename includes _across_samples or _within_samples and _seed_expand or _merge_only. Columns include per-stat region mean (overlap-corrected), max value, and quantile of the most extreme window.
 
 EOF
 }
@@ -192,6 +194,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --merge-distance)
             MERGE_DISTANCE="$2"
+            shift 2
+            ;;
+        --merge-across-samples)
+            MERGE_ACROSS_SAMPLES="$2"
             shift 2
             ;;
         --min-depth)
@@ -470,6 +476,11 @@ fi
 
 if [[ -n "$MERGE_DISTANCE" ]]; then
     R_CMD+=(--merge-distance "$MERGE_DISTANCE")
+fi
+if [[ -n "$MERGE_ACROSS_SAMPLES" ]]; then
+    R_CMD+=(--merge-across-samples "$MERGE_ACROSS_SAMPLES")
+fi
+if [[ -n "$MERGE_DISTANCE" ]]; then
     [[ -n "$MIN_DEPTH" ]] && R_CMD+=(--min-depth "$MIN_DEPTH")
     [[ -n "$MAX_DEPTH" ]] && R_CMD+=(--max-depth "$MAX_DEPTH")
     [[ -n "$MIN_MAPPING_QUALITY" ]] && R_CMD+=(--min-mapping-quality "$MIN_MAPPING_QUALITY")

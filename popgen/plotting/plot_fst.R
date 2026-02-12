@@ -23,10 +23,25 @@ suppressPackageStartupMessages({
     library(tidyr)
 })
 
+initial_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- initial_args[substr(initial_args, 1, 7) == "--file="]
+script_dir <- if (length(file_arg) > 0) dirname(sub("^--file=", "", file_arg)) else "."
+plot_common_path <- file.path(script_dir, "plot_common.R")
+if (!file.exists(plot_common_path)) plot_common_path <- file.path(getwd(), "plot_common.R")
+if (file.exists(plot_common_path)) source(plot_common_path)
+
 # Parse command-line arguments
 option_list <- list(
     make_option(c("--input-dir"), type="character", default=NULL,
-                help="Directory containing FST TSV files", metavar="DIR"),
+                help="Directory containing FST TSV or HDF5 files", metavar="DIR"),
+    make_option(c("--input-format"), type="character", default="auto",
+                help="Input format: tsv, hdf5, or auto [default: %default]", metavar="FORMAT"),
+    make_option(c("--y-value"), type="character", default="value",
+                help="Y-axis: value, rank, or quantile [default: %default]", metavar="VALUE"),
+    make_option(c("--plot-style"), type="character", default="line",
+                help="Plot style: line or line_points [default: %default]", metavar="STYLE"),
+    make_option(c("--overlay-pairs"), action="store_true", default=FALSE,
+                help="Plot all pairs in one panel per window (color = pair); no facet by pair", metavar="FLAG"),
     make_option(c("--output-dir"), type="character", default=".",
                 help="Output directory for plots [default: %default]", metavar="DIR"),
     make_option(c("--reference-genome"), type="character", default=NULL,
@@ -40,6 +55,8 @@ option_list <- list(
                 help="Plot width in inches [default: %default]", metavar="NUMBER"),
     make_option(c("--height"), type="numeric", default=8,
                 help="Plot height in inches [default: %default]", metavar="NUMBER"),
+    make_option(c("--dpi"), type="numeric", default=NULL,
+                help="DPI for PNG (default: 300)", metavar="NUMBER"),
     make_option(c("--file-prefix"), type="character", default="",
                 help="Prefix for output files [default: no prefix]", metavar="PREFIX"),
     make_option(c("--sample-pairs"), type="character", default="",
@@ -72,6 +89,17 @@ if (!opts$`panel-by` %in% c("window", "pair", "both", "none")) {
     stop("--panel-by must be one of: window, pair, both, none")
 }
 
+if (!opts$`input-format` %in% c("tsv", "hdf5", "auto")) {
+    stop("--input-format must be one of: tsv, hdf5, auto")
+}
+if (!opts$`y-value` %in% c("value", "rank", "quantile")) {
+    stop("--y-value must be one of: value, rank, quantile")
+}
+
+if (!opts$`plot-style` %in% c("line", "line_points")) {
+    stop("--plot-style must be one of: line, line_points")
+}
+
 if (!opts$transform %in% c("asinh", "log", "none")) {
     stop("--transform must be one of: asinh, log, none")
 }
@@ -97,6 +125,17 @@ format_parts <- unique(format_parts)
 if (!dir.exists(opts$`output-dir`)) {
     dir.create(opts$`output-dir`, recursive=TRUE)
 }
+
+input_dir <- opts$`input-dir`
+input_format_used <- opts$`input-format`
+if (input_format_used == "auto") {
+    h5_candidates <- list.files(input_dir, pattern = "^fst_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    input_format_used <- if (length(h5_candidates) > 0) "hdf5" else "tsv"
+}
+if (input_format_used == "hdf5" && !requireNamespace("hdf5r", quietly = TRUE)) {
+    stop("--input-format hdf5 requires package 'hdf5r'. Install with: install.packages(\"hdf5r\")")
+}
+summary_tsv <- NULL
 
 # Function to read FASTA index (.fai) to get chromosome lengths
 read_fai <- function(fai_file) {
@@ -258,45 +297,12 @@ peek_column_names <- function(filepath) {
     return(tolower(trimws(cols)))
 }
 
-# Find all FST files (TSV or CSV)
-input_dir <- opts$`input-dir`
-tsv_files <- list.files(input_dir, pattern=".*fst.*\\.tsv$", full.names=TRUE, recursive=TRUE)
-csv_files <- list.files(input_dir, pattern=".*fst.*\\.csv$", full.names=TRUE, recursive=TRUE)
-all_files <- c(tsv_files, csv_files)
-
-if (length(all_files) == 0) {
-    stop("No FST files found in: ", input_dir, " (expected files matching pattern: *fst*.tsv or *fst*.csv)")
-}
-
-if (opts$verbose) {
-    cat("Found", length(all_files), "FST file(s) (", length(tsv_files), " TSV, ", length(csv_files), " CSV)\n", sep="")
-}
-
-# Filter files by window size if specified (before reading)
+# Find all FST files and read (TSV or HDF5)
 selected_window_size <- opts$`window-size`
-if (!is.null(selected_window_size)) {
-    file_window_sizes <- sapply(all_files, function(f) extract_window_size_from_filename(basename(f)))
-    # Check for "single" label in filenames (single-position windows, 1bp windows at each SNP)
-    has_single_label <- grepl("single", basename(all_files), ignore.case=TRUE)
-    # Keep files that:
-    # - Do not have "single" label, AND
-    # - Have no window size indication in filename (is.na), OR match the selected window size
-    # Exclude files with "single" label or different window sizes
-    all_files <- all_files[!has_single_label & (is.na(file_window_sizes) | file_window_sizes == selected_window_size)]
-    if (opts$verbose) {
-        cat("Filtered to", length(all_files), "file(s) matching window size", selected_window_size, " (excluding *single* and different window sizes)\n")
-    }
-    if (length(all_files) == 0) {
-        stop("No files found matching window size ", selected_window_size)
-    }
-}
-
-# Filter files by sample pairs if specified (peek at headers, don't read full files)
 selected_pairs <- NULL
 if (opts$`sample-pairs` != "") {
     selected_pairs <- strsplit(opts$`sample-pairs`, ",")[[1]]
     selected_pairs <- trimws(selected_pairs)
-    # Normalize selected pairs
     selected_pairs_normalized <- sapply(selected_pairs, function(p) {
         parts <- strsplit(p, ":")[[1]]
         if (length(parts) == 2) {
@@ -306,14 +312,57 @@ if (opts$`sample-pairs` != "") {
         }
         return(p)
     })
-    
-    if (opts$verbose) {
-        cat("Filtering files by sample pairs:", paste(selected_pairs_normalized, collapse=", "), "\n")
+}
+
+combined_data_long_format <- FALSE
+if (input_format_used == "hdf5") {
+    all_h5 <- list.files(input_dir, pattern = "^fst_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    if (length(all_h5) == 0) stop("No FST HDF5 files found in: ", input_dir)
+    if (!is.null(selected_window_size)) {
+        file_win_sizes <- vapply(all_h5, function(f) { ps <- parse_window_step_from_filename(basename(f)); ps$window_size }, numeric(1))
+        all_h5 <- all_h5[!is.na(file_win_sizes) & file_win_sizes == selected_window_size]
+        if (length(all_h5) == 0) stop("No HDF5 files matching window size ", selected_window_size)
     }
-    
-    # Peek at each file's column names to see if it contains the requested pairs
-    files_to_keep <- character(0)
-    for (file in all_files) {
+    all_data_list <- list()
+    summary_list <- list()
+    for (path in all_h5) {
+        grp_name <- if (grepl("single", basename(path), ignore.case = TRUE)) "sites" else "windows"
+        d <- read_h5_windows(path, grp_name)
+        if (is.null(d) || nrow(d) == 0) next
+        ps <- parse_window_step_from_filename(basename(path))
+        d$window_size <- ps$window_size
+        d$step_size <- ps$step_size
+        if (!"pos" %in% names(d) && "start" %in% names(d)) d$pos <- as.numeric(d$start)
+        else if (!"pos" %in% names(d) && "end" %in% names(d)) d$pos <- as.numeric(d$end)
+        else if (!"pos" %in% names(d) && "start" %in% names(d) && "end" %in% names(d)) d$pos <- (as.numeric(d$start) + as.numeric(d$end)) / 2
+        if ("pop1" %in% names(d) && "pop2" %in% names(d)) d$sample_pair <- paste(d$pop1, d$pop2, sep = ":")
+        all_data_list[[path]] <- d
+        sum_t <- read_summary_tsv_for_h5(path)
+        if (!is.null(sum_t)) summary_list[[path]] <- sum_t
+    }
+    combined_data <- bind_rows(all_data_list)
+    combined_data_long_format <- TRUE
+    if (length(summary_list) > 0) summary_tsv <- bind_rows(summary_list)
+    if (!is.null(selected_pairs_normalized)) {
+        combined_data <- combined_data %>% filter(.data$sample_pair %in% selected_pairs_normalized)
+        if (nrow(combined_data) == 0) stop("None of the specified sample pairs found in HDF5 data")
+    }
+    if (opts$verbose) cat("Read", length(all_h5), "HDF5 file(s); combined", nrow(combined_data), "rows (long format)\n")
+} else {
+    tsv_files <- list.files(input_dir, pattern = ".*fst.*\\.tsv$", full.names = TRUE, recursive = TRUE)
+    csv_files <- list.files(input_dir, pattern = ".*fst.*\\.csv$", full.names = TRUE, recursive = TRUE)
+    all_files <- c(tsv_files, csv_files)
+    if (length(all_files) == 0) stop("No FST files found in: ", input_dir)
+    if (!is.null(selected_window_size)) {
+        file_window_sizes <- sapply(all_files, function(f) extract_window_size_from_filename(basename(f)))
+        has_single_label <- grepl("single", basename(all_files), ignore.case = TRUE)
+        all_files <- all_files[!has_single_label & (is.na(file_window_sizes) | file_window_sizes == selected_window_size)]
+        if (length(all_files) == 0) stop("No files matching window size ", selected_window_size)
+    }
+    if (!is.null(selected_pairs) && length(selected_pairs_normalized) > 0) {
+        if (opts$verbose) cat("Filtering files by sample pairs:", paste(selected_pairs_normalized, collapse = ", "), "\n")
+        files_to_keep <- character(0)
+        for (file in all_files) {
         col_names <- peek_column_names(file)
         fst_cols <- col_names[grepl("\\.fst$", col_names, ignore.case=TRUE)]
         
@@ -356,21 +405,12 @@ if (opts$`sample-pairs` != "") {
             files_to_keep <- c(files_to_keep, file)
         }
     }
-    
     all_files <- files_to_keep
-    if (opts$verbose) {
-        cat("Filtered to", length(all_files), "file(s) containing requested sample pairs\n")
+    if (length(all_files) == 0) stop("No files found containing the specified sample pairs")
+    if (opts$verbose) cat("Filtered to", length(all_files), "file(s) containing requested sample pairs\n")
     }
-    if (length(all_files) == 0) {
-        stop("No files found containing the specified sample pairs")
-    }
-}
-
-# Note: selected_pairs parsing moved earlier for file filtering
-
-# Read and combine all FST files using tidyverse
-all_data <- list()
-for (file in all_files) {
+    all_data <- list()
+    for (file in all_files) {
     if (opts$verbose) {
         cat("\n=== Reading:", basename(file), "===\n")
     }
@@ -508,11 +548,9 @@ for (file in all_files) {
     all_data[[file]] <- data
 }
 
-# Combine all data using tidyverse
-if (opts$verbose) {
-    cat("\n=== Combining data from", length(all_data), "file(s) ===\n")
+    if (opts$verbose) cat("\n=== Combining data from", length(all_data), "file(s) ===\n")
+    combined_data <- bind_rows(all_data)
 }
-combined_data <- bind_rows(all_data)
 
 if (opts$verbose) {
     cat("Combined data dimensions:", nrow(combined_data), "rows,", ncol(combined_data), "columns\n")
@@ -553,7 +591,15 @@ if (nrow(combined_data) == 0) {
     stop("Error: All rows were filtered out! Check chr and pos columns.")
 }
 
-# Parse FST columns
+# Parse FST columns (or use long-format pairs when from HDF5)
+if (combined_data_long_format) {
+    y_col <- switch(opts$`y-value`, rank = "fst_rank", quantile = "fst_quantile", "fst")
+    if (!y_col %in% colnames(combined_data)) stop("--y-value ", opts$`y-value`, " requested but column '", y_col, "' not found in HDF5.")
+    pair_names <- unique(combined_data$sample_pair[!is.na(combined_data$sample_pair)])
+    fst_pairs <- setNames(rep(y_col, length(pair_names)), pair_names)
+    if (!is.null(selected_pairs_normalized)) fst_pairs <- fst_pairs[names(fst_pairs) %in% selected_pairs_normalized]
+    if (length(fst_pairs) == 0) stop("None of the specified sample pairs found in data")
+} else {
 fst_cols <- colnames(combined_data)[grepl("\\.fst$", colnames(combined_data), ignore.case=TRUE)]
 if (length(fst_cols) == 0) {
     stop("No FST columns found in input files. Expected columns ending in .fst")
@@ -655,6 +701,7 @@ if (opts$verbose) {
     for (pair_name in names(fst_pairs)) {
         cat("  ", pair_name, " -> ", fst_pairs[[pair_name]], "\n", sep="")
     }
+}
 }
 
 # Filter pairs if specified (use normalized pair names)
@@ -766,8 +813,63 @@ combined_data <- add_cumulative_positions(combined_data, chr_lengths)
 # Create chromosome stripes
 chr_stripes <- create_chr_stripes(chr_lengths)
 
-# Process each sample pair
+# Process each sample pair (or overlay all pairs in one panel)
 stats_results <- list()
+
+overlay_pairs <- opts$`overlay-pairs` && combined_data_long_format && "sample_pair" %in% colnames(combined_data)
+if (overlay_pairs && length(fst_pairs) == 0) overlay_pairs <- FALSE
+if (overlay_pairs) {
+    y_col_overlay <- fst_pairs[[1L]]
+    overlay_data <- combined_data %>%
+        rename(fst = .data[[y_col_overlay]]) %>%
+        filter(!is.na(.data$fst))
+    if (nrow(overlay_data) == 0) stop("No FST data for overlay")
+    transform_this <- if (opts$`y-value` %in% c("rank", "quantile")) "none" else opts$transform
+    if (transform_this == "asinh") {
+        global_median <- median(overlay_data$fst, na.rm = TRUE)
+        scale_factor <- if (is.null(opts$`asinh-scale`)) sd(overlay_data$fst, na.rm = TRUE) else opts$`asinh-scale`
+        overlay_data <- overlay_data %>% mutate(fst = asinh((.data$fst - global_median) / scale_factor))
+    } else if (transform_this == "log") {
+        min_val <- min(overlay_data$fst, na.rm = TRUE)
+        if (min_val <= 0) overlay_data <- overlay_data %>% mutate(fst = log1p(pmax(0, .data$fst + 1e-10)))
+        else overlay_data <- overlay_data %>% mutate(fst = log(.data$fst))
+    }
+    pair_names_sorted <- sort(unique(overlay_data$sample_pair))
+    p <- ggplot(overlay_data, aes(x = cum_pos, y = fst, color = .data$sample_pair, group = .data$sample_pair)) +
+        scale_color_manual(name = "Pair", values = setNames(
+            rep(PLOT_PALETTE_QUALITATIVE, length.out = length(pair_names_sorted)),
+            pair_names_sorted), drop = FALSE) +
+        geom_rect(data = chr_stripes, aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = fill),
+            inherit.aes = FALSE, alpha = 0.3) +
+        scale_fill_identity() +
+        geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+        labs(x = "Genomic Position (cumulative)",
+            y = if (transform_this == "asinh") "asinh((FST - median) / SD)" else if (transform_this == "log") "log(FST)" else if (opts$`y-value` == "rank") "FST rank" else if (opts$`y-value` == "quantile") "FST quantile" else "FST (Fixation Index)",
+            title = "FST (all pairs)") +
+        theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
+        theme(panel.grid.minor = element_blank(), plot.title = element_text(hjust = 0.5),
+            axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+    if (opts$`plot-style` == "line_points") p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    has_window_size <- "window_size" %in% colnames(overlay_data) && !all(is.na(overlay_data$window_size))
+    unique_windows <- if (has_window_size) unique(overlay_data$window_size[!is.na(overlay_data$window_size)]) else NULL
+    multiple_windows <- has_window_size && length(unique_windows) > 1
+    if (multiple_windows) p <- p + facet_wrap(~ window_size, scales = "fixed", ncol = 1)
+    chr_labels <- chr_lengths$chr[chr_lengths$chr %in% unique(overlay_data$chr)]
+    chr_centers <- chr_stripes %>% mutate(chr_idx = row_number()) %>%
+        filter(chr_idx <= length(chr_labels)) %>% mutate(center = (.data$xmin + .data$xmax) / 2) %>% select(center)
+    if (nrow(chr_centers) == length(chr_labels) && nrow(chr_centers) > 0) {
+        p <- p + scale_x_continuous(breaks = chr_centers$center, labels = chr_labels, expand = c(0.02, 0))
+    }
+    out_name <- paste0(opts$`file-prefix`, "fst_overlay")
+    if (opts$`y-value` != "value") out_name <- paste0(out_name, "_", opts$`y-value`)
+    for (fmt in strsplit(opts$`plot-format`, ",")[[1]]) {
+        fmt <- trimws(tolower(fmt))
+        if (fmt %in% c("png", "pdf", "svg")) {
+            ext <- if (fmt == "png") ".png" else if (fmt == "pdf") ".pdf" else ".svg"
+            ggsave(file.path(opts$`output-dir`, paste0(out_name, ext)), plot = p, width = opts$width, height = opts$height, dpi = PLOT_DPI)
+        }
+    }
+} else {
 
 for (pair_name in names(fst_pairs)) {
     fst_col <- fst_pairs[[pair_name]]
@@ -802,11 +904,18 @@ for (pair_name in names(fst_pairs)) {
     if ("cum_pos" %in% colnames(combined_data)) {
         cols_to_select <- c("chr", "pos", "cum_pos", "window_size", fst_col)
     }
-    
+    if (combined_data_long_format && "sample_pair" %in% colnames(combined_data)) {
+        pair_data <- combined_data %>%
+            filter(.data$sample_pair == pair_name) %>%
+            select(any_of(c(cols_to_select, "sample_pair"))) %>%
+            rename(fst = all_of(fst_col)) %>%
+            filter(!is.na(.data$fst))
+    } else {
     pair_data <- combined_data %>%
         select(all_of(cols_to_select)) %>%
         rename(fst = all_of(fst_col)) %>%
         filter(!is.na(.data$fst))
+    }
     
     # Add cum_pos if it's missing (shouldn't happen, but safety check)
     if (!"cum_pos" %in% colnames(pair_data)) {
@@ -846,13 +955,14 @@ for (pair_name in names(fst_pairs)) {
     
     # Store original data for statistics calculation
     pair_data_original <- pair_data
-    
+    transform_this <- if (opts$`y-value` %in% c("rank", "quantile")) "none" else opts$transform
+
     # Calculate global median and standard deviation for asinh transformation (if needed)
     # Also store log shift if needed for axis label inverse transformation
     global_median <- NULL
     scale_factor <- NULL
     log_shift <- NULL
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         global_median <- median(pair_data_original$fst, na.rm=TRUE)
         global_sd <- sd(pair_data_original$fst, na.rm=TRUE)
         
@@ -867,12 +977,12 @@ for (pair_name in names(fst_pairs)) {
     }
     
     # Apply transformation if requested (for plotting)
-    if (opts$transform != "none") {
-        if (opts$transform == "asinh") {
+    if (transform_this != "none") {
+        if (transform_this == "asinh") {
             # Apply asinh transformation: asinh((x - global_median) / scale_factor)
             pair_data <- pair_data %>%
                 mutate(fst = asinh((.data$fst - global_median) / scale_factor))
-        } else if (opts$transform == "log") {
+        } else if (transform_this == "log") {
             # Check for zeros or negatives
             min_val <- min(pair_data_original$fst, na.rm=TRUE)
             if (min_val <= 0) {
@@ -1081,7 +1191,7 @@ for (pair_name in names(fst_pairs)) {
     panel_cols <- intersect(facet_panel_cols, colnames(stats_summary))
     
     # Apply transformation to reference lines if needed
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         # For asinh, reference lines need to be transformed using the global median and scale
         # The median itself becomes asinh((median - global_median) / scale_factor)
         # Other stats are transformed as asinh((stat - global_median) / scale_factor)
@@ -1096,7 +1206,7 @@ for (pair_name in names(fst_pairs)) {
                 q99_transformed = asinh((q99 - global_median) / scale_factor),
                 q99.8_transformed = asinh((q99.8 - global_median) / scale_factor)
             )
-    } else if (opts$transform == "log") {
+    } else if (transform_this == "log") {
         # For log transformation, apply the same transformation as to the data
         # Use original data to determine shift
         min_val <- min(pair_data_original$fst, na.rm=TRUE)
@@ -1363,38 +1473,43 @@ for (pair_name in names(fst_pairs)) {
     # Ensure data is sorted by cum_pos (critical for line plotting)
     pair_data <- pair_data %>% arrange(.data$cum_pos)
     
-    # Create plot with explicit grouping to ensure single continuous line
-    # When combining data from multiple files, we need to ensure the line connects properly
+    # Create plot (per-pair mode; overlay-pairs uses a separate code path above)
     p <- ggplot(pair_data, aes(x=cum_pos, y=fst)) +
         # Add chromosome stripes
         geom_rect(data=chr_stripes, aes(xmin=xmin, xmax=xmax, ymin=-Inf, ymax=Inf, fill=fill),
                   inherit.aes=FALSE, alpha=0.3) +
         scale_fill_identity() +
-        # Add data points - use group=1 to ensure single continuous line across all data
-        # This is especially important when combining data from multiple files
+        # Add data - use group=1 to ensure single continuous line across all data
         geom_line(alpha=0.7, linewidth=0.5, group=1, na.rm=TRUE) +
         labs(
             x="Genomic Position (cumulative)",
-            y=if (opts$transform == "asinh") {
+            y=if (transform_this == "asinh") {
                 if (is.null(opts$`asinh-scale`)) {
                     "asinh((FST - median) / SD)"
                 } else {
                     paste0("asinh((FST - ", round(global_median, 4), ") / ", round(scale_factor, 4), ")")
                 }
-            } else if (opts$transform == "log") {
+            } else if (transform_this == "log") {
                 "log(FST)"
+            } else if (opts$`y-value` == "rank") {
+                "FST rank"
+            } else if (opts$`y-value` == "quantile") {
+                "FST quantile"
             } else {
                 "FST (Fixation Index)"
             },
             title=paste("FST:", pair_name)
         ) +
-        theme_bw() +
+        theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
         theme(
             panel.grid.minor=element_blank(),
             plot.title=element_text(hjust=0.5),
             axis.text.x=element_text(angle=45, hjust=1, vjust=1)
         )
-    
+    if (opts$`plot-style` == "line_points") {
+        p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    }
+
     # Add y-axis scale with inverse transformation for labels (if transformation is applied)
     # This labels the axis ticks with original (untransformed) values while plotting transformed data
     # Helper function to format numbers with scientific notation when appropriate
@@ -1426,7 +1541,7 @@ for (pair_name in names(fst_pairs)) {
         return(formatted)
     }
     
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         # Get range of original (untransformed) values
         orig_range <- range(pair_data_original$fst, na.rm=TRUE)
         
@@ -1454,7 +1569,7 @@ for (pair_name in names(fst_pairs)) {
             breaks = y_breaks,
             labels = y_labels_formatted
         )
-    } else if (opts$transform == "log") {
+    } else if (transform_this == "log") {
         # Get range of original (untransformed) values
         orig_range <- range(pair_data_original$fst, na.rm=TRUE)
         
@@ -1673,19 +1788,18 @@ for (pair_name in names(fst_pairs)) {
         }
     }
     
-    # Transform suffix - add if transform is not "none"
+    # Transform suffix - add if transform applied
     transform_suffix <- ""
-    if (opts$transform != "none") {
-        if (opts$transform == "asinh") {
-            transform_suffix <- "_asinhtrans"
-        } else if (opts$transform == "log") {
-            transform_suffix <- "_logtrans"
-        }
+    if (transform_this != "none") {
+        if (transform_this == "asinh") transform_suffix <- "_asinhtrans"
+        else if (transform_this == "log") transform_suffix <- "_logtrans"
     }
-    
+    if (opts$`y-value` == "rank") transform_suffix <- paste0(transform_suffix, "_rank")
+    if (opts$`y-value` == "quantile") transform_suffix <- paste0(transform_suffix, "_quantile")
+
     if ("png" %in% format_parts) {
         png_file <- file.path(opts$`output-dir`, paste0(prefix, "fst_", pair_safe, window_suffix, chr_suffix, transform_suffix, ".png"))
-        ggsave(png_file, p, width=opts$width, height=opts$height, dpi=300)
+        ggsave(png_file, p, width=opts$width, height=opts$height, dpi=if (!is.null(opts$dpi)) opts$dpi else PLOT_DPI)
         cat("Saved:", png_file, "\n")
     }
     
@@ -1700,6 +1814,7 @@ for (pair_name in names(fst_pairs)) {
         ggsave(svg_file, p, width=opts$width, height=opts$height, device="svg")
         cat("Saved:", svg_file, "\n")
     }
+}
 }
 
 # Combine and save statistics

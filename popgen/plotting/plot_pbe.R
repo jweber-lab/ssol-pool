@@ -24,10 +24,25 @@ suppressPackageStartupMessages({
     library(tidyr)
 })
 
+initial_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- initial_args[substr(initial_args, 1, 7) == "--file="]
+script_dir <- if (length(file_arg) > 0) dirname(sub("^--file=", "", file_arg)) else "."
+plot_common_path <- file.path(script_dir, "plot_common.R")
+if (!file.exists(plot_common_path)) plot_common_path <- file.path(getwd(), "plot_common.R")
+if (file.exists(plot_common_path)) source(plot_common_path)
+
 # Parse command-line arguments
 option_list <- list(
     make_option(c("--input-dir"), type="character", default=NULL,
-                help="Directory containing PBE TSV files", metavar="DIR"),
+                help="Directory containing PBE TSV or HDF5 files", metavar="DIR"),
+    make_option(c("--input-format"), type="character", default="auto",
+                help="Input format: tsv, hdf5, or auto [default: %default]", metavar="FORMAT"),
+    make_option(c("--y-value"), type="character", default="value",
+                help="Y-axis: value, rank, or quantile [default: %default]", metavar="VALUE"),
+    make_option(c("--plot-style"), type="character", default="line",
+                help="Plot style: line or line_points [default: %default]", metavar="STYLE"),
+    make_option(c("--overlay-trios"), action="store_true", default=FALSE,
+                help="Plot all trios in one panel per window (color = trio); no facet by trio", metavar="FLAG"),
     make_option(c("--output-dir"), type="character", default=".",
                 help="Output directory for plots [default: %default]", metavar="DIR"),
     make_option(c("--reference-genome"), type="character", default=NULL,
@@ -41,6 +56,8 @@ option_list <- list(
                 help="Plot width in inches [default: %default]", metavar="NUMBER"),
     make_option(c("--height"), type="numeric", default=8,
                 help="Plot height in inches [default: %default]", metavar="NUMBER"),
+    make_option(c("--dpi"), type="numeric", default=NULL,
+                help="DPI for PNG (default: 300)", metavar="NUMBER"),
     make_option(c("--file-prefix"), type="character", default="",
                 help="Prefix for output files [default: no prefix]", metavar="PREFIX"),
     make_option(c("--sample-trios"), type="character", default="",
@@ -72,6 +89,16 @@ if (is.null(opts$`input-dir`)) {
 if (!opts$`panel-by` %in% c("window", "trio", "both", "none")) {
     stop("--panel-by must be one of: window, trio, both, none")
 }
+if (!opts$`input-format` %in% c("tsv", "hdf5", "auto")) {
+    stop("--input-format must be one of: tsv, hdf5, auto")
+}
+if (!opts$`y-value` %in% c("value", "rank", "quantile")) {
+    stop("--y-value must be one of: value, rank, quantile")
+}
+
+if (!opts$`plot-style` %in% c("line", "line_points")) {
+    stop("--plot-style must be one of: line, line_points")
+}
 
 if (!opts$transform %in% c("asinh", "log", "none")) {
     stop("--transform must be one of: asinh, log, none")
@@ -98,6 +125,17 @@ format_parts <- unique(format_parts)
 if (!dir.exists(opts$`output-dir`)) {
     dir.create(opts$`output-dir`, recursive=TRUE)
 }
+
+input_dir <- opts$`input-dir`
+input_format_used <- opts$`input-format`
+if (input_format_used == "auto") {
+    h5_candidates <- list.files(input_dir, pattern = "^pbe_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    input_format_used <- if (length(h5_candidates) > 0) "hdf5" else "tsv"
+}
+if (input_format_used == "hdf5" && !requireNamespace("hdf5r", quietly = TRUE)) {
+    stop("--input-format hdf5 requires package 'hdf5r'. Install with: install.packages(\"hdf5r\")")
+}
+summary_tsv <- NULL
 
 # Function to read FASTA index (.fai) to get chromosome lengths
 read_fai <- function(fai_file) {
@@ -259,37 +297,65 @@ peek_column_names <- function(filepath) {
     return(tolower(trimws(cols)))
 }
 
-# Find all PBE files (TSV or CSV)
-input_dir <- opts$`input-dir`
-tsv_files <- list.files(input_dir, pattern=".*pbe.*\\.tsv$", full.names=TRUE, recursive=TRUE)
-csv_files <- list.files(input_dir, pattern=".*pbe.*\\.csv$", full.names=TRUE, recursive=TRUE)
-all_files <- c(tsv_files, csv_files)
-
-if (length(all_files) == 0) {
-    stop("No PBE files found in: ", input_dir, " (expected files matching pattern: *pbe*.tsv or *pbe*.csv)")
-}
-
-if (opts$verbose) {
-    cat("Found", length(all_files), "PBE file(s) (", length(tsv_files), " TSV, ", length(csv_files), " CSV)\n", sep="")
-}
-
-# Filter files by window size if specified (before reading)
+# Find all PBE files and read (TSV or HDF5)
 selected_window_size <- opts$`window-size`
+selected_trios <- NULL
+selected_trios_normalized <- character(0)
+if (opts$`sample-trios` != "") {
+    selected_trios <- strsplit(opts$`sample-trios`, ",")[[1]]
+    selected_trios <- trimws(selected_trios)
+    selected_trios_normalized <- sapply(selected_trios, function(t) {
+        parts <- strsplit(t, ":")[[1]]
+        if (length(parts) == 3) return(normalize_trio_name(t))
+        t
+    })
+}
+combined_data_long_format <- FALSE
+if (input_format_used == "hdf5") {
+    all_h5 <- list.files(input_dir, pattern = "^pbe_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    if (length(all_h5) == 0) stop("No PBE HDF5 files found in: ", input_dir)
+    if (!is.null(selected_window_size)) {
+        file_win_sizes <- vapply(all_h5, function(f) { ps <- parse_window_step_from_filename(basename(f)); ps$window_size }, numeric(1))
+        all_h5 <- all_h5[!is.na(file_win_sizes) & file_win_sizes == selected_window_size]
+        if (length(all_h5) == 0) stop("No HDF5 files matching window size ", selected_window_size)
+    }
+    all_data_list <- list()
+    summary_list <- list()
+    for (path in all_h5) {
+        grp_name <- if (grepl("single", basename(path), ignore.case = TRUE)) "sites" else "windows"
+        d <- read_h5_windows(path, grp_name)
+        if (is.null(d) || nrow(d) == 0) next
+        ps <- parse_window_step_from_filename(basename(path))
+        d$window_size <- ps$window_size
+        d$step_size <- ps$step_size
+        if (!"pos" %in% names(d) && "start" %in% names(d)) d$pos <- as.numeric(d$start)
+        else if (!"pos" %in% names(d) && "end" %in% names(d)) d$pos <- as.numeric(d$end)
+        else if (!"pos" %in% names(d) && "start" %in% names(d) && "end" %in% names(d)) d$pos <- (as.numeric(d$start) + as.numeric(d$end)) / 2
+        if (all(c("pop1", "pop2", "pop3") %in% names(d))) d$trio <- paste(d$pop1, d$pop2, d$pop3, sep = ":")
+        all_data_list[[path]] <- d
+        sum_t <- read_summary_tsv_for_h5(path)
+        if (!is.null(sum_t)) summary_list[[path]] <- sum_t
+    }
+    combined_data <- bind_rows(all_data_list)
+    combined_data_long_format <- TRUE
+    if (length(summary_list) > 0) summary_tsv <- bind_rows(summary_list)
+    if (length(selected_trios_normalized) > 0) {
+        combined_data <- combined_data %>% mutate(trio_norm = sapply(.data$trio, function(x) normalize_trio_name(x))) %>%
+            filter(.data$trio_norm %in% selected_trios_normalized) %>% select(-.data$trio_norm)
+        if (nrow(combined_data) == 0) stop("None of the specified sample trios found in HDF5 data")
+    }
+    if (opts$verbose) cat("Read", length(all_h5), "HDF5 file(s); combined", nrow(combined_data), "rows (long format)\n")
+} else {
+tsv_files <- list.files(input_dir, pattern = ".*pbe.*\\.tsv$", full.names = TRUE, recursive = TRUE)
+csv_files <- list.files(input_dir, pattern = ".*pbe.*\\.csv$", full.names = TRUE, recursive = TRUE)
+all_files <- c(tsv_files, csv_files)
+if (length(all_files) == 0) stop("No PBE files found in: ", input_dir)
 if (!is.null(selected_window_size)) {
     file_window_sizes <- sapply(all_files, function(f) extract_window_size_from_filename(basename(f)))
-    # Check for "single" label in filenames (single-position windows, 1bp windows at each SNP)
-    has_single_label <- grepl("single", basename(all_files), ignore.case=TRUE)
-    # Keep files that:
-    # - Do not have "single" label, AND
-    # - Have no window size indication in filename (is.na), OR match the selected window size
-    # Exclude files with "single" label or different window sizes
+    has_single_label <- grepl("single", basename(all_files), ignore.case = TRUE)
     all_files <- all_files[!has_single_label & (is.na(file_window_sizes) | file_window_sizes == selected_window_size)]
-    if (opts$verbose) {
-        cat("Filtered to", length(all_files), "file(s) matching window size", selected_window_size, " (excluding *single* and different window sizes)\n")
-    }
-    if (length(all_files) == 0) {
-        stop("No files found matching window size ", selected_window_size)
-    }
+    if (length(all_files) == 0) stop("No files matching window size ", selected_window_size)
+    if (opts$verbose) cat("Filtered to", length(all_files), "file(s) matching window size", selected_window_size, "\n")
 }
 
 # Helper function to extract trio names from filename
@@ -558,10 +624,9 @@ for (file in all_files) {
 }
 
 # Combine all data using tidyverse
-if (opts$verbose) {
-    cat("\n=== Combining data from", length(all_data), "file(s) ===\n")
+    if (opts$verbose) cat("\n=== Combining data from", length(all_data), "file(s) ===\n")
+    combined_data <- bind_rows(all_data)
 }
-combined_data <- bind_rows(all_data)
 
 if (opts$verbose) {
     cat("Combined data dimensions:", nrow(combined_data), "rows,", ncol(combined_data), "columns\n")
@@ -602,7 +667,17 @@ if (nrow(combined_data) == 0) {
     stop("Error: All rows were filtered out! Check chr and pos columns.")
 }
 
-# Parse PBE column
+# Parse PBE column (or use long-format trios when from HDF5)
+if (combined_data_long_format && "trio" %in% colnames(combined_data)) {
+    y_col <- switch(opts$`y-value`, rank = "pbe_rank", quantile = "pbe_quantile", "pbe")
+    if (!y_col %in% colnames(combined_data)) stop("--y-value ", opts$`y-value`, " requested but column '", y_col, "' not found in HDF5.")
+    trio_names <- unique(combined_data$trio[!is.na(combined_data$trio)])
+    pbe_trios <- setNames(rep(y_col, length(trio_names)), trio_names)
+    if (length(selected_trios_normalized) > 0) {
+        pbe_trios <- pbe_trios[sapply(names(pbe_trios), function(t) normalize_trio_name(t) %in% selected_trios_normalized)]
+        if (length(pbe_trios) == 0) stop("None of the specified sample trios found in data")
+    }
+} else {
 pbe_cols <- colnames(combined_data)[grepl("^pbe$", colnames(combined_data), ignore.case=TRUE)]
 if (length(pbe_cols) == 0) {
     stop("No PBE column found in input files. Expected column named 'PBE' or 'pbe'")
@@ -678,6 +753,7 @@ for (trio_name in names(pbe_trios_raw)) {
 
 if (length(pbe_trios) == 0) {
     stop("Could not parse sample trios from PBE files")
+}
 }
 
 if (opts$verbose) {
@@ -830,8 +906,62 @@ combined_data <- add_cumulative_positions(combined_data, chr_lengths)
 # Create chromosome stripes
 chr_stripes <- create_chr_stripes(chr_lengths)
 
-# Process each sample trio
+# Process each sample trio (or overlay all trios in one panel)
 stats_results <- list()
+
+overlay_trios <- opts$`overlay-trios` && combined_data_long_format && "trio" %in% colnames(combined_data) && length(pbe_trios) > 0
+if (overlay_trios) {
+    y_col_overlay <- pbe_trios[[1L]]
+    overlay_data <- combined_data %>%
+        rename(pbe = .data[[y_col_overlay]]) %>%
+        filter(!is.na(.data$pbe))
+    if (nrow(overlay_data) == 0) stop("No PBE data for overlay")
+    transform_this <- if (opts$`y-value` %in% c("rank", "quantile")) "none" else opts$transform
+    if (transform_this == "asinh") {
+        global_median <- median(overlay_data$pbe, na.rm = TRUE)
+        scale_factor <- if (is.null(opts$`asinh-scale`)) sd(overlay_data$pbe, na.rm = TRUE) else opts$`asinh-scale`
+        overlay_data <- overlay_data %>% mutate(pbe = asinh((.data$pbe - global_median) / scale_factor))
+    } else if (transform_this == "log") {
+        min_val <- min(overlay_data$pbe, na.rm = TRUE)
+        if (min_val <= 0) overlay_data <- overlay_data %>% mutate(pbe = log1p(pmax(0, .data$pbe + 1e-10)))
+        else overlay_data <- overlay_data %>% mutate(pbe = log(.data$pbe))
+    }
+    trio_names_sorted <- sort(unique(overlay_data$trio))
+    p <- ggplot(overlay_data, aes(x = cum_pos, y = pbe, color = .data$trio, group = .data$trio)) +
+        scale_color_manual(name = "Trio", values = setNames(
+            rep(PLOT_PALETTE_QUALITATIVE, length.out = length(trio_names_sorted)),
+            trio_names_sorted), drop = FALSE) +
+        geom_rect(data = chr_stripes, aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = fill),
+            inherit.aes = FALSE, alpha = 0.3) +
+        scale_fill_identity() +
+        geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+        labs(x = "Genomic Position (cumulative)",
+            y = if (transform_this == "asinh") "asinh((PBE - median) / SD)" else if (transform_this == "log") "log(PBE)" else if (opts$`y-value` == "rank") "PBE rank" else if (opts$`y-value` == "quantile") "PBE quantile" else "PBE (Population Branch Excess)",
+            title = "PBE (all trios)") +
+        theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
+        theme(panel.grid.minor = element_blank(), plot.title = element_text(hjust = 0.5),
+            axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+    if (opts$`plot-style` == "line_points") p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    has_window_size <- "window_size" %in% colnames(overlay_data) && !all(is.na(overlay_data$window_size))
+    unique_windows <- if (has_window_size) unique(overlay_data$window_size[!is.na(overlay_data$window_size)]) else NULL
+    multiple_windows <- has_window_size && length(unique_windows) > 1
+    if (multiple_windows) p <- p + facet_wrap(~ window_size, scales = "fixed", ncol = 1)
+    chr_labels <- chr_lengths$chr[chr_lengths$chr %in% unique(overlay_data$chr)]
+    chr_centers <- chr_stripes %>% mutate(chr_idx = row_number()) %>%
+        filter(chr_idx <= length(chr_labels)) %>% mutate(center = (.data$xmin + .data$xmax) / 2) %>% select(center)
+    if (nrow(chr_centers) == length(chr_labels) && nrow(chr_centers) > 0) {
+        p <- p + scale_x_continuous(breaks = chr_centers$center, labels = chr_labels, expand = c(0.02, 0))
+    }
+    out_name <- paste0(opts$`file-prefix`, "pbe_overlay")
+    if (opts$`y-value` != "value") out_name <- paste0(out_name, "_", opts$`y-value`)
+    for (fmt in strsplit(opts$`plot-format`, ",")[[1]]) {
+        fmt <- trimws(tolower(fmt))
+        if (fmt %in% c("png", "pdf", "svg")) {
+            ext <- if (fmt == "png") ".png" else if (fmt == "pdf") ".pdf" else ".svg"
+            ggsave(file.path(opts$`output-dir`, paste0(out_name, ext)), plot = p, width = opts$width, height = opts$height, dpi = PLOT_DPI)
+        }
+    }
+} else {
 
 for (trio_name in names(pbe_trios)) {
     pbe_col <- pbe_trios[[trio_name]]
@@ -840,16 +970,18 @@ for (trio_name in names(pbe_trios)) {
     }
     
     # Extract PBE values for this trio using tidyverse
-    # Filter by source_trio if available, otherwise use all data
-    if ("source_trio" %in% colnames(combined_data)) {
+    # Filter by source_trio or trio (long format) if available, otherwise use all data
+    if (combined_data_long_format && "trio" %in% colnames(combined_data)) {
+        trio_data_raw <- combined_data %>% filter(.data$trio == trio_name)
+    } else if ("source_trio" %in% colnames(combined_data)) {
         trio_data_raw <- combined_data %>%
             filter(is.na(.data$source_trio) | .data$source_trio == trio_name)
     } else {
         trio_data_raw <- combined_data
     }
     
-    # Check if PBE column exists
-    if (!"pbe" %in% colnames(trio_data_raw)) {
+    # Check if PBE column exists (or the y-value column when long format)
+    if (!pbe_col %in% colnames(trio_data_raw)) {
         cat("Warning: PBE column not found in combined_data for trio '", trio_name, "', skipping\n", sep="")
         if (opts$verbose) {
             cat("  Available columns:", paste(head(colnames(combined_data), 20), collapse=", "), if(length(colnames(combined_data)) > 20) "..." else "", "\n")
@@ -860,7 +992,7 @@ for (trio_name in names(pbe_trios)) {
     
     # Check how many non-NA values exist
     if (opts$verbose) {
-        non_na_count <- sum(!is.na(trio_data_raw$pbe))
+        non_na_count <- sum(!is.na(trio_data_raw[[pbe_col]]))
         cat("  PBE column has ", non_na_count, " non-NA values for trio '", trio_name, "'\n", sep="")
         if (non_na_count == 0) {
             cat("  ERROR: PBE column exists but has no non-NA values!\n")
@@ -869,13 +1001,14 @@ for (trio_name in names(pbe_trios)) {
     }
     
     # Select columns that exist (cum_pos might not exist if add_cumulative_positions failed)
-    cols_to_select <- c("chr", "pos", "window_size", "pbe")
+    cols_to_select <- c("chr", "pos", "window_size", pbe_col)
     if ("cum_pos" %in% colnames(trio_data_raw)) {
-        cols_to_select <- c("chr", "pos", "cum_pos", "window_size", "pbe")
+        cols_to_select <- c("chr", "pos", "cum_pos", "window_size", pbe_col)
     }
     
     trio_data <- trio_data_raw %>%
-        select(all_of(cols_to_select)) %>%
+        select(any_of(cols_to_select)) %>%
+        rename(pbe = all_of(pbe_col)) %>%
         filter(!is.na(.data$pbe))
     
     # Add cum_pos if it's missing (shouldn't happen, but safety check)
@@ -916,13 +1049,14 @@ for (trio_name in names(pbe_trios)) {
     
     # Store original data for statistics calculation
     trio_data_original <- trio_data
-    
+    transform_this <- if (opts$`y-value` %in% c("rank", "quantile")) "none" else opts$transform
+
     # Calculate global median and standard deviation for asinh transformation (if needed)
     # Also store log shift if needed for axis label inverse transformation
     global_median <- NULL
     scale_factor <- NULL
     log_shift <- NULL
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         global_median <- median(trio_data_original$pbe, na.rm=TRUE)
         global_sd <- sd(trio_data_original$pbe, na.rm=TRUE)
         
@@ -937,12 +1071,12 @@ for (trio_name in names(pbe_trios)) {
     }
     
     # Apply transformation if requested (for plotting)
-    if (opts$transform != "none") {
-        if (opts$transform == "asinh") {
+    if (transform_this != "none") {
+        if (transform_this == "asinh") {
             # Apply asinh transformation: asinh((x - global_median) / scale_factor)
             trio_data <- trio_data %>%
                 mutate(pbe = asinh((.data$pbe - global_median) / scale_factor))
-        } else if (opts$transform == "log") {
+        } else if (transform_this == "log") {
             # Check for zeros or negatives
             min_val <- min(trio_data_original$pbe, na.rm=TRUE)
             if (min_val <= 0) {
@@ -1445,26 +1579,33 @@ for (trio_name in names(pbe_trios)) {
         geom_line(alpha=0.7, linewidth=0.5, group=1, na.rm=TRUE) +
         labs(
             x="Genomic Position (cumulative)",
-            y=if (opts$transform == "asinh") {
+            y=if (transform_this == "asinh") {
                 if (is.null(opts$`asinh-scale`)) {
                     "asinh((PBE - median) / SD)"
                 } else {
                     paste0("asinh((PBE - ", round(global_median, 4), ") / ", round(scale_factor, 4), ")")
                 }
-            } else if (opts$transform == "log") {
+            } else if (transform_this == "log") {
                 "log(PBE)"
+            } else if (opts$`y-value` == "rank") {
+                "PBE rank"
+            } else if (opts$`y-value` == "quantile") {
+                "PBE quantile"
             } else {
                 "PBE (Population Branch Excess)"
             },
             title=paste("PBE:", trio_name)
         ) +
-        theme_bw() +
+        theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
         theme(
             panel.grid.minor=element_blank(),
             plot.title=element_text(hjust=0.5),
             axis.text.x=element_text(angle=45, hjust=1, vjust=1)
         )
-    
+    if (opts$`plot-style` == "line_points") {
+        p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    }
+
     # Add y-axis scale with inverse transformation for labels (if transformation is applied)
     # This labels the axis ticks with original (untransformed) values while plotting transformed data
     # Helper function to format numbers with scientific notation when appropriate
@@ -1496,7 +1637,7 @@ for (trio_name in names(pbe_trios)) {
         return(formatted)
     }
     
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         # Get range of original (untransformed) values
         orig_range <- range(trio_data_original$pbe, na.rm=TRUE)
         
@@ -1524,7 +1665,7 @@ for (trio_name in names(pbe_trios)) {
             breaks = y_breaks,
             labels = y_labels_formatted
         )
-    } else if (opts$transform == "log") {
+    } else if (transform_this == "log") {
         # Get range of original (untransformed) values
         orig_range <- range(trio_data_original$pbe, na.rm=TRUE)
         
@@ -1755,7 +1896,7 @@ for (trio_name in names(pbe_trios)) {
     
     if ("png" %in% format_parts) {
         png_file <- file.path(opts$`output-dir`, paste0(prefix, "pbe_", trio_safe, window_suffix, chr_suffix, transform_suffix, ".png"))
-        ggsave(png_file, p, width=opts$width, height=opts$height, dpi=300)
+        ggsave(png_file, p, width=opts$width, height=opts$height, dpi=if (!is.null(opts$dpi)) opts$dpi else PLOT_DPI)
         cat("Saved:", png_file, "\n")
     }
     
@@ -1770,6 +1911,7 @@ for (trio_name in names(pbe_trios)) {
         ggsave(svg_file, p, width=opts$width, height=opts$height, device="svg")
         cat("Saved:", svg_file, "\n")
     }
+}
 }
 
 # Combine and save statistics

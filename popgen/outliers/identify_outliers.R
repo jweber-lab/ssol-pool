@@ -21,8 +21,32 @@
 #     sample1:sample2.fst, sample1:sample2:sample3.pbe; then outlier_stat (colon-separated
 #     list of statistics in which this window passed the threshold, e.g. pi:fst:pbe).
 #   outlier_regions_*.csv   One row per merged/expanded region when --merge-distance or
-#     seed-expand is used. Columns: chr, region_start, region_end, n_windows, optional
-#     region_mean_coverage, region_mean_mapping_quality, region_n_snps, outlier_stat.
+#     seed-expand is used. Filename includes _across_samples or _within_samples and
+#     _seed_expand or _merge_only. Columns: chr, region_start, region_end, n_windows,
+#     outlier_stat; optional region_mean_coverage, region_mean_mapping_quality, region_n_snps;
+#     per-stat summaries (for each value column): region_mean_<name> (overlap-corrected),
+#     region_max_<name>, region_max_<name>_quantile (quantile of the most extreme window).
+#
+# How regions are built (see also --merge-across-samples):
+#   (1) Merge-only path (no --expand-*): merge_outlier_windows_to_regions() groups
+#       outlier windows by chr and by gap; when gap between consecutive (sorted by start)
+#       windows > merge_distance a new region starts. region_start/end = min(start)/max(end)
+#       of that group. With --merge-across-samples true, all samples are merged together;
+#       with false, merging is done separately per sample (or per sample_pair for FST/PBE).
+#   (2) Seed-expand path (--expand-high-quantile etc.): For each (stat, sample) we call
+#       seed_expand_regions(); then with --merge-across-samples true, overlapping/nearby
+#       regions from different samples are merged into one set; with false, we keep one
+#       row per distinct (chr, region_start, region_end) from any sample (so regions can
+#       overlap when different samples produced different extents). n_windows = number of
+#       *rows* in the group or overlapping tagged windows (see below), not region_span/step.
+#   n_windows: In merge-only path it is the count of outlier (window x sample) rows in
+#       the merged group. In seed-expand path, add_region_aggregates() sets n_windows =
+#       number of rows in the tagged windows (seed + expanded) that overlap the region;
+#       a window can appear as both "seed" and "expanded", so the same interval may be
+#       counted twice. So n_windows is not "unique window positions in [region_start,
+#       region_end]" and is not region_span/step (e.g. 458 for 136500 bp at step 500
+#       is expected when counting tagged rows, possibly with double-counting).
+#
 # Summary statistics are not written here; use plot/other scripts for that.
 # Coordinates: 1-based inclusive where applicable.
 ###############################################################################
@@ -78,6 +102,8 @@ option_list <- list(
                 help="Directory containing collated HDF5 (diversity_w*.h5, fst_w*.h5); used instead of --diversity-dir/--fst-dir when set", metavar="DIR"),
     make_option(c("--merge-distance"), type="character", default="auto",
                 help="Merge nearby outlier windows into regions: integer bp, or 'auto' = max(2*window_size, 2000) [default: auto]", metavar="NUMBER"),
+    make_option(c("--merge-across-samples"), type="character", default="true",
+                help="When building regions: merge windows/regions across samples (true) or only within each sample (false). Affects both merge-only and seed-expand modes [default: true]", metavar="true|false"),
     make_option(c("--min-depth"), type="numeric", default=NULL,
                 help="Minimum mean coverage (depth) for a window to be a seed or in expansion [optional]", metavar="NUMBER"),
     make_option(c("--max-depth"), type="numeric", default=NULL,
@@ -104,6 +130,9 @@ option_list <- list(
 
 opt_parser <- OptionParser(option_list=option_list, usage="usage: %prog [options]")
 opts <- parse_args(opt_parser)
+# Coerce --merge-across-samples to logical (default TRUE)
+merge_across_val <- tolower(trimws(opts$`merge-across-samples`))
+opts$merge_across_samples <- !identical(merge_across_val, "false") && !identical(merge_across_val, "0")
 
 # Validate arguments
 if (is.null(opts$`fst-dir`) && is.null(opts$`diversity-dir`) && is.null(opts$`hdf5-dir`)) {
@@ -483,6 +512,98 @@ add_region_aggregates <- function(regions, windows) {
         out_list[[i]] <- r
     }
     bind_rows(out_list)
+}
+
+# For each (region, value_col): overlap-corrected mean stat, max stat, quantile of the window with max.
+# windows_by_value_col: named list of tibbles with chr, start, end, value, and optional quantile column.
+# Weights: 1 / (number of windows overlapping this window); then weighted mean = sum(value*weight)/sum(weight).
+add_region_stat_summaries <- function(regions, windows_by_value_col) {
+    if (is.null(regions) || nrow(regions) == 0) return(regions)
+    if (length(windows_by_value_col) == 0) return(regions)
+    for (vc in names(windows_by_value_col)) {
+        w <- windows_by_value_col[[vc]]
+        if (is.null(w) || nrow(w) == 0 || !"value" %in% colnames(w)) next
+        qcol <- intersect(c("quantile", paste0(gsub(".*\\.", "", vc), "_quantile")), colnames(w))[1L]
+        if (length(qcol) == 0 || is.na(qcol)) qcol <- NULL
+        safe_name <- gsub("[:.]", "_", vc)
+        mean_col <- paste0("region_mean_", safe_name)
+        max_col <- paste0("region_max_", safe_name)
+        max_quant_col <- paste0("region_max_", safe_name, "_quantile")
+        out_means <- numeric(nrow(regions))
+        out_maxs <- numeric(nrow(regions))
+        out_max_quants <- rep(NA_real_, nrow(regions))
+        for (i in seq_len(nrow(regions))) {
+            r <- regions[i, ]
+            sub <- w %>%
+                filter(.data$chr == r$chr, .data$start <= r$region_end, .data$end >= r$region_start) %>%
+                filter(!is.na(.data$value))
+            if (nrow(sub) == 0) {
+                out_means[i] <- NA_real_
+                out_maxs[i] <- NA_real_
+                next
+            }
+            # Overlap count: for each window, how many windows in sub overlap it
+            n_overlap <- vapply(seq_len(nrow(sub)), function(k) {
+                sum(sub$start <= sub$end[k] & sub$end >= sub$start[k], na.rm = TRUE)
+            }, integer(1L))
+            weight <- 1 / pmax(n_overlap, 1L)
+            out_means[i] <- sum(sub$value * weight, na.rm = TRUE) / sum(weight, na.rm = TRUE)
+            idx_max <- which.max(sub$value)
+            out_maxs[i] <- sub$value[idx_max]
+            if (!is.null(qcol) && qcol %in% colnames(sub)) out_max_quants[i] <- sub[[qcol]][idx_max]
+        }
+        regions[[mean_col]] <- out_means
+        regions[[max_col]] <- out_maxs
+        regions[[max_quant_col]] <- out_max_quants
+    }
+    regions
+}
+
+# Build list of window tibbles (chr, start, end, value, quantile) keyed by value_col for add_region_stat_summaries.
+# value_cols: character vector of names like "Cheney.pi", "S1:S2.fst", "S1:S2:S3.pbe".
+build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe_data) {
+    out <- list()
+    if (length(value_cols) == 0) return(out)
+    for (vc in value_cols) {
+        if (grepl("\\.pbe$", vc)) {
+            trio <- sub("\\.pbe$", "", vc)
+            if (is.null(pbe_data) || nrow(pbe_data) == 0) next
+            if ("trio_id" %in% colnames(pbe_data)) {
+                sub <- pbe_data %>% filter(.data$trio_id == trio)
+            } else {
+                trio_parts <- strsplit(trio, ":", fixed = TRUE)[[1]]
+                if (length(trio_parts) != 3) next
+                sub <- pbe_data %>%
+                    filter(.data$pop1 == trio_parts[1], .data$pop2 == trio_parts[2], .data$pop3 == trio_parts[3])
+            }
+            sub <- sub %>%
+                transmute(chr = .data$chr, start = .data$start, end = .data$end, value = .data$pbe,
+                         quantile = if ("pbe_quantile" %in% colnames(pbe_data)) .data$pbe_quantile else NA_real_)
+            if (nrow(sub) > 0) out[[vc]] <- sub
+        } else if (grepl("\\.fst$", vc)) {
+            pair <- sub("\\.fst$", "", vc)
+            if (is.null(fst_data) || nrow(fst_data) == 0) next
+            sub <- fst_data %>% filter(.data$sample_pair == pair) %>%
+                transmute(chr = .data$chr, start = .data$start, end = .data$end, value = .data$fst,
+                         quantile = if ("fst_quantile" %in% colnames(fst_data)) .data$fst_quantile else NA_real_)
+            if (nrow(sub) > 0) out[[vc]] <- sub
+        } else {
+            # diversity: "Cheney.pi", "Echo.theta" (last segment is stat, rest is sample)
+            parts <- strsplit(vc, ".", fixed = TRUE)[[1]]
+            if (length(parts) < 2) next
+            stat_col <- parts[length(parts)]
+            sample_name <- paste(parts[-length(parts)], collapse = ".")
+            if (is.null(diversity_data) || nrow(diversity_data) == 0 || !stat_col %in% colnames(diversity_data)) next
+            qcol <- paste0(stat_col, "_quantile")
+            sub <- diversity_data %>%
+                filter(.data$sample == sample_name) %>%
+                transmute(chr = .data$chr, start = .data$start, end = .data$end,
+                         value = !!sym(stat_col),
+                         quantile = if (qcol %in% colnames(diversity_data)) !!sym(qcol) else NA_real_)
+            if (nrow(sub) > 0) out[[vc]] <- sub
+        }
+    }
+    out
 }
 
 # Apply region-level depth, mapping quality, and region SNP filters from opts. Returns filtered regions df.
@@ -1902,6 +2023,14 @@ if (length(outlier_results) > 0) {
     if (!is.null(opts$`top-n-extreme`) && opts$`top-n-extreme` > 0) {
         quantile_suffix <- paste0(quantile_suffix, "_top", opts$`top-n-extreme`)
     }
+    merge_suffix <- if (opts$merge_across_samples) "_across_samples" else "_within_samples"
+    value_cols_for_regions <- sort(setdiff(names(wide_outliers), c("chr", "start", "end", "outlier_stat")))
+    windows_by_value_col <- build_windows_by_value_col(
+        value_cols_for_regions,
+        diversity_data,
+        if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data else NULL,
+        pbe_data
+    )
 
     outliers_file <- file.path(opts$`output-dir`, paste0("outlier_windows", window_suffix, chr_suffix, quantile_suffix, region_filename_suffix, ".csv"))
     write_csv(wide_outliers, outliers_file)
@@ -1910,17 +2039,45 @@ if (length(outlier_results) > 0) {
 
     if (expand_mode && length(expanded_region_results) > 0) {
         all_expanded <- bind_rows(expanded_region_results)
-        regions <- all_expanded %>%
-            group_by(.data$chr, .data$region_start, .data$region_end) %>%
-            summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop")
-        other_cols <- all_expanded %>%
-            group_by(.data$chr, .data$region_start, .data$region_end) %>%
-            slice(1L) %>%
-            select(.data$chr, .data$region_start, .data$region_end, any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
-        regions <- regions %>% left_join(other_cols, by = c("chr", "region_start", "region_end"))
+        if (opts$merge_across_samples) {
+            # Merge overlapping/nearby regions from different samples into one set of regions.
+            merge_dist <- opts$`merge-distance`
+            if (merge_dist == "auto") {
+                wins <- unique(all_outliers$window_size[!is.na(all_outliers$window_size)])
+                merge_dist <- if (length(wins) > 0) max(2 * max(wins), 2000) else 2000
+            } else {
+                merge_dist <- as.numeric(merge_dist)
+                if (is.na(merge_dist) || merge_dist < 0) merge_dist <- 2000
+            }
+            merged_bounds <- merge_regions(all_expanded %>% select(.data$chr, .data$region_start, .data$region_end), max_gap = merge_dist)
+            # Reattach outlier_stat and other cols from overlapping all_expanded rows.
+            overlap_join <- all_expanded %>%
+                inner_join(merged_bounds %>% rename(region_start_m = .data$region_start, region_end_m = .data$region_end), by = "chr") %>%
+                filter(.data$region_start <= .data$region_end_m, .data$region_end >= .data$region_start_m)
+            regions <- overlap_join %>%
+                group_by(.data$chr, .data$region_start_m, .data$region_end_m) %>%
+                summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop") %>%
+                rename(region_start = .data$region_start_m, region_end = .data$region_end_m)
+            other_cols <- overlap_join %>%
+                group_by(.data$chr, .data$region_start_m, .data$region_end_m) %>%
+                slice(1L) %>%
+                select(.data$chr, region_start = .data$region_start_m, region_end = .data$region_end_m, any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
+            regions <- regions %>% left_join(other_cols, by = c("chr", "region_start", "region_end"))
+        } else {
+            # One row per (chr, region_start, region_end) from any sample; no cross-sample merging.
+            regions <- all_expanded %>%
+                group_by(.data$chr, .data$region_start, .data$region_end) %>%
+                summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop")
+            other_cols <- all_expanded %>%
+                group_by(.data$chr, .data$region_start, .data$region_end) %>%
+                slice(1L) %>%
+                select(.data$chr, .data$region_start, .data$region_end, any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
+            regions <- regions %>% left_join(other_cols, by = c("chr", "region_start", "region_end"))
+        }
+        regions <- add_region_stat_summaries(regions, windows_by_value_col)
         regions <- filter_regions_by_opts(regions, opts)
         if (nrow(regions) > 0) {
-            regions_file <- file.path(opts$`output-dir`, paste0("outlier_regions", window_suffix, chr_suffix, quantile_suffix, region_filename_suffix, ".csv"))
+            regions_file <- file.path(opts$`output-dir`, paste0("outlier_regions", window_suffix, chr_suffix, quantile_suffix, merge_suffix, "_seed_expand", region_filename_suffix, ".csv"))
             write_csv(regions, regions_file)
             cat("Saved outlier regions to:", regions_file, "\n")
             cat("Total regions:", nrow(regions), "\n")
@@ -1936,7 +2093,23 @@ if (length(outlier_results) > 0) {
                 merge_dist <- as.numeric(merge_dist)
                 if (is.na(merge_dist) || merge_dist < 0) merge_dist <- 2000
             }
-            regions <- merge_outlier_windows_to_regions(all_outliers, merge_dist)
+            if (opts$merge_across_samples) {
+                regions <- merge_outlier_windows_to_regions(all_outliers, merge_dist)
+            } else {
+                # Merge within each sample (or sample_pair for FST/PBE).
+                merge_by <- if ("sample" %in% colnames(all_outliers)) "sample" else "sample_pair"
+                if (!merge_by %in% colnames(all_outliers)) merge_by <- NULL
+                if (!is.null(merge_by)) {
+                    regions_list <- all_outliers %>%
+                        mutate(merge_by = coalesce(!!sym(merge_by), "unknown")) %>%
+                        group_by(.data$merge_by) %>%
+                        group_map(~ merge_outlier_windows_to_regions(.x %>% select(-.data$merge_by), merge_dist), .keep = TRUE)
+                    regions_list <- Filter(Negate(is.null), regions_list)
+                    regions <- if (length(regions_list) > 0) bind_rows(regions_list) else NULL
+                } else {
+                    regions <- merge_outlier_windows_to_regions(all_outliers, merge_dist)
+                }
+            }
             if (!is.null(regions) && nrow(regions) > 0) {
                 region_stats <- all_outliers %>%
                     filter(!is.na(.data$chr)) %>%
@@ -1945,9 +2118,10 @@ if (length(outlier_results) > 0) {
                     group_by(.data$chr, .data$region_start, .data$region_end) %>%
                     summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop")
                 regions <- regions %>% left_join(region_stats, by = c("chr", "region_start", "region_end"))
+                regions <- add_region_stat_summaries(regions, windows_by_value_col)
                 regions <- filter_regions_by_opts(regions, opts)
                 if (nrow(regions) > 0) {
-                    regions_file <- file.path(opts$`output-dir`, paste0("outlier_regions", window_suffix, chr_suffix, quantile_suffix, region_filename_suffix, ".csv"))
+                    regions_file <- file.path(opts$`output-dir`, paste0("outlier_regions", window_suffix, chr_suffix, quantile_suffix, merge_suffix, "_merge_only", region_filename_suffix, ".csv"))
                     write_csv(regions, regions_file)
                     cat("Saved outlier regions to:", regions_file, "\n")
                     cat("Total regions:", nrow(regions), "\n")

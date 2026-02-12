@@ -24,10 +24,26 @@ suppressPackageStartupMessages({
     library(tidyr)
 })
 
+# Shared helpers (HDF5 read, theme constants, palette)
+initial_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- initial_args[substr(initial_args, 1, 7) == "--file="]
+script_dir <- if (length(file_arg) > 0) dirname(sub("^--file=", "", file_arg)) else "."
+plot_common_path <- file.path(script_dir, "plot_common.R")
+if (!file.exists(plot_common_path)) plot_common_path <- file.path(getwd(), "plot_common.R")
+if (file.exists(plot_common_path)) source(plot_common_path)
+
 # Parse command-line arguments
 option_list <- list(
     make_option(c("--input-dir"), type="character", default=NULL,
-                help="Directory containing diversity TSV files", metavar="DIR"),
+                help="Directory containing diversity TSV or HDF5 files", metavar="DIR"),
+    make_option(c("--input-format"), type="character", default="auto",
+                help="Input format: tsv, hdf5, or auto (detect from directory) [default: %default]", metavar="FORMAT"),
+    make_option(c("--y-value"), type="character", default="value",
+                help="Y-axis: value (raw stat), rank, or quantile [default: %default]", metavar="VALUE"),
+    make_option(c("--plot-style"), type="character", default="line",
+                help="Plot style: line or line_points [default: %default]", metavar="STYLE"),
+    make_option(c("--overlay-samples"), action="store_true", default=FALSE,
+                help="Plot all samples in one panel per window (color = sample); no facet by sample", metavar="FLAG"),
     make_option(c("--output-dir"), type="character", default=".",
                 help="Output directory for plots [default: %default]", metavar="DIR"),
     make_option(c("--reference-genome"), type="character", default=NULL,
@@ -44,6 +60,8 @@ option_list <- list(
                 help="Plot width in inches [default: %default]", metavar="NUMBER"),
     make_option(c("--height"), type="numeric", default=8,
                 help="Plot height in inches [default: %default]", metavar="NUMBER"),
+    make_option(c("--dpi"), type="numeric", default=NULL,
+                help="DPI for PNG (default: 300)", metavar="NUMBER"),
     make_option(c("--file-prefix"), type="character", default="",
                 help="Prefix for output files [default: no prefix]", metavar="PREFIX"),
     make_option(c("--chromosome"), type="character", default=NULL,
@@ -72,6 +90,18 @@ if (is.null(opts$`input-dir`)) {
 
 if (!opts$`panel-by` %in% c("window", "sample", "both", "none")) {
     stop("--panel-by must be one of: window, sample, both, none")
+}
+
+if (!opts$`input-format` %in% c("tsv", "hdf5", "auto")) {
+    stop("--input-format must be one of: tsv, hdf5, auto")
+}
+
+if (!opts$`y-value` %in% c("value", "rank", "quantile")) {
+    stop("--y-value must be one of: value, rank, quantile")
+}
+
+if (!opts$`plot-style` %in% c("line", "line_points")) {
+    stop("--plot-style must be one of: line, line_points")
 }
 
 if (!opts$transform %in% c("asinh", "log", "none")) {
@@ -107,6 +137,22 @@ if (!all(statistics %in% valid_stats)) {
 if (!dir.exists(opts$`output-dir`)) {
     dir.create(opts$`output-dir`, recursive=TRUE)
 }
+
+# Resolve input format (tsv vs hdf5)
+input_dir <- opts$`input-dir`
+input_format_used <- opts$`input-format`
+if (input_format_used == "auto") {
+    h5_candidates <- list.files(input_dir, pattern = "^diversity_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    input_format_used <- if (length(h5_candidates) > 0) "hdf5" else "tsv"
+    if (opts$verbose) cat("Auto-detected input format:", input_format_used, "\n")
+} else if (input_format_used == "hdf5") {
+    if (!requireNamespace("hdf5r", quietly = TRUE)) {
+        stop("--input-format hdf5 requires package 'hdf5r'. Install with: install.packages(\"hdf5r\")")
+    }
+}
+
+# Will be set when using summary TSV for reference lines (HDF5 path)
+summary_tsv <- NULL
 
 # Function to read FASTA index (.fai) to get chromosome lengths
 read_fai <- function(fai_file) {
@@ -233,42 +279,53 @@ extract_sample_from_filepath <- function(filepath, input_dir) {
     return(NA)
 }
 
-# Find all diversity files (TSV or CSV)
-input_dir <- opts$`input-dir`
-tsv_files <- list.files(input_dir, pattern=".*diversity.*\\.tsv$", full.names=TRUE, recursive=TRUE)
-csv_files <- list.files(input_dir, pattern=".*diversity.*\\.csv$", full.names=TRUE, recursive=TRUE)
-all_files <- c(tsv_files, csv_files)
-
-if (length(all_files) == 0) {
-    stop("No diversity files found in: ", input_dir, " (expected files matching pattern: *diversity*.tsv or *diversity*.csv)")
-}
-
-if (opts$verbose) {
-    cat("Found", length(all_files), "diversity file(s) (", length(tsv_files), " TSV, ", length(csv_files), " CSV)\n", sep="")
-}
-
-# Filter files by window size if specified (before reading)
+# Find all diversity files and read (TSV or HDF5)
 selected_window_size <- opts$`window-size`
-if (!is.null(selected_window_size)) {
-    file_window_sizes <- sapply(all_files, extract_window_size_from_filename)
-    # Check for "single" label in filenames (single-position windows, 1bp windows at each SNP)
-    has_single_label <- grepl("single", basename(all_files), ignore.case=TRUE)
-    # Keep files that:
-    # - Do not have "single" label, AND
-    # - Have no window size indication in filename (is.na), OR match the selected window size
-    # Exclude files with "single" label or different window sizes
-    all_files <- all_files[!has_single_label & (is.na(file_window_sizes) | file_window_sizes == selected_window_size)]
-    if (opts$verbose) {
-        cat("Filtered to", length(all_files), "file(s) matching window size", selected_window_size, " (excluding *single* and different window sizes)\n")
-    }
-    if (length(all_files) == 0) {
-        stop("No files found matching window size ", selected_window_size)
-    }
-}
 
-# Read and combine all diversity files using tidyverse
-all_data <- list()
-for (file in all_files) {
+if (input_format_used == "hdf5") {
+    all_h5 <- list.files(input_dir, pattern = "^diversity_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    if (length(all_h5) == 0) stop("No diversity HDF5 files found in: ", input_dir, " (expected pattern: diversity_*.h5)")
+    if (!is.null(selected_window_size)) {
+        file_win_sizes <- vapply(all_h5, function(f) { ps <- parse_window_step_from_filename(basename(f)); ps$window_size }, numeric(1))
+        all_h5 <- all_h5[!is.na(file_win_sizes) & file_win_sizes == selected_window_size]
+        if (length(all_h5) == 0) stop("No HDF5 files matching window size ", selected_window_size)
+    }
+    all_data_list <- list()
+    summary_list <- list()
+    for (path in all_h5) {
+        d <- read_h5_windows(path, "windows")
+        if (is.null(d) || nrow(d) == 0) next
+        ps <- parse_window_step_from_filename(basename(path))
+        d$window_size <- ps$window_size
+        d$step_size <- ps$step_size
+        if (!"pos" %in% names(d) && "start" %in% names(d)) d$pos <- as.numeric(d$start)
+        else if (!"pos" %in% names(d) && "end" %in% names(d)) d$pos <- as.numeric(d$end)
+        else if (!"pos" %in% names(d) && "start" %in% names(d) && "end" %in% names(d)) d$pos <- (as.numeric(d$start) + as.numeric(d$end)) / 2
+        all_data_list[[path]] <- d
+        sum_t <- read_summary_tsv_for_h5(path)
+        if (!is.null(sum_t)) summary_list[[path]] <- sum_t
+    }
+    combined_data <- bind_rows(all_data_list)
+    if (length(summary_list) > 0) {
+        summary_tsv <- bind_rows(summary_list)
+        if (opts$verbose) cat("Loaded reference stats from", length(summary_list), "summary TSV file(s)\n")
+    }
+    if (opts$verbose) cat("Read", length(all_h5), "HDF5 file(s); combined", nrow(combined_data), "rows\n")
+} else {
+    tsv_files <- list.files(input_dir, pattern = ".*diversity.*\\.tsv$", full.names = TRUE, recursive = TRUE)
+    csv_files <- list.files(input_dir, pattern = ".*diversity.*\\.csv$", full.names = TRUE, recursive = TRUE)
+    all_files <- c(tsv_files, csv_files)
+    if (length(all_files) == 0) stop("No diversity files found in: ", input_dir, " (expected *diversity*.tsv or *diversity*.csv)")
+    if (opts$verbose) cat("Found", length(all_files), "diversity file(s) (", length(tsv_files), " TSV, ", length(csv_files), " CSV)\n", sep = "")
+    if (!is.null(selected_window_size)) {
+        file_window_sizes <- sapply(all_files, extract_window_size_from_filename)
+        has_single_label <- grepl("single", basename(all_files), ignore.case = TRUE)
+        all_files <- all_files[!has_single_label & (is.na(file_window_sizes) | file_window_sizes == selected_window_size)]
+        if (length(all_files) == 0) stop("No files found matching window size ", selected_window_size)
+        if (opts$verbose) cat("Filtered to", length(all_files), "file(s) matching window size", selected_window_size, "\n")
+    }
+    all_data <- list()
+    for (file in all_files) {
     cat("\n=== Reading:", basename(file), "===\n")
     
     # Detect separator by reading first line
@@ -520,13 +577,10 @@ for (file in all_files) {
     }
     
     all_data[[file]] <- data
+    }
+    if (opts$verbose) cat("\n=== Combining data from", length(all_data), "file(s) ===\n")
+    combined_data <- bind_rows(all_data)
 }
-
-# Combine all data using tidyverse
-if (opts$verbose) {
-    cat("\n=== Combining data from", length(all_data), "file(s) ===\n")
-}
-combined_data <- bind_rows(all_data)
 
 if (opts$verbose) {
     cat("Combined data dimensions:", nrow(combined_data), "rows,", ncol(combined_data), "columns\n")
@@ -676,17 +730,23 @@ stats_results <- list()
 for (stat in statistics) {
     if (opts$verbose) cat("\nProcessing statistic:", stat, "\n")
     
-    # Map statistic name to column name
-    stat_col <- switch(stat,
-        "pi" = "pi",
-        "theta" = "theta",
-        "tajima_d" = "tajima_d"
-    )
-    
-    # Check if column exists
+    # Map statistic name to column name (value, rank, or quantile per --y-value)
+    stat_col_base <- switch(stat, "pi" = "pi", "theta" = "theta", "tajima_d" = "tajima_d")
+    y_val <- opts$`y-value`
+    if (y_val == "rank") {
+        stat_col <- paste0(stat_col_base, "_rank")
+    } else if (y_val == "quantile") {
+        stat_col <- paste0(stat_col_base, "_quantile")
+    } else {
+        stat_col <- stat_col_base
+    }
     if (!stat_col %in% colnames(combined_data)) {
-        cat("Warning: Column '", stat_col, "' not found in combined data\n", sep="")
-        cat("  Available columns:", paste(colnames(combined_data), collapse=", "), "\n")
+        if (y_val %in% c("rank", "quantile")) {
+            stop("--y-value ", y_val, " requested but column '", stat_col, "' not found. ",
+                 "Use HDF5 input (collate output) or --y-value value for TSV.")
+        }
+        cat("Warning: Column '", stat_col, "' not found in combined data\n", sep = "")
+        cat("  Available columns:", paste(colnames(combined_data), collapse = ", "), "\n")
         cat("  Skipping statistic:", stat, "\n")
         next
     }
@@ -709,12 +769,15 @@ for (stat in statistics) {
     # Store original data for statistics calculation
     stat_data_original <- stat_data
     
+    # When plotting rank or quantile, do not apply asinh/log
+    transform_this <- if (y_val %in% c("rank", "quantile")) "none" else opts$transform
+    
     # Calculate global median and standard deviation for asinh transformation (if needed)
     # Also store log shift if needed for axis label inverse transformation
     global_median <- NULL
     scale_factor <- NULL
     log_shift <- NULL
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         global_median <- median(stat_data_original[[stat_col]], na.rm=TRUE)
         global_sd <- sd(stat_data_original[[stat_col]], na.rm=TRUE)
         
@@ -729,12 +792,12 @@ for (stat in statistics) {
     }
     
     # Apply transformation if requested (for plotting)
-    if (opts$transform != "none") {
-        if (opts$transform == "asinh") {
+    if (transform_this != "none") {
+        if (transform_this == "asinh") {
             # Apply asinh transformation: asinh((x - global_median) / scale_factor)
             stat_data <- stat_data %>%
                 mutate(!!stat_col := asinh((.data[[stat_col]] - global_median) / scale_factor))
-        } else if (opts$transform == "log") {
+        } else if (transform_this == "log") {
             # Check for zeros or negatives
             min_val <- min(stat_data_original[[stat_col]], na.rm=TRUE)
             if (min_val <= 0) {
@@ -753,8 +816,22 @@ for (stat in statistics) {
         }
     }
     
-    # Calculate statistics from ORIGINAL data (before transformation)
-    # This ensures reference lines are calculated correctly
+    # Calculate statistics from ORIGINAL data (before transformation), or use summary TSV when available
+    if (!is.null(summary_tsv) && nrow(summary_tsv) > 0 && stat %in% summary_tsv$stat) {
+        sum_f <- summary_tsv %>% filter(.data$stat == !!stat)
+        if (nrow(sum_f) > 0) {
+            stats_summary <- sum_f %>% mutate(chr = "genome")
+            if ("q05" %in% names(stats_summary)) stats_summary <- stats_summary %>% rename(q5 = q05)
+            if ("q01" %in% names(stats_summary)) stats_summary <- stats_summary %>% rename(q1 = q01)
+            if (!"q5" %in% names(stats_summary)) stats_summary$q5 <- NA_real_
+            if (!"q1" %in% names(stats_summary)) stats_summary$q1 <- NA_real_
+            stats_summary <- stats_summary %>% mutate(q0.2 = NA_real_, q99.8 = NA_real_)
+            stats_summary$statistic <- stat
+        } else {
+            stats_summary <- NULL
+        }
+    }
+    if (is.null(stats_summary) || nrow(stats_summary) == 0) {
     if (opts$`panel-by` == "none" || opts$`panel-by` == "window") {
         # Genome-wide and per-chromosome, optionally by window
         if (opts$`panel-by` == "window" && "window_size" %in% colnames(stat_data_original) && !all(is.na(stat_data_original$window_size))) {
@@ -906,6 +983,7 @@ for (stat in statistics) {
             stats_summary$window_size <- NA
         }
     }
+    }
     
     # Add statistic name
     stats_summary$statistic <- stat
@@ -916,7 +994,7 @@ for (stat in statistics) {
     panel_cols <- intersect(c("sample", "window_size"), colnames(stats_summary))
     
     # Apply transformation to reference lines if needed
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         # For asinh, reference lines need to be transformed using the global median and scale
         # The median itself becomes 0 after asinh((median - global_median) / scale_factor), so median = 0
         # Other stats are transformed as asinh((stat - global_median) / scale_factor)
@@ -931,7 +1009,7 @@ for (stat in statistics) {
                 q99_transformed = asinh((q99 - global_median) / scale_factor),
                 q99.8_transformed = asinh((q99.8 - global_median) / scale_factor)
             )
-    } else if (opts$transform == "log") {
+    } else if (transform_this == "log") {
         # For log transformation, apply the same transformation as to the data
         # Use original data to determine shift
         min_val <- min(stat_data_original[[stat_col]], na.rm=TRUE)
@@ -1062,17 +1140,26 @@ for (stat in statistics) {
         }
     }
     
-    # Create plot
-    p <- ggplot(stat_data, aes(x=cum_pos, y=.data[[stat_col]])) +
+    # Create plot (optionally color by sample when overlay-samples)
+    overlay_samples <- opts$`overlay-samples`
+    if (overlay_samples && "sample" %in% colnames(stat_data)) {
+        p <- ggplot(stat_data, aes(x=cum_pos, y=.data[[stat_col]], color=.data$sample, group=.data$sample)) +
+            scale_color_manual(name = "Sample", values = setNames(
+                rep(PLOT_PALETTE_QUALITATIVE, length.out = length(unique(stat_data$sample))),
+                sort(unique(stat_data$sample))), drop = FALSE)
+    } else {
+        p <- ggplot(stat_data, aes(x=cum_pos, y=.data[[stat_col]]))
+    }
+    p <- p +
         # Add chromosome stripes
         geom_rect(data=chr_stripes, aes(xmin=xmin, xmax=xmax, ymin=-Inf, ymax=Inf, fill=fill),
                   inherit.aes=FALSE, alpha=0.3) +
         scale_fill_identity() +
-        # Add data points
+        # Add data (line and optionally points)
         geom_line(alpha=0.7, linewidth=0.5) +
         labs(
             x="Genomic Position (cumulative)",
-            y=if (opts$transform == "asinh") {
+            y=if (transform_this == "asinh") {
                 if (is.null(opts$`asinh-scale`)) {
                     switch(stat,
                         "pi" = expression(asinh((pi - median) / SD)),
@@ -1086,12 +1173,16 @@ for (stat in statistics) {
                         "tajima_d" = paste0("asinh((Tajima's D - ", round(global_median, 4), ") / ", round(scale_factor, 4), ")")
                     )
                 }
-            } else if (opts$transform == "log") {
+            } else if (transform_this == "log") {
                 switch(stat,
                     "pi" = expression(log(pi)),
                     "theta" = expression(log(theta)),
                     "tajima_d" = "log(Tajima's D)"
                 )
+            } else if (y_val == "rank") {
+                switch(stat, "pi" = expression(pi ~ "rank"), "theta" = expression(theta ~ "rank"), "tajima_d" = "Tajima's D rank")
+            } else if (y_val == "quantile") {
+                switch(stat, "pi" = expression(pi ~ "quantile"), "theta" = expression(theta ~ "quantile"), "tajima_d" = "Tajima's D quantile")
             } else {
                 switch(stat,
                     "pi" = expression(pi ~ "(Nucleotide Diversity)"),
@@ -1105,40 +1196,53 @@ for (stat in statistics) {
                 "tajima_d" = "Tajima's D"
             ))
         ) +
-        theme_bw() +
+        theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
         theme(
             panel.grid.minor=element_blank(),
             plot.title=element_text(hjust=0.5),
             axis.text.x=element_text(angle=45, hjust=1, vjust=1)
         )
-    
+    if (opts$`plot-style` == "line_points") {
+        p <- p + geom_point(size = 1, alpha = 0.7)
+    }
+
     # Add reference lines (genome-wide) with legend
-    # Only use labels that are actually present in ref_lines (not all factor levels)
+    # When overlay_samples we use only linetype for Reference (color is used for Sample)
     if (nrow(ref_lines) > 0) {
-        # Get unique labels that are actually present (not all factor levels)
         present_labels <- unique(ref_lines$label)
         present_labels <- present_labels[!is.na(present_labels)]
-        
-        # Create color and linetype mappings only for present labels
         color_map <- setNames(ref_lines$color, ref_lines$label)[as.character(present_labels)]
         linetype_map <- setNames(rep("dashed", length(present_labels)), as.character(present_labels))
-        
-        p <- p +
-            geom_hline(data=ref_lines, 
-                       aes(yintercept=.data$yintercept, linetype=.data$label, color=.data$label),
-                       linewidth=0.8, show.legend=TRUE) +
-            scale_linetype_manual(
-                name="Reference",
-                values=linetype_map,
-                breaks=as.character(present_labels),
-                guide=guide_legend(override.aes=list(color=color_map))
-            ) +
-            scale_color_manual(
-                name="Reference",
-                values=color_map,
-                breaks=as.character(present_labels),
-                guide="legend"
+
+        if (overlay_samples) {
+            for (i in seq_len(nrow(ref_lines))) {
+                p <- p + geom_hline(data = ref_lines[i, ], aes(yintercept = .data$yintercept, linetype = .data$label),
+                    color = ref_lines$color[i], linewidth = 0.8, show.legend = TRUE)
+            }
+            p <- p + scale_linetype_manual(
+                name = "Reference",
+                values = linetype_map,
+                breaks = as.character(present_labels),
+                guide = guide_legend(override.aes = list(color = color_map))
             )
+        } else {
+            p <- p +
+                geom_hline(data = ref_lines,
+                    aes(yintercept = .data$yintercept, linetype = .data$label, color = .data$label),
+                    linewidth = 0.8, show.legend = TRUE) +
+                scale_linetype_manual(
+                    name = "Reference",
+                    values = linetype_map,
+                    breaks = as.character(present_labels),
+                    guide = guide_legend(override.aes = list(color = color_map))
+                ) +
+                scale_color_manual(
+                    name = "Reference",
+                    values = color_map,
+                    breaks = as.character(present_labels),
+                    guide = "legend"
+                )
+        }
     }
     
     # Helper function to format numbers with scientific notation when appropriate
@@ -1172,7 +1276,7 @@ for (stat in statistics) {
     
     # Add y-axis scale with inverse transformation for labels (if transformation is applied)
     # This labels the axis ticks with original (untransformed) values while plotting transformed data
-    if (opts$transform == "asinh") {
+    if (transform_this == "asinh") {
         # Get range of original (untransformed) values
         orig_range <- range(stat_data_original[[stat_col]], na.rm=TRUE)
         
@@ -1200,7 +1304,7 @@ for (stat in statistics) {
             breaks = y_breaks,
             labels = y_labels_formatted
         )
-    } else if (opts$transform == "log") {
+    } else if (transform_this == "log") {
         # Get range of original (untransformed) values
         orig_range <- range(stat_data_original[[stat_col]], na.rm=TRUE)
         
@@ -1264,8 +1368,13 @@ for (stat in statistics) {
     }
     unique_samples <- unique(stat_data$sample)
     multiple_samples <- length(unique_samples) > 1
-    
-    if (opts$`panel-by` == "window" && has_window_size) {
+
+    if (overlay_samples) {
+        # Overlay mode: no facet by sample; one panel per window size if multiple
+        if (has_window_size && multiple_windows) {
+            p <- p + facet_wrap(~ window_size, scales="fixed", ncol=1)
+        }
+    } else if (opts$`panel-by` == "window" && has_window_size) {
         # Panel by window size vertically
         if (multiple_samples) {
             # If multiple samples, add horizontal paneling by sample
@@ -1399,19 +1508,18 @@ for (stat in statistics) {
         sample_suffix <- ""
     }
     
-    # Transform suffix - add if transform is not "none"
+    # Transform suffix - add if transform applied to this plot
     transform_suffix <- ""
-    if (opts$transform != "none") {
-        if (opts$transform == "asinh") {
-            transform_suffix <- "_asinhtrans"
-        } else if (opts$transform == "log") {
-            transform_suffix <- "_logtrans"
-        }
+    if (transform_this != "none") {
+        if (transform_this == "asinh") transform_suffix <- "_asinhtrans"
+        else if (transform_this == "log") transform_suffix <- "_logtrans"
     }
-    
+    if (y_val == "rank") transform_suffix <- paste0(transform_suffix, "_rank")
+    if (y_val == "quantile") transform_suffix <- paste0(transform_suffix, "_quantile")
+
     if ("png" %in% format_parts) {
         png_file <- file.path(opts$`output-dir`, paste0(prefix, stat_label, window_suffix, chr_suffix, sample_suffix, transform_suffix, ".png"))
-        ggsave(png_file, p, width=opts$width, height=opts$height, dpi=300)
+        ggsave(png_file, p, width=opts$width, height=opts$height, dpi=if (!is.null(opts$dpi)) opts$dpi else PLOT_DPI)
         cat("Saved:", png_file, "\n")
     }
     

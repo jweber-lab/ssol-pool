@@ -21,6 +21,7 @@ STATISTICS="pi,theta,tajima_d"
 PLOT_FORMAT="png"
 WIDTH=12
 HEIGHT=8
+DPI=""
 FILE_PREFIX=""
 CHROMOSOME=""
 WINDOW_SIZE=""
@@ -28,6 +29,10 @@ TOP_N_CHROMOSOMES=""
 MIN_CHROMOSOME_LENGTH=""
 TRANSFORM="none"
 ASINH_SCALE=""
+INPUT_FORMAT="auto"
+Y_VALUE="value"
+PLOT_STYLE="line"
+OVERLAY_SAMPLES=false
 RSCRIPT=""
 DRY_RUN=false
 
@@ -43,9 +48,13 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Required:
-  --input-dir DIR             Directory containing diversity TSV files (from calculate_pi_theta.sh)
+  --input-dir DIR             Directory containing diversity TSV or HDF5 files (from calculate_pi_theta.sh or collate)
 
 Optional:
+  --input-format FORMAT       Input format: tsv, hdf5, or auto (default: auto)
+  --y-value VALUE             Y-axis: value, rank, or quantile (default: value; rank/quantile require HDF5)
+  --plot-style STYLE          Plot style: line or line_points (default: line)
+  --overlay-samples           Plot all samples in one panel per window (color = sample)
   --output-dir DIR            Output directory for plots (default: ./)
   --reference-genome FILE     Reference genome FASTA file (optional, for chromosome lengths)
   --panel-by OPTION           Paneling option: window, sample, both, or none (default: both)
@@ -53,6 +62,7 @@ Optional:
   --plot-format FORMAT        Plot format: png, pdf, svg, both, or all (default: png)
   --width N                   Plot width in inches (default: 12)
   --height N                  Plot height in inches (default: 8)
+  --dpi N                     DPI for PNG (default: 300)
   --file-prefix PREFIX        Prefix for output files (default: no prefix)
   --chromosome CHR            Single chromosome/scaffold to plot (default: all chromosomes)
   --window-size NUMBER        Single window size to plot (default: all window sizes)
@@ -181,6 +191,10 @@ while [[ $# -gt 0 ]]; do
             HEIGHT="$2"
             shift 2
             ;;
+        --dpi)
+            DPI="$2"
+            shift 2
+            ;;
         --file-prefix)
             FILE_PREFIX="$2"
             shift 2
@@ -208,6 +222,22 @@ while [[ $# -gt 0 ]]; do
         --asinh-scale)
             ASINH_SCALE="$2"
             shift 2
+            ;;
+        --input-format)
+            INPUT_FORMAT="$2"
+            shift 2
+            ;;
+        --y-value)
+            Y_VALUE="$2"
+            shift 2
+            ;;
+        --plot-style)
+            PLOT_STYLE="$2"
+            shift 2
+            ;;
+        --overlay-samples)
+            OVERLAY_SAMPLES=true
+            shift
             ;;
         --rscript)
             RSCRIPT="$2"
@@ -321,6 +351,10 @@ R_CMD=(
     --height "$HEIGHT"
 )
 
+if [[ -n "$DPI" ]]; then
+    R_CMD+=(--dpi "$DPI")
+fi
+
 if [[ -n "$REFERENCE_GENOME" ]]; then
     R_CMD+=(--reference-genome "$REFERENCE_GENOME")
 fi
@@ -351,6 +385,22 @@ fi
 
 if [[ -n "$ASINH_SCALE" ]]; then
     R_CMD+=(--asinh-scale "$ASINH_SCALE")
+fi
+
+if [[ -n "$INPUT_FORMAT" ]]; then
+    R_CMD+=(--input-format "$INPUT_FORMAT")
+fi
+
+if [[ -n "$Y_VALUE" ]]; then
+    R_CMD+=(--y-value "$Y_VALUE")
+fi
+
+if [[ -n "$PLOT_STYLE" ]]; then
+    R_CMD+=(--plot-style "$PLOT_STYLE")
+fi
+
+if [[ "$OVERLAY_SAMPLES" == true ]]; then
+    R_CMD+=(--overlay-samples)
 fi
 
 # Run R script

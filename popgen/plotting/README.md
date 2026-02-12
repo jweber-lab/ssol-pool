@@ -4,11 +4,13 @@ This directory contains scripts for visualizing population genetics statistics f
 
 ## Overview
 
-Three main plotting workflows are available:
+Plotting workflows available:
 
-1. **FST Cathedral Plots** (`plot_fst_cathedral.sh`): Generate multi-scale FST cathedral plots using grenedalf
-2. **Diversity Statistics Plots** (`plot_diversity.R` / `plot_diversity.sh`): Create ggplot2 plots of π, θ, and Tajima's D
-3. **FST Statistics Plots** (`plot_fst.R` / `plot_fst.sh`): Create ggplot2 plots of FST values
+1. **FST Cathedral Plots** (`plot_fst_cathedral.sh`): Multi-scale FST cathedral plots using grenedalf
+2. **Diversity Statistics** (`plot_diversity.R` / `plot_diversity.sh`): π, θ, and Tajima's D
+3. **Region Stack** (`plot_region.R` / `plot_region.sh`): One stacked figure per region (coverage, π, FST, PBE)
+4. **FST Statistics** (`plot_fst.R` / `plot_fst.sh`): FST plots with paneling and overlay options
+5. **PBE Statistics** (`plot_pbe.R` / `plot_pbe.sh`): PBE plots with paneling and overlay options
 
 ## Scripts
 
@@ -98,14 +100,18 @@ Rscript plot_diversity.R \
 
 #### Key Options
 
-- `--input-dir DIR`: Directory containing diversity TSV files (from `calculate_pi_theta.sh`) (required)
+- `--input-dir DIR`: Directory containing diversity TSV or HDF5 files (from `calculate_pi_theta.sh` or collate) (required)
+- `--input-format FORMAT`: `tsv`, `hdf5`, or `auto` (default: auto)
+- `--y-value VALUE`: Y-axis: `value`, `rank`, or `quantile` (default: value; rank/quantile require HDF5)
+- `--plot-style STYLE`: `line` or `line_points` (default: line)
+- `--overlay-samples`: Plot all samples in one panel per window (color = sample)
 - `--output-dir DIR`: Output directory for plots (default: ./)
 - `--reference-genome FILE`: Reference genome FASTA file (optional, for chromosome lengths)
 - `--panel-by OPTION`: Paneling option: `window`, `sample`, `both`, or `none` (default: `both`)
 - `--statistics LIST`: Comma-separated list: `pi`, `theta`, `tajima_d` (default: all)
 - `--plot-format FORMAT`: Plot format: `png`, `pdf`, or `both` (default: `png`)
-- `--width N`: Plot width in inches (default: 12)
-- `--height N`: Plot height in inches (default: 8)
+- `--width N`, `--height N`: Plot dimensions in inches (default: 12, 8)
+- `--dpi N`: DPI for PNG (default: 300)
 - `--file-prefix PREFIX`: Prefix for output files (default: no prefix)
 - `--dry-run`: Preview commands without executing (wrapper only)
 
@@ -153,7 +159,55 @@ Rscript plot_diversity.R \
 
 ---
 
-### 3. plot_fst.R / plot_fst.sh
+### 3. plot_region.R / plot_region.sh
+
+Creates a **single stacked figure** for a genomic region (or full chromosome) with panels for coverage, π, FST, and PBE, shared x-axis, and a shared color key for sample/pair/trio.
+
+#### Usage
+
+```bash
+./plot_region.sh \
+  --chromosome chr1 \
+  --hdf5-dir ../stats/collate_out \
+  --reference-genome ../ref.fa \
+  --output-dir ./region_plots
+```
+
+Or a specific region and TSV inputs:
+
+```bash
+./plot_region.sh \
+  --region chr2:5000000-6000000 \
+  --diversity-dir ../stats/diversity \
+  --fst-dir ../stats/fst \
+  --seq-qual-dir ../alignment/seq_qual \
+  --output-dir ./region_plots
+```
+
+#### Key Options
+
+- **Region**: `--chromosome CHR` (full chromosome) and/or `--region CHR:START-END`
+- **Inputs** (at least one required): `--diversity-dir`, `--fst-dir`, `--pbe-dir`, `--seq-qual-dir` (TSV), and/or `--hdf5-dir` (collate output with `diversity_*.h5`, `fst_*.h5`, `pbe_*.h5`)
+- `--window-size N`: Use only this window size (optional)
+- `--reference-genome FILE`: For chromosome lengths
+- `--y-value VALUE`: `value`, `rank`, or `quantile` for diversity/FST/PBE (default: value)
+- `--width N`, `--height N`: Figure size in inches (default: 12, 10)
+- `--dpi N`: DPI for PNG (default: 300)
+- `--plot-format FORMAT`: png, pdf, svg, both, or all
+
+#### Output
+
+- One figure per run: `region_plot_CHR_START_END.png` (or `.pdf`/`.svg`) in `--output-dir`
+- Panel order: Coverage (if seq_qual or diversity HDF5 with mean_coverage), π, FST, PBE. Only panels with data are included.
+- Panel labels (a), (b), (c) and shared legend
+
+#### Dependencies
+
+- R packages: `ggplot2`, `dplyr`, `tidyr`, `readr`, `optparse`, **`patchwork`** (for combining panels). Optional: `hdf5r` when using `--hdf5-dir`.
+
+---
+
+### 4. plot_fst.R / plot_fst.sh
 
 Creates ggplot2 plots of FST statistics with chromosome stripes, paneling options, and summary statistics for each sample pair.
 
@@ -180,13 +234,17 @@ Rscript plot_fst.R \
 
 #### Key Options
 
-- `--input-dir DIR`: Directory containing FST TSV files (from `calculate_fst.sh`) (required)
+- `--input-dir DIR`: Directory containing FST TSV or HDF5 files (from `calculate_fst.sh` or collate) (required)
+- `--input-format FORMAT`: `tsv`, `hdf5`, or `auto` (default: auto)
+- `--y-value VALUE`: Y-axis: `value`, `rank`, or `quantile` (default: value)
+- `--plot-style STYLE`: `line` or `line_points` (default: line)
+- `--overlay-pairs`: Plot all pairs in one panel per window (color = pair)
 - `--output-dir DIR`: Output directory for plots (default: ./)
 - `--reference-genome FILE`: Reference genome FASTA file (optional, for chromosome lengths)
 - `--panel-by OPTION`: Paneling option: `window`, `pair`, `both`, or `none` (default: `both`)
 - `--plot-format FORMAT`: Plot format: `png`, `pdf`, or `both` (default: `png`)
-- `--width N`: Plot width in inches (default: 12)
-- `--height N`: Plot height in inches (default: 8)
+- `--width N`, `--height N`: Plot dimensions in inches (default: 12, 8)
+- `--dpi N`: DPI for PNG (default: 300)
 - `--file-prefix PREFIX`: Prefix for output files (default: no prefix)
 - `--sample-pairs LIST`: Comma-separated list of sample pairs to plot (default: all pairs)
 - `--dry-run`: Preview commands without executing (wrapper only)
@@ -270,11 +328,17 @@ The R scripts require the following packages (install with `install.packages()` 
 - `dplyr`: For data manipulation
 - `readr`: For reading TSV files
 - `optparse`: For command-line argument parsing
-- `tidyr`: For data reshaping (plot_fst.R only)
+- `tidyr`: For data reshaping (plot_fst.R, plot_region.R)
+- `patchwork`: For combining panels in plot_region.R
 
 Install all required packages:
 ```r
-install.packages(c("ggplot2", "dplyr", "readr", "optparse", "tidyr"))
+install.packages(c("ggplot2", "dplyr", "readr", "optparse", "tidyr", "patchwork"))
+```
+
+When using HDF5 input (e.g. collate output or `--input-format hdf5` / `--hdf5-dir`), install `hdf5r`:
+```r
+install.packages("hdf5r")
 ```
 
 ### Optional
@@ -377,9 +441,21 @@ install.packages(c("ggplot2", "dplyr", "readr", "optparse", "tidyr"))
 
 ---
 
+## Figure standards
+
+All plotting scripts (plot_diversity, plot_fst, plot_pbe, plot_region) use:
+
+- **Theme**: `theme_bw(base_size = 11, base_family = "sans")` for consistent typography
+- **DPI**: PNG output uses 300 DPI by default (override with `--dpi N` in wrappers)
+- **Panel labels**: `plot_region` adds (a), (b), (c) to stacked panels
+- **Color**: A colorblind-friendly qualitative palette is used for sample/pair/trio in overlay and plot_region
+- **Dimensions**: `--width` and `--height` are in inches; vector (PDF/SVG) preferred for submission
+
+---
+
 ## Notes
 
-- All scripts support `--dry-run` mode for previewing commands
+- All scripts support `--dry-run` mode for previewing commands (wrapper scripts)
 - Output file names include prefixes if `--file-prefix` is specified
 - Chromosome boundaries can be determined from reference genome (`.fai` or `.dict` files) or inferred from data
 - Statistics are calculated both genome-wide and per-chromosome
