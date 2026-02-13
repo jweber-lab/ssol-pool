@@ -47,6 +47,9 @@ Example BLAST config (YAML, blast_config.yml):
     - db_path: /path/to/uniprot
       name: uniprot
       gff_path: /path/to/genes.gff
+      annotation_tsv: /path/to/gene_table.tsv   # optional: join by gene_id
+  Output CSV includes gene_id, product, go_terms, strand, BLAST length/coords, etc.
+  Missing GFF or annotation files produce warnings only.
 EOF
 }
 
