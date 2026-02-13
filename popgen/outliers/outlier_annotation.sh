@@ -20,6 +20,7 @@ RSCRIPT="Rscript"
 SAMTOOLS="samtools"
 BLAST_CMD="blastn"
 THREADS=1
+PARALLEL_DBS=1
 
 usage() {
     cat << EOF
@@ -36,7 +37,8 @@ Optional:
   --rscript PATH         Path to Rscript [default: Rscript]
   --samtools PATH        Path to samtools [default: samtools]
   --blast-cmd NAME       BLAST command: blastn, blastp, etc. [default: blastn]
-  --threads N            BLAST threads [default: 1]
+  --threads N            Threads per BLAST run [default: 1]
+  --parallel-dbs N       Run N BLAST DBs in parallel (Unix/macOS; 1=sequential) [default: 1]
   -h, --help             Show this help
 
 Example BLAST config (YAML, blast_config.yml):
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --samtools) SAMTOOLS="$2"; shift 2 ;;
         --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
+        --parallel-dbs) PARALLEL_DBS="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -89,4 +92,5 @@ mkdir -p "$OUTPUT_DIR"
     --output-dir "$OUTPUT_DIR" \
     --samtools "$SAMTOOLS" \
     --blast-cmd "$BLAST_CMD" \
-    --threads "$THREADS"
+    --threads "$THREADS" \
+    --parallel-dbs "$PARALLEL_DBS"

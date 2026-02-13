@@ -234,7 +234,8 @@ option_list <- list(
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory"),
   make_option(c("--samtools"), type = "character", default = "samtools", help = "Path to samtools"),
   make_option(c("--blast-cmd"), type = "character", default = "blastn", help = "BLAST command (blastn/blastp/etc)"),
-  make_option(c("--threads"), type = "integer", default = 1L, help = "Threads for BLAST"),
+  make_option(c("--threads"), type = "integer", default = 1L, help = "Threads per BLAST run"),
+  make_option(c("--parallel-dbs"), type = "integer", default = 1L, help = "Run this many BLAST DBs in parallel (Unix/macOS only; 1 = sequential)"),
   make_option(c("--verbose"), action = "store_true", default = FALSE)
 )
 parser <- OptionParser(usage = "usage: %prog --regions FILE --reference FASTA --blast-config FILE [options]", option_list = option_list)
@@ -257,8 +258,8 @@ query_fa <- file.path(opts$`output-dir`, "regions_query.fa")
 regions$qseqid <- paste0(regions$chr, ":", regions$region_start, "-", regions$region_end)
 write_region_fasta(regions, opts$reference, query_fa, opts$samtools)
 
-all_genes <- list()
-for (db in config) {
+# Per-DB work: run BLAST, map hits to genes, optional annotation join. Returns genes tibble or NULL.
+process_one_db <- function(db) {
   db_path <- coalesce_null(db$db_path, db[[1]])
   name <- coalesce_null(coalesce_null(db$name, db[[2]]), basename(db_path))
   gff_path <- coalesce_null(db$gff_path, db[[3]])
@@ -266,37 +267,53 @@ for (db in config) {
   out_blast <- file.path(opts$`output-dir`, paste0("blast_", gsub("[^A-Za-z0-9_]", "_", name), ".tsv"))
   run_blast(query_fa, db_path, out_blast, opts$`blast-cmd`, opts$threads)
   genes <- hits_to_genes(out_blast, gff_path, verbose = opts$verbose)
-  if (!is.null(genes)) {
-    genes$db <- name
-    anno_ok <- !is.null(annotation_tsv) && length(annotation_tsv) > 0 && !is.na(annotation_tsv) && nzchar(trimws(annotation_tsv))
-    if (anno_ok) {
-      if (!file.exists(annotation_tsv)) {
-        message("Warning: optional annotation file not found, skipping: ", annotation_tsv)
-      } else {
-        anno <- tryCatch({
-          read_tsv(annotation_tsv, show_col_types = FALSE) %>% rename_all(tolower)
-        }, error = function(e) {
-          message("Warning: could not read annotation file ", annotation_tsv, ": ", conditionMessage(e))
-          NULL
-        })
-        if (!is.null(anno) && nrow(anno) > 0 && "gene_id" %in% names(anno)) {
-          idx <- match(genes$gene_id, anno$gene_id)
-          common <- setdiff(intersect(names(genes), names(anno)), "gene_id")
-          for (col in common) {
-            fill <- anno[[col]][idx]
-            genes[[col]] <- coalesce(genes[[col]], as.character(fill))
-          }
-          extra <- setdiff(names(anno), names(genes))
-          if (length(extra) > 0) {
-            genes <- genes %>%
-              left_join(anno %>% distinct(.data$gene_id, .keep_all = TRUE) %>% select("gene_id", any_of(extra)), by = "gene_id", multiple = "first")
-          }
-        } else if (!is.null(anno) && (!"gene_id" %in% names(anno))) {
-          if (opts$verbose) message("Warning: annotation file has no gene_id column: ", annotation_tsv)
+  if (is.null(genes)) return(NULL)
+  genes$db <- name
+  anno_ok <- !is.null(annotation_tsv) && length(annotation_tsv) > 0 && !is.na(annotation_tsv) && nzchar(trimws(annotation_tsv))
+  if (anno_ok) {
+    if (!file.exists(annotation_tsv)) {
+      message("Warning: optional annotation file not found, skipping: ", annotation_tsv)
+    } else {
+      anno <- tryCatch({
+        read_tsv(annotation_tsv, show_col_types = FALSE) %>% rename_all(tolower)
+      }, error = function(e) {
+        message("Warning: could not read annotation file ", annotation_tsv, ": ", conditionMessage(e))
+        NULL
+      })
+      if (!is.null(anno) && nrow(anno) > 0 && "gene_id" %in% names(anno)) {
+        idx <- match(genes$gene_id, anno$gene_id)
+        common <- setdiff(intersect(names(genes), names(anno)), "gene_id")
+        for (col in common) {
+          fill <- anno[[col]][idx]
+          genes[[col]] <- coalesce(genes[[col]], as.character(fill))
         }
+        extra <- setdiff(names(anno), names(genes))
+        if (length(extra) > 0) {
+          genes <- genes %>%
+            left_join(anno %>% distinct(.data$gene_id, .keep_all = TRUE) %>% select("gene_id", any_of(extra)), by = "gene_id", multiple = "first")
+        }
+      } else if (!is.null(anno) && (!"gene_id" %in% names(anno))) {
+        if (opts$verbose) message("Warning: annotation file has no gene_id column: ", annotation_tsv)
       }
     }
-    all_genes[[length(all_genes) + 1L]] <- genes
+  }
+  genes
+}
+
+n_parallel <- max(1L, min(as.integer(opts$`parallel-dbs`), length(config)))
+use_parallel <- n_parallel > 1L && .Platform$OS.type == "unix"
+if (use_parallel && opts$verbose) message("Running ", n_parallel, " BLAST DBs in parallel")
+
+if (use_parallel) {
+  all_genes <- parallel::mclapply(config, process_one_db, mc.cores = n_parallel)
+  all_genes <- Filter(Negate(is.null), all_genes)
+} else {
+  if (n_parallel > 1L && .Platform$OS.type != "unix")
+    message("Note: --parallel-dbs > 1 is only supported on Unix/macOS; running sequentially")
+  all_genes <- list()
+  for (db in config) {
+    genes <- process_one_db(db)
+    if (!is.null(genes)) all_genes[[length(all_genes) + 1L]] <- genes
   }
 }
 
