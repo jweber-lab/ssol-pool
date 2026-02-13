@@ -547,8 +547,15 @@ if [[ "$DRY_RUN" == true ]]; then
         log_dry_run "HDF5 directory: $HDF5_DIR"
     fi
     log_dry_run "Output directory: $OUTPUT_DIR"
-    log_dry_run "High quantile: $HIGH_QUANTILE"
-    log_dry_run "Low quantile: $LOW_QUANTILE"
+    if [[ -n "$SEED_HIGH_QUANTILE" && -n "$SEED_LOW_QUANTILE" ]]; then
+        log_dry_run "Quantile mode: seed-then-expand"
+        log_dry_run "  Seed quantiles: high=$SEED_HIGH_QUANTILE low=$SEED_LOW_QUANTILE"
+        log_dry_run "  Expand quantiles: high=$EXPAND_HIGH_QUANTILE low=$EXPAND_LOW_QUANTILE"
+    else
+        log_dry_run "Quantile mode: single high/low"
+        log_dry_run "  High quantile: $HIGH_QUANTILE"
+        log_dry_run "  Low quantile: $LOW_QUANTILE"
+    fi
     log_dry_run "Statistics: $STATISTICS"
     if [[ -n "$TOP_N_CHROMOSOMES" ]]; then
         log_dry_run "Top N chromosomes: $TOP_N_CHROMOSOMES"
@@ -589,8 +596,14 @@ else
         log "  HDF5 directory: $HDF5_DIR"
     fi
     log "  Output directory: $OUTPUT_DIR"
-    log "  High quantile: $HIGH_QUANTILE"
-    log "  Low quantile: $LOW_QUANTILE"
+    if [[ -n "$SEED_HIGH_QUANTILE" && -n "$SEED_LOW_QUANTILE" ]]; then
+        log "  Quantile mode: seed-then-expand"
+        log "    Seed quantiles: high=$SEED_HIGH_QUANTILE low=$SEED_LOW_QUANTILE"
+        log "    Expand quantiles: high=$EXPAND_HIGH_QUANTILE low=$EXPAND_LOW_QUANTILE"
+    else
+        log "  High quantile: $HIGH_QUANTILE"
+        log "  Low quantile: $LOW_QUANTILE"
+    fi
     log "  Statistics: $STATISTICS"
     if [[ -n "$TOP_N_CHROMOSOMES" ]]; then
         log "  Top N chromosomes: $TOP_N_CHROMOSOMES"

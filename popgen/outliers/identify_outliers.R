@@ -721,14 +721,14 @@ merge_regions <- function(regions_df, max_gap = 0) {
         reg <- sub %>%
             group_by(.data$grp) %>%
             summarise(chr = .data$chr[1], region_start = min(.data$region_start, na.rm = TRUE), region_end = max(.data$region_end, na.rm = TRUE), .groups = "drop") %>%
-            select(-.data$grp)
+            select(-"grp")
         out_list[[length(out_list) + 1L]] <- reg
     }
     bind_rows(out_list)
 }
 
 # Seed-then-expand: merge seed windows to regions, expand each region with expand windows within merge_distance, merge overlapping expanded regions. Returns list(regions = data frame of expanded regions, windows = tagged windows with window_type "seed" or "expanded").
-seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id_cols = NULL) {
+seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id_cols = NULL, verbose = FALSE) {
     if (is.null(seed_windows) || nrow(seed_windows) == 0) return(list(regions = NULL, windows = seed_windows %>% mutate(window_type = "seed")))
     seed_regions <- merge_outlier_windows_to_regions(seed_windows, merge_distance)
     if (is.null(seed_regions) || nrow(seed_regions) == 0) return(list(regions = NULL, windows = seed_windows %>% mutate(window_type = "seed")))
@@ -752,12 +752,15 @@ seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id
     expanded <- bind_rows(expanded_list)
     expanded <- merge_regions(expanded, max_gap = 0)
     seed_windows$window_type <- "seed"
+    n_expand_before <- nrow(expand_windows)
+    n_regions <- nrow(expanded)
     expand_used <- expand_windows %>%
-        inner_join(expanded %>% select(.data$chr, .data$region_start, .data$region_end), by = "chr") %>%
+        inner_join(expanded %>% select("chr", "region_start", "region_end"), by = "chr", relationship = "many-to-many") %>%
         filter(.data$start <= .data$region_end, .data$end >= .data$region_start) %>%
         select(all_of(names(expand_windows))) %>%
         distinct() %>%
         mutate(window_type = "expanded")
+    if (verbose) cat("  seed_expand: expand_windows", n_expand_before, "x expanded regions", n_regions, "(join by chr, many-to-many) -> tagged expanded windows", nrow(expand_used), "\n")
     all_tagged <- bind_rows(seed_windows, expand_used)
     expanded <- add_region_aggregates(expanded, all_tagged)
     if (!is.null(id_cols)) {
@@ -765,6 +768,10 @@ seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id
     }
     list(regions = expanded, windows = all_tagged)
 }
+
+# Safe min/max: return NA when all x are NA (avoids min(..., na.rm=TRUE) returning Inf/-Inf).
+safe_min <- function(x) { if (all(is.na(x))) NA_real_ else min(x, na.rm = TRUE) }
+safe_max <- function(x) { if (all(is.na(x))) NA_real_ else max(x, na.rm = TRUE) }
 
 # Merge outlier windows into regions (gap <= merge_distance bp). Optionally compute region-level depth/mapq/n_snps summaries.
 merge_outlier_windows_to_regions <- function(all_outliers, merge_distance) {
@@ -792,13 +799,13 @@ merge_outlier_windows_to_regions <- function(all_outliers, merge_distance) {
         }
         if ("mean_coverage" %in% colnames(sub)) {
             sum_exprs$region_mean_coverage <- quote(mean(.data$mean_coverage, na.rm = TRUE))
-            sum_exprs$region_min_coverage <- quote(min(.data$mean_coverage, na.rm = TRUE))
-            sum_exprs$region_max_coverage <- quote(max(.data$mean_coverage, na.rm = TRUE))
+            sum_exprs$region_min_coverage <- quote(safe_min(.data$mean_coverage))
+            sum_exprs$region_max_coverage <- quote(safe_max(.data$mean_coverage))
         }
         if ("mean_mapping_quality" %in% colnames(sub)) {
             sum_exprs$region_mean_mapping_quality <- quote(mean(.data$mean_mapping_quality, na.rm = TRUE))
-            sum_exprs$region_min_mapping_quality <- quote(min(.data$mean_mapping_quality, na.rm = TRUE))
-            sum_exprs$region_max_mapping_quality <- quote(max(.data$mean_mapping_quality, na.rm = TRUE))
+            sum_exprs$region_min_mapping_quality <- quote(safe_min(.data$mean_mapping_quality))
+            sum_exprs$region_max_mapping_quality <- quote(safe_max(.data$mean_mapping_quality))
         }
         if ("n_snps" %in% colnames(sub)) {
             sum_exprs$region_n_snps <- quote(sum(.data$n_snps, na.rm = TRUE))
@@ -806,7 +813,7 @@ merge_outlier_windows_to_regions <- function(all_outliers, merge_distance) {
         }
         reg <- sub %>% group_by(.data$region_id) %>%
             summarise(!!!sum_exprs, .groups = "drop") %>%
-            select(-.data$region_id)
+            select(-"region_id")
         regions_list[[length(regions_list) + 1L]] <- reg
     }
     bind_rows(regions_list)
@@ -1631,7 +1638,7 @@ if (!is.null(diversity_data)) {
                     expand_windows <- bind_rows(if (nrow(expand_high) > 0) expand_high else NULL, if (nrow(expand_low) > 0) expand_low else NULL)
                     if (opts$verbose) cat("    seed_windows=", nrow(seed_windows), " expand_windows=", nrow(expand_windows), " merge_dist_ws=", merge_dist_ws, "\n", sep = "")
                     if (nrow(seed_windows) > 0 && !is.null(merge_dist_ws) && merge_dist_ws > 0) {
-                        res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws)
+                        res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws, verbose = opts$verbose)
                         if (nrow(res$windows) > 0) {
                             all_tagged[[length(all_tagged) + 1L]] <- res$windows
                             if (!is.null(res$regions) && nrow(res$regions) > 0) {
@@ -1788,7 +1795,7 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
                 seed_windows <- bind_rows(if (nrow(seed_high) > 0) seed_high else NULL, if (nrow(seed_low) > 0) seed_low else NULL)
                 expand_windows <- bind_rows(if (nrow(expand_high) > 0) expand_high else NULL, if (nrow(expand_low) > 0) expand_low else NULL)
                 if (nrow(seed_windows) > 0 && !is.null(merge_dist_ws) && merge_dist_ws > 0) {
-                    res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws)
+                    res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws, verbose = opts$verbose)
                     if (nrow(res$windows) > 0) {
                         all_tagged_fst[[length(all_tagged_fst) + 1L]] <- res$windows
                         if (!is.null(res$regions) && nrow(res$regions) > 0) {
@@ -1853,7 +1860,7 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
 
 # Process PBE statistics (from HDF5 only)
 if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
-    trios <- pbe_data %>% distinct(.data$pop1, .data$pop2, .data$pop3) %>% mutate(trio_id = paste0(.data$pop1, ":", .data$pop2, ":", .data$pop3))
+    trios <- pbe_data %>% distinct(pop1, pop2, pop3) %>% mutate(trio_id = paste0(.data$pop1, ":", .data$pop2, ":", .data$pop3))
     for (i in seq_len(nrow(trios))) {
         trio_id <- trios$trio_id[i]
         pair_data <- pbe_data %>%
@@ -1913,7 +1920,7 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
                 seed_windows <- bind_rows(if (nrow(seed_high) > 0) seed_high else NULL, if (nrow(seed_low) > 0) seed_low else NULL)
                 expand_windows <- bind_rows(if (nrow(expand_high) > 0) expand_high else NULL, if (nrow(expand_low) > 0) expand_low else NULL)
                 if (nrow(seed_windows) > 0 && !is.null(merge_dist_ws) && merge_dist_ws > 0) {
-                    res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws)
+                    res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws, verbose = opts$verbose)
                     if (nrow(res$windows) > 0) {
                         all_tagged_pbe[[length(all_tagged_pbe) + 1L]] <- res$windows
                         if (!is.null(res$regions) && nrow(res$regions) > 0) {
@@ -1998,28 +2005,28 @@ if (length(outlier_results) > 0) {
             } else NA_character_,
             .groups = "drop"
         )
-    wide_long <- all_outliers %>% select(.data$chr, .data$start, .data$end, .data$value_col, .data$value)
-    wide_long <- wide_long %>% distinct(.data$chr, .data$start, .data$end, .data$value_col, .keep_all = TRUE)
+    wide_long <- all_outliers %>% select("chr", "start", "end", "value_col", "value")
+    wide_long <- wide_long %>% distinct(chr, start, end, value_col, .keep_all = TRUE)
     wide_outliers <- wide_long %>%
-        pivot_wider(names_from = .data$value_col, values_from = .data$value) %>%
+        pivot_wider(names_from = "value_col", values_from = "value") %>%
         left_join(stats_per_window, by = c("chr", "start", "end"))
     if ("quantile" %in% colnames(all_outliers)) {
         wide_quantile <- all_outliers %>%
-            select(.data$chr, .data$start, .data$end, .data$value_col, .data$quantile) %>%
-            distinct(.data$chr, .data$start, .data$end, .data$value_col, .keep_all = TRUE) %>%
-            pivot_wider(names_from = .data$value_col, values_from = .data$quantile, names_glue = "{.name}_quantile")
+            select("chr", "start", "end", "value_col", "quantile") %>%
+            distinct(chr, start, end, value_col, .keep_all = TRUE) %>%
+            pivot_wider(names_from = "value_col", values_from = "quantile", names_glue = "{.name}_quantile")
         wide_outliers <- wide_outliers %>% left_join(wide_quantile, by = c("chr", "start", "end"))
     }
     window_meta <- all_outliers %>%
         group_by(.data$chr, .data$start, .data$end) %>%
         slice(1L) %>%
         ungroup() %>%
-        select(.data$chr, .data$start, .data$end, any_of(c("window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "window_type")))
+        select("chr", "start", "end", any_of(c("window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "window_type")))
     wide_outliers <- wide_outliers %>% left_join(window_meta, by = c("chr", "start", "end"))
     value_cols <- sort(setdiff(names(wide_outliers), c("chr", "start", "end", "outlier_stat", "outlier_direction", "window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "window_type")))
     meta_cols <- c("window_size", "mean_coverage", "mean_mapping_quality", "n_snps", "outlier_stat", "outlier_direction", "window_type")
     meta_cols <- intersect(meta_cols, names(wide_outliers))
-    wide_outliers <- wide_outliers %>% select(.data$chr, .data$start, .data$end, any_of(meta_cols), all_of(value_cols))
+    wide_outliers <- wide_outliers %>% select("chr", "start", "end", any_of(meta_cols), all_of(value_cols))
 
     unique_windows_outliers <- if ("window_size" %in% colnames(all_outliers)) {
         sort(unique(all_outliers$window_size[!is.na(all_outliers$window_size)]))
@@ -2072,6 +2079,7 @@ if (length(outlier_results) > 0) {
 
     if (expand_mode && length(expanded_region_results) > 0) {
         all_expanded <- bind_rows(expanded_region_results)
+        if (opts$verbose) cat("Seed-expand: all_expanded rows =", nrow(all_expanded), "\n")
         if (opts$merge_across_samples) {
             # Merge overlapping/nearby regions from different samples into one set of regions.
             merge_dist <- opts$`merge-distance`
@@ -2082,19 +2090,21 @@ if (length(outlier_results) > 0) {
                 merge_dist <- as.numeric(merge_dist)
                 if (is.na(merge_dist) || merge_dist < 0) merge_dist <- 2000
             }
-            merged_bounds <- merge_regions(all_expanded %>% select(.data$chr, .data$region_start, .data$region_end), max_gap = merge_dist)
-            # Reattach outlier_stat and other cols from overlapping all_expanded rows.
+            merged_bounds <- merge_regions(all_expanded %>% select("chr", "region_start", "region_end"), max_gap = merge_dist)
+            if (opts$verbose) cat("  merged_bounds (merged regions) =", nrow(merged_bounds), "\n")
+            # Reattach outlier_stat and other cols from overlapping all_expanded rows (join by chr is many-to-many; filter keeps overlapping bounds).
             overlap_join <- all_expanded %>%
-                inner_join(merged_bounds %>% rename(region_start_m = .data$region_start, region_end_m = .data$region_end), by = "chr") %>%
+                inner_join(merged_bounds %>% rename(region_start_m = "region_start", region_end_m = "region_end"), by = "chr", relationship = "many-to-many") %>%
                 filter(.data$region_start <= .data$region_end_m, .data$region_end >= .data$region_start_m)
+            if (opts$verbose) cat("  overlap_join rows (after many-to-many by chr + overlap filter) =", nrow(overlap_join), "\n")
             regions <- overlap_join %>%
                 group_by(.data$chr, .data$region_start_m, .data$region_end_m) %>%
                 summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop") %>%
-                rename(region_start = .data$region_start_m, region_end = .data$region_end_m)
+                rename(region_start = "region_start_m", region_end = "region_end_m")
             other_cols <- overlap_join %>%
                 group_by(.data$chr, .data$region_start_m, .data$region_end_m) %>%
                 slice(1L) %>%
-                select(.data$chr, region_start = .data$region_start_m, region_end = .data$region_end_m, any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
+                select("chr", region_start = "region_start_m", region_end = "region_end_m", any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
             regions <- regions %>% left_join(other_cols, by = c("chr", "region_start", "region_end"))
         } else {
             # One row per (chr, region_start, region_end) from any sample; no cross-sample merging.
@@ -2104,7 +2114,7 @@ if (length(outlier_results) > 0) {
             other_cols <- all_expanded %>%
                 group_by(.data$chr, .data$region_start, .data$region_end) %>%
                 slice(1L) %>%
-                select(.data$chr, .data$region_start, .data$region_end, any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
+                select("chr", "region_start", "region_end", any_of(c("n_windows", "region_mean_coverage", "region_mean_mapping_quality", "region_n_snps")))
             regions <- regions %>% left_join(other_cols, by = c("chr", "region_start", "region_end"))
         }
         regions <- add_region_stat_summaries(regions, windows_by_value_col)
@@ -2136,7 +2146,7 @@ if (length(outlier_results) > 0) {
                     regions_list <- all_outliers %>%
                         mutate(merge_by = coalesce(!!sym(merge_by), "unknown")) %>%
                         group_by(.data$merge_by) %>%
-                        group_map(~ merge_outlier_windows_to_regions(.x %>% select(-.data$merge_by), merge_dist), .keep = TRUE)
+                        group_map(~ merge_outlier_windows_to_regions(.x %>% select(-"merge_by"), merge_dist), .keep = TRUE)
                     regions_list <- Filter(Negate(is.null), regions_list)
                     regions <- if (length(regions_list) > 0) bind_rows(regions_list) else NULL
                 } else {
@@ -2146,7 +2156,7 @@ if (length(outlier_results) > 0) {
             if (!is.null(regions) && nrow(regions) > 0) {
                 region_stats <- all_outliers %>%
                     filter(!is.na(.data$chr)) %>%
-                    inner_join(regions %>% select(.data$chr, .data$region_start, .data$region_end), by = "chr") %>%
+                    inner_join(regions %>% select("chr", "region_start", "region_end"), by = "chr", relationship = "many-to-many") %>%
                     filter(.data$start <= .data$region_end, .data$end >= .data$region_start) %>%
                     group_by(.data$chr, .data$region_start, .data$region_end) %>%
                     summarise(outlier_stat = paste(sort(unique(.data$statistic)), collapse = ":"), .groups = "drop")
