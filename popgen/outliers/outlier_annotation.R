@@ -93,28 +93,42 @@ write_region_fasta <- function(regions, reference, out_fasta, samtools = "samtoo
 # BLAST outfmt 6 column list (must be one argument; spaces cause split on some systems)
 BLAST_OUTFMT_6 <- "6 qseqid sseqid pident length qstart qend sstart send evalue"
 
+# Convert path to absolute (so BLAST and subprocesses see the same path regardless of cwd).
+# Relative paths are resolved against getwd(); paths that do not exist still get an absolute form.
+path_absolute <- function(path) {
+  path <- trimws(as.character(path))
+  if (is.na(path) || !nzchar(path)) return(path)
+  if (grepl("^[/~]", path)) {
+    tryCatch(normalizePath(path, mustWork = FALSE), error = function(e) path)
+  } else {
+    tryCatch(normalizePath(file.path(getwd(), path), mustWork = FALSE), error = function(e) path)
+  }
+}
+
 # Run BLAST (blastn/blastp/etc) per region query; return path to BLAST output.
 # Uses shell + quoting so -outfmt "6 qseqid ..." is passed as a single argument (avoids "Too many positional arguments: qseqid" on all BLAST variants).
-# db_path must be non-empty; use verbose=TRUE to log the command and path.
+# All paths are made absolute so the shell subprocess sees valid -query, -db, -out regardless of cwd.
 run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthread = 1, verbose = FALSE) {
   db_path <- trimws(as.character(db_path))
   if (is.na(db_path) || !nzchar(db_path)) {
     message("BLAST skipped: db_path is missing or empty")
     return(out_tsv)
   }
-  db_path_abs <- tryCatch(normalizePath(db_path, mustWork = FALSE), error = function(e) db_path)
+  query_abs <- path_absolute(query_fasta)
+  db_abs <- path_absolute(db_path)
+  out_abs <- path_absolute(out_tsv)
   if (verbose) {
     message("  BLAST db_path: ", db_path)
-    message("  BLAST db_path (resolved): ", db_path_abs)
+    message("  BLAST db_path (absolute): ", db_abs)
   }
   nthread <- as.character(as.integer(nthread))
   cmd <- paste(
     blast_cmd,
-    "-query", shQuote(query_fasta),
-    "-db", shQuote(db_path_abs),
+    "-query", shQuote(query_abs),
+    "-db", shQuote(db_abs),
     "-outfmt", shQuote(BLAST_OUTFMT_6),
     "-num_threads", nthread,
-    "-out", shQuote(out_tsv)
+    "-out", shQuote(out_abs)
   )
   if (verbose) message("  BLAST command: ", cmd)
   system2("sh", c("-c", cmd))
