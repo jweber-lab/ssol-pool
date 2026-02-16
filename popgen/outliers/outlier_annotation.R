@@ -90,11 +90,22 @@ write_region_fasta <- function(regions, reference, out_fasta, samtools = "samtoo
   out_fasta
 }
 
-# Run BLAST (blastn) per region query; return path to BLAST output
+# BLAST outfmt 6 column list (must be one argument; spaces cause split on some systems)
+BLAST_OUTFMT_6 <- "6 qseqid sseqid pident length qstart qend sstart send evalue"
+
+# Run BLAST (blastn/blastp/etc) per region query; return path to BLAST output.
+# Uses shell + quoting so -outfmt "6 qseqid ..." is passed as a single argument (avoids "Too many positional arguments: qseqid" on all BLAST variants).
 run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthread = 1) {
-  args <- c("-query", query_fasta, "-db", db_path, "-outfmt", "6 qseqid sseqid pident length qstart qend sstart send evalue",
-            "-num_threads", nthread, "-out", out_tsv)
-  system2(blast_cmd, args)
+  nthread <- as.character(as.integer(nthread))
+  cmd <- paste(
+    blast_cmd,
+    "-query", shQuote(query_fasta),
+    "-db", shQuote(db_path),
+    "-outfmt", shQuote(BLAST_OUTFMT_6),
+    "-num_threads", nthread,
+    "-out", shQuote(out_tsv)
+  )
+  system2("sh", c("-c", cmd))
   out_tsv
 }
 
