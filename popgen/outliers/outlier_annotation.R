@@ -126,6 +126,16 @@ run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthre
   if (verbose) {
     message("  BLAST db_path: ", db_path)
     message("  BLAST db_path (absolute): ", db_abs)
+    db_exists <- file.exists(db_abs)
+    db_nin <- file.exists(paste0(db_abs, ".nin"))
+    db_nsq <- file.exists(paste0(db_abs, ".nsq"))
+    db_pin <- file.exists(paste0(db_abs, ".pin"))
+    db_psq <- file.exists(paste0(db_abs, ".psq"))
+    message("  DB path exists (file/dir): ", db_exists)
+    message("  DB nucleotide index (.nin/.nsq): ", db_nin, " / ", db_nsq)
+    message("  DB protein index (.pin/.psq): ", db_pin, " / ", db_psq)
+    if (!db_exists && !db_nin && !db_pin)
+      message("  (BLAST expects -db to be the DB prefix; ", db_abs, ".nin or .pin must exist)")
   }
   nthread <- as.character(as.integer(nthread))
   cmd <- paste(
@@ -137,7 +147,15 @@ run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthre
     "-out", shQuote(out_abs)
   )
   if (verbose) message("  BLAST command: ", cmd)
-  system2("sh", c("-c", cmd))
+  stderr <- character(0)
+  result <- system2("sh", c("-c", cmd), stdout = NULL, stderr = TRUE)
+  exit <- attr(result, "status")
+  if (is.null(exit)) exit <- 0L
+  if (length(result) > 0) stderr <- result
+  if (verbose || exit != 0L) {
+    if (exit != 0L) message("  BLAST exit code: ", exit)
+    if (length(stderr) > 0) message("  BLAST stderr: ", paste(stderr, collapse = "\n    "))
+  }
   out_tsv
 }
 
