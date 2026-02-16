@@ -95,16 +95,28 @@ BLAST_OUTFMT_6 <- "6 qseqid sseqid pident length qstart qend sstart send evalue"
 
 # Run BLAST (blastn/blastp/etc) per region query; return path to BLAST output.
 # Uses shell + quoting so -outfmt "6 qseqid ..." is passed as a single argument (avoids "Too many positional arguments: qseqid" on all BLAST variants).
-run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthread = 1) {
+# db_path must be non-empty; use verbose=TRUE to log the command and path.
+run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthread = 1, verbose = FALSE) {
+  db_path <- trimws(as.character(db_path))
+  if (is.na(db_path) || !nzchar(db_path)) {
+    message("BLAST skipped: db_path is missing or empty")
+    return(out_tsv)
+  }
+  db_path_abs <- tryCatch(normalizePath(db_path, mustWork = FALSE), error = function(e) db_path)
+  if (verbose) {
+    message("  BLAST db_path: ", db_path)
+    message("  BLAST db_path (resolved): ", db_path_abs)
+  }
   nthread <- as.character(as.integer(nthread))
   cmd <- paste(
     blast_cmd,
     "-query", shQuote(query_fasta),
-    "-db", shQuote(db_path),
+    "-db", shQuote(db_path_abs),
     "-outfmt", shQuote(BLAST_OUTFMT_6),
     "-num_threads", nthread,
     "-out", shQuote(out_tsv)
   )
+  if (verbose) message("  BLAST command: ", cmd)
   system2("sh", c("-c", cmd))
   out_tsv
 }
@@ -267,16 +279,24 @@ if (length(config) > 0 && !is.list(config[[1]])) config <- list(config)
 # One FASTA per region (or combined); for simplicity one combined query FASTA with headers chr:start-end
 query_fa <- file.path(opts$`output-dir`, "regions_query.fa")
 regions$qseqid <- paste0(regions$chr, ":", regions$region_start, "-", regions$region_end)
-write_region_fasta(regions, opts$reference, query_fa, opts$samtools)
+invisible(write_region_fasta(regions, opts$reference, query_fa, opts$samtools))
+if (opts$verbose) message("Query FASTA: ", normalizePath(query_fa, mustWork = FALSE))
 
 # Per-DB work: run BLAST, map hits to genes, optional annotation join. Returns genes tibble or NULL.
 process_one_db <- function(db) {
-  db_path <- coalesce_null(db$db_path, db[[1]])
-  name <- coalesce_null(coalesce_null(db$name, db[[2]]), basename(db_path))
+  # Prefer explicit db_path (YAML order can make db[[1]] the name, not the path)
+  db_path <- coalesce_null(db$db_path, db[["db_path"]])
+  db_path <- if (is.null(db_path)) NULL else trimws(as.character(db_path))
+  name <- coalesce_null(coalesce_null(db$name, db[[2]]), if (nzchar(db_path)) basename(db_path) else "unknown")
+  if (is.null(db_path) || !nzchar(db_path)) {
+    message("Skipping DB ", name, ": db_path missing or empty in config")
+    return(NULL)
+  }
   gff_path <- coalesce_null(db$gff_path, db[[3]])
   annotation_tsv <- coalesce_null(db$annotation_tsv, db$annotation_table)
   out_blast <- file.path(opts$`output-dir`, paste0("blast_", gsub("[^A-Za-z0-9_]", "_", name), ".tsv"))
-  run_blast(query_fa, db_path, out_blast, opts$`blast-cmd`, opts$threads)
+  if (opts$verbose) message("Running BLAST for DB: ", name)
+  run_blast(query_fa, db_path, out_blast, opts$`blast-cmd`, opts$threads, verbose = opts$verbose)
   genes <- hits_to_genes(out_blast, gff_path, verbose = opts$verbose)
   if (is.null(genes)) return(NULL)
   genes$db <- name

@@ -21,6 +21,12 @@ SAMTOOLS="samtools"
 BLAST_CMD="blastn"
 THREADS=1
 PARALLEL_DBS=1
+VERBOSE="false"
+
+# Log with timestamp (to stderr so tee still captures R stdout)
+log() {
+    echo -e "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >&2
+}
 
 usage() {
     cat << EOF
@@ -39,6 +45,7 @@ Optional:
   --blast-cmd NAME       BLAST command: blastn, blastp, etc. [default: blastn]
   --threads N            Threads per BLAST run [default: 1]
   --parallel-dbs N       Run N BLAST DBs in parallel (Unix/macOS; 1=sequential) [default: 1]
+  --verbose              Enable verbose and debug output (logged)
   -h, --help             Show this help
 
 Example BLAST config (YAML, blast_config.yml):
@@ -66,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
         --parallel-dbs) PARALLEL_DBS="$2"; shift 2 ;;
+        --verbose) VERBOSE="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -85,6 +93,26 @@ if [[ ! -f "$R_FILE" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+LOG_DIR="${OUTPUT_DIR}/log"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="${LOG_DIR}/outlier_annotation_${TIMESTAMP}.log"
+{
+    echo "Command: $RSCRIPT $R_FILE --regions $REGIONS --reference $REFERENCE --blast-config $BLAST_CONFIG --output-dir $OUTPUT_DIR --samtools $SAMTOOLS --blast-cmd $BLAST_CMD --threads $THREADS --parallel-dbs $PARALLEL_DBS${VERBOSE:+ --verbose}"
+    echo "Started: $(date -Iseconds 2>/dev/null || date)"
+} >> "$LOG_FILE"
+log "Log file: $LOG_FILE"
+log "Running outlier_annotation.R..."
+log "  Regions: $REGIONS"
+log "  Reference: $REFERENCE"
+log "  BLAST config: $BLAST_CONFIG"
+log "  Output dir: $OUTPUT_DIR"
+log "  BLAST command: $BLAST_CMD  threads: $THREADS  parallel-dbs: $PARALLEL_DBS"
+[[ "$VERBOSE" == true ]] && log "  Verbose: enabled"
+
+R_EXTRA=()
+[[ "$VERBOSE" == true ]] && R_EXTRA+=(--verbose)
+
 "$RSCRIPT" "$R_FILE" \
     --regions "$REGIONS" \
     --reference "$REFERENCE" \
@@ -93,4 +121,8 @@ mkdir -p "$OUTPUT_DIR"
     --samtools "$SAMTOOLS" \
     --blast-cmd "$BLAST_CMD" \
     --threads "$THREADS" \
-    --parallel-dbs "$PARALLEL_DBS"
+    --parallel-dbs "$PARALLEL_DBS" \
+    "${R_EXTRA[@]}" 2>&1 | tee -a "$LOG_FILE" || {
+    log "R script failed (see $LOG_FILE)"
+    exit 1
+}
