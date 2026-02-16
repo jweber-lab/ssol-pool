@@ -93,16 +93,22 @@ write_region_fasta <- function(regions, reference, out_fasta, samtools = "samtoo
 # BLAST outfmt 6 column list (must be one argument; spaces cause split on some systems)
 BLAST_OUTFMT_6 <- "6 qseqid sseqid pident length qstart qend sstart send evalue"
 
-# Convert path to absolute (so BLAST and subprocesses see the same path regardless of cwd).
-# Relative paths are resolved against getwd(); paths that do not exist still get an absolute form.
+# Convert path to absolute and collapse . / .. (so BLAST gets a clean path; normalizePath can leave .. in place when path does not exist).
 path_absolute <- function(path) {
   path <- trimws(as.character(path))
   if (is.na(path) || !nzchar(path)) return(path)
-  if (grepl("^[/~]", path)) {
-    tryCatch(normalizePath(path, mustWork = FALSE), error = function(e) path)
-  } else {
-    tryCatch(normalizePath(file.path(getwd(), path), mustWork = FALSE), error = function(e) path)
+  if (!grepl("^[/~]", path)) path <- file.path(getwd(), path)
+  path <- tryCatch(normalizePath(path, mustWork = FALSE), error = function(e) path)
+  # Collapse . and .. so BLAST sees a single canonical path (e.g. .../outliers/../../../genomes -> .../genomes)
+  parts <- strsplit(path, "/", fixed = TRUE)[[1L]]
+  out <- character(0)
+  for (p in parts) {
+    if (p == "" || p == ".") next
+    if (p == "..") { out <- head(out, -1L); next }
+    out <- c(out, p)
   }
+  if (length(out) == 0) return(path)
+  paste(c("", out), collapse = "/")
 }
 
 # Run BLAST (blastn/blastp/etc) per region query; return path to BLAST output.
