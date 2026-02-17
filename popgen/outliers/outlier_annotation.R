@@ -16,9 +16,14 @@
 #   - gff_path: path to GFF/GTF for mapping hits to genes (optional; warn if missing)
 #   - annotation_tsv: optional TSV with gene_id column to join extra columns (e.g. product, GO)
 #
-# Output columns: qseqid, sseqid, gene_id, gene_name, product, gene_biotype,
-#   go_terms, ec_number, dbxref, strand, feature_types, gff_source, pident,
-#   length, qstart, qend, sstart, send, evalue, db, plus region pass-through.
+# Outputs (filenames include a suffix from the regions file basename and, if set, --blast-task and --evalue):
+#   outlier_regions_genes_<suffix>.csv: one row per (hit, overlapping gene); columns qseqid, sseqid,
+#     gene_id, gene_name, product, gene_biotype, go_terms, ec_number, dbxref, strand,
+#     feature_types, gff_source, pident, length, qstart, qend, sstart, send, evalue, db,
+#     plus region pass-through (region_chr, region_start, region_end, etc.).
+#   outlier_regions_genes_summary_<suffix>.csv: one row per (region, db); columns qseqid, db,
+#     n_genes, gene_ids (comma-separated), best_evalue, products (semicolon-separated),
+#     plus region pass-through.
 # GFF/annotation fields are NA when not present; missing files produce warnings only.
 ###############################################################################
 
@@ -346,8 +351,19 @@ opts <- parse_args(parser)
 if (is.null(opts$regions) || is.null(opts$reference) || is.null(opts$`blast-config`)) {
   stop("--regions, --reference, and --blast-config are required")
 }
+# In verbose mode, print warnings as they occur; at end we always dump any stored warnings to the log
+if (opts$verbose) options(warn = 1)
 
 dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
+
+# Output filename suffix from regions file and optional run parameters (so outputs are distinguishable).
+output_suffix <- tools::file_path_sans_ext(basename(opts$regions))
+output_suffix <- sub("^outlier_regions_?", "", output_suffix)
+if (!nzchar(output_suffix)) output_suffix <- "regions"
+if (!is.na(opts$`blast-task`) && nzchar(trimws(opts$`blast-task`)))
+  output_suffix <- paste0(output_suffix, "_task_", gsub("[^A-Za-z0-9_-]", "_", trimws(opts$`blast-task`)))
+if (!is.na(opts$evalue) && nzchar(trimws(opts$evalue)))
+  output_suffix <- paste0(output_suffix, "_evalue_", gsub("[^A-Za-z0-9.+-]", "_", trimws(opts$evalue)))
 
 regions <- read_regions(opts$regions)
 if (nrow(regions) == 0) stop("No regions found in ", opts$regions)
@@ -443,14 +459,37 @@ if (length(all_genes) > 0) {
     rename(region_chr = chr)
   genes_out <- genes_out %>%
     left_join(region_lookup, by = "qseqid", multiple = "first")
-  genes_file <- file.path(opts$`output-dir`, "outlier_regions_genes.csv")
+  genes_file <- file.path(opts$`output-dir`, paste0("outlier_regions_genes_", output_suffix, ".csv"))
   write_csv(genes_out, genes_file)
   message("Wrote ", genes_file, " (", nrow(genes_out), " hit-gene rows)")
+
+  # Summary: one row per (region, db) with comma-separated gene_ids, n_genes, best_evalue, products
+  summary_out <- genes_out %>%
+    group_by(.data$qseqid, .data$db) %>%
+    summarise(
+      n_genes = dplyr::n_distinct(.data$gene_id),
+      gene_ids = paste(sort(unique(na.omit(.data$gene_id))), collapse = ","),
+      best_evalue = min(as.numeric(.data$evalue), na.rm = TRUE),
+      products = paste(sort(unique(na.omit(.data$product))), collapse = "; "),
+      .groups = "drop"
+    ) %>%
+    mutate(best_evalue = if_else(is.finite(.data$best_evalue), .data$best_evalue, NA_real_)) %>%
+    left_join(region_lookup, by = "qseqid", multiple = "first")
+  summary_file <- file.path(opts$`output-dir`, paste0("outlier_regions_genes_summary_", output_suffix, ".csv"))
+  write_csv(summary_out, summary_file)
+  message("Wrote ", summary_file, " (", nrow(summary_out), " region-DB rows)")
+
   if (nrow(genes_out) == 0)
     message("Tip: for divergent taxa, try --blast-task blastn (more sensitive than default megablast) and/or inspect the raw BLAST TSV files in ", opts$`output-dir`)
 } else {
   message("No BLAST hits or genes mapped.")
   message("Tip: try --blast-task blastn for more sensitive search; check raw BLAST TSV files in ", opts$`output-dir`)
+}
+
+w <- warnings()
+if (length(w) > 0) {
+  message("Warnings (", length(w), "):")
+  print(w)
 }
 
 message("Done.")
