@@ -291,9 +291,35 @@ hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
       gff_source = first(na.omit(.data$source)),
       .groups = "drop"
     )
-  out <- b %>%
-    left_join(genes, by = c("sseqid_for_join" = "seqid")) %>%
-    filter(!is.na(.data$start), .data$hit_end >= .data$start, .data$hit_start <= .data$end)
+  # Overlap join: only (hit, gene) pairs that overlap in coordinates. Avoids Cartesian product
+  # from joining on seqid only (which can produce billions of rows on large contigs).
+  # Process per seqid, per hit (no full hits×genes matrix) to keep memory bounded.
+  genes_by_seqid <- split(genes, genes$seqid)
+  b_cols <- b %>% select(-"sseqid_for_join", -"hit_start", -"hit_end")
+  out_list <- list()
+  for (s in unique(b$sseqid_for_join)) {
+    genes_s <- genes_by_seqid[[s]]
+    if (is.null(genes_s) || nrow(genes_s) == 0) next
+    rows_b <- which(b$sseqid_for_join == s)
+    hits_s <- b[rows_b, ]
+    for (j in seq_len(nrow(hits_s))) {
+      idx <- which(genes_s$end >= hits_s$hit_start[j] & genes_s$start <= hits_s$hit_end[j])
+      if (length(idx) == 0) next
+      hit_part <- b_cols[rows_b[j], , drop = FALSE][rep(1L, length(idx)), , drop = FALSE]
+      gene_part <- genes_s[idx, setdiff(names(genes_s), "seqid"), drop = FALSE]
+      out_list[[length(out_list) + 1L]] <- dplyr::bind_cols(hit_part, gene_part)
+    }
+  }
+  if (length(out_list) == 0) {
+    return(tibble(
+      qseqid = character(), sseqid = character(), gene_id = character(), gene_name = character(),
+      product = character(), gene_biotype = character(), go_terms = character(), ec_number = character(),
+      dbxref = character(), strand = character(), feature_types = character(), gff_source = character(),
+      pident = numeric(), length = numeric(), qstart = numeric(), qend = numeric(),
+      sstart = numeric(), send = numeric(), evalue = numeric()
+    ))
+  }
+  out <- dplyr::bind_rows(out_list)
   out <- out %>%
     distinct(.data$qseqid, .data$sseqid, .data$gene_id, .keep_all = TRUE) %>%
     select(.data$qseqid, .data$sseqid, .data$gene_id, .data$gene_name, .data$product, .data$gene_biotype, .data$go_terms, .data$ec_number, .data$dbxref, .data$strand, .data$feature_types, .data$gff_source, .data$pident, .data$length, .data$qstart, .data$qend, .data$sstart, .data$send, .data$evalue)
@@ -393,14 +419,18 @@ if (use_parallel && opts$verbose) message("Running ", n_parallel, " BLAST DBs in
 
 if (use_parallel) {
   all_genes <- parallel::mclapply(config, process_one_db, mc.cores = n_parallel)
-  all_genes <- Filter(Negate(is.null), all_genes)
+  # When a worker errors, its element may be an error object, not a data frame; keep only valid results.
+  all_genes <- all_genes[vapply(all_genes, is.data.frame, logical(1))]
+  n_failed <- length(config) - length(all_genes)
+  if (n_failed > 0)
+    message("Warning: ", n_failed, " DB(s) failed in parallel (re-run with --parallel-dbs 1 to see the error).")
 } else {
   if (n_parallel > 1L && .Platform$OS.type != "unix")
     message("Note: --parallel-dbs > 1 is only supported on Unix/macOS; running sequentially")
   all_genes <- list()
   for (db in config) {
     genes <- process_one_db(db)
-    if (!is.null(genes)) all_genes[[length(all_genes) + 1L]] <- genes
+    if (!is.null(genes) && is.data.frame(genes)) all_genes[[length(all_genes) + 1L]] <- genes
   }
 }
 
