@@ -250,6 +250,9 @@ read_gff_genes <- function(gff_path, verbose = FALSE) {
   d
 }
 
+# Normalize BLAST subject IDs so they can match GFF seqids (e.g. emb|CABIJS010000716.1| -> CABIJS010000716.1).
+normalize_sseqid <- function(x) sub("^[^|]+\\|([^|]+)\\|?$", "\\1", x)
+
 # Overlap BLAST hits (subject coords) with GFF genes; keep BLAST cols and GFF annotation.
 hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
   if (!file.exists(blast_tsv) || file.info(blast_tsv)$size == 0) return(NULL)
@@ -264,9 +267,11 @@ hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
   b$send <- as.numeric(b$send)
   b <- b %>% filter(!is.na(.data$sstart), !is.na(.data$send))
   if (nrow(b) == 0) return(b)
+  # Normalize so NCBI-style sseqids (e.g. emb|ACCESSION|) match GFF seqid (ACCESSION)
+  b$sseqid_for_join <- normalize_sseqid(b$sseqid)
   gff <- read_gff_genes(gff_path, verbose = verbose)
   if (is.null(gff)) {
-    return(b %>% mutate(gene_id = NA_character_, gene_name = NA_character_, product = NA_character_, gene_biotype = NA_character_, go_terms = NA_character_, ec_number = NA_character_, dbxref = NA_character_, strand = NA_character_, feature_types = NA_character_, gff_source = NA_character_))
+    return(b %>% mutate(gene_id = NA_character_, gene_name = NA_character_, product = NA_character_, gene_biotype = NA_character_, go_terms = NA_character_, ec_number = NA_character_, dbxref = NA_character_, strand = NA_character_, feature_types = NA_character_, gff_source = NA_character_) %>% select(-any_of("sseqid_for_join")))
   }
   b$hit_start <- pmin(b$sstart, b$send)
   b$hit_end <- pmax(b$sstart, b$send)
@@ -287,7 +292,7 @@ hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
       .groups = "drop"
     )
   out <- b %>%
-    left_join(genes, by = c("sseqid" = "seqid")) %>%
+    left_join(genes, by = c("sseqid_for_join" = "seqid")) %>%
     filter(!is.na(.data$start), .data$hit_end >= .data$start, .data$hit_start <= .data$end)
   out <- out %>%
     distinct(.data$qseqid, .data$sseqid, .data$gene_id, .keep_all = TRUE) %>%
