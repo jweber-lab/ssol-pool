@@ -161,7 +161,7 @@ run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthre
   on.exit(unlink(script, force = TRUE))
   writeLines(cmd_line, script)
   stderr <- character(0)
-  result <- system2("sh", script, stdout = NULL, stderr = TRUE)
+  result <- system2("sh", script, stdout = FALSE, stderr = TRUE)
   exit <- attr(result, "status")
   if (is.null(exit)) exit <- 0L
   if (length(result) > 0) stderr <- result
@@ -327,7 +327,7 @@ hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
   out <- dplyr::bind_rows(out_list)
   out <- out %>%
     distinct(.data$qseqid, .data$sseqid, .data$gene_id, .keep_all = TRUE) %>%
-    select(.data$qseqid, .data$sseqid, .data$gene_id, .data$gene_name, .data$product, .data$gene_biotype, .data$go_terms, .data$ec_number, .data$dbxref, .data$strand, .data$feature_types, .data$gff_source, .data$pident, .data$length, .data$qstart, .data$qend, .data$sstart, .data$send, .data$evalue)
+    select("qseqid", "sseqid", "gene_id", "gene_name", "product", "gene_biotype", "go_terms", "ec_number", "dbxref", "strand", "feature_types", "gff_source", "pident", "length", "qstart", "qend", "sstart", "send", "evalue")
   out
 }
 
