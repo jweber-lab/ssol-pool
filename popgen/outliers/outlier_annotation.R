@@ -138,17 +138,11 @@ run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthre
       message("  (BLAST expects -db to be the DB prefix; ", db_abs, ".nin or .pin must exist)")
   }
   nthread <- as.character(as.integer(nthread))
-  cmd <- paste(
-    blast_cmd,
-    "-query", shQuote(query_abs),
-    "-db", shQuote(db_abs),
-    "-outfmt", shQuote(BLAST_OUTFMT_6),
-    "-num_threads", nthread,
-    "-out", shQuote(out_abs)
-  )
-  if (verbose) message("  BLAST command: ", cmd)
+  # Invoke BLAST with an argument vector (no shell) so -db and -outfmt are passed exactly; avoids parsing issues in parallel forked workers.
+  args <- c("-query", query_abs, "-db", db_abs, "-outfmt", BLAST_OUTFMT_6, "-num_threads", nthread, "-out", out_abs)
+  if (verbose) message("  BLAST command: ", paste(c(blast_cmd, args), collapse = " "))
   stderr <- character(0)
-  result <- system2("sh", c("-c", cmd), stdout = NULL, stderr = TRUE)
+  result <- system2(blast_cmd, args, stdout = NULL, stderr = TRUE)
   exit <- attr(result, "status")
   if (is.null(exit)) exit <- 0L
   if (length(result) > 0) stderr <- result
