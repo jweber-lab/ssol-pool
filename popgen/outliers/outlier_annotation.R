@@ -114,7 +114,7 @@ path_absolute <- function(path) {
 # Run BLAST (blastn/blastp/etc) per region query; return path to BLAST output.
 # Uses shell + quoting so -outfmt "6 qseqid ..." is passed as a single argument (avoids "Too many positional arguments: qseqid" on all BLAST variants).
 # All paths are made absolute so the shell subprocess sees valid -query, -db, -out regardless of cwd.
-run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthread = 1, verbose = FALSE) {
+run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthread = 1, verbose = FALSE, blast_extra = character(0)) {
   db_path <- trimws(as.character(db_path))
   if (is.na(db_path) || !nzchar(db_path)) {
     message("BLAST skipped: db_path is missing or empty")
@@ -140,14 +140,17 @@ run_blast <- function(query_fasta, db_path, out_tsv, blast_cmd = "blastn", nthre
   nthread <- as.character(as.integer(nthread))
   # NCBI BLAST manual (NBK569862): -outfmt must be one argument, e.g. -outfmt "6 qseqid sseqid ...".
   # Write command to a temp script and run with sh to avoid system2() mangling quotes/length when passing one long string (fixes "Too many positional arguments: qseqid" on some platforms).
+  extra_str <- if (length(blast_extra) > 0) paste(paste(blast_extra, collapse = " ")) else ""
   cmd_line <- paste(
     blast_cmd,
     "-query", shQuote(query_abs),
     "-db", shQuote(db_abs),
+    if (nzchar(extra_str)) extra_str,
     "-outfmt", shQuote(BLAST_OUTFMT_6),
     "-num_threads", nthread,
     "-out", shQuote(out_abs)
   )
+  cmd_line <- paste(cmd_line[!is.na(cmd_line) & nzchar(cmd_line)], collapse = " ")
   if (verbose) message("  BLAST command: ", cmd_line)
   script <- tempfile(pattern = "blast_", fileext = ".sh")
   on.exit(unlink(script, force = TRUE))
@@ -302,6 +305,8 @@ option_list <- list(
   make_option(c("--blast-cmd"), type = "character", default = "blastn", help = "BLAST command (blastn/blastp/etc)"),
   make_option(c("--threads"), type = "integer", default = 1L, help = "Threads per BLAST run"),
   make_option(c("--parallel-dbs"), type = "integer", default = 1L, help = "Run this many BLAST DBs in parallel (Unix/macOS only; 1 = sequential)"),
+  make_option(c("--blast-task"), type = "character", default = NA_character_, help = "BLAST -task (e.g. blastn for sensitive search; default megablast can miss divergent hits)"),
+  make_option(c("--evalue"), type = "character", default = NA_character_, help = "BLAST -evalue threshold (default 10)"),
   make_option(c("--verbose"), action = "store_true", default = FALSE)
 )
 parser <- OptionParser(usage = "usage: %prog --regions FILE --reference FASTA --blast-config FILE [options]", option_list = option_list)
@@ -339,7 +344,10 @@ process_one_db <- function(db) {
   annotation_tsv <- coalesce_null(db$annotation_tsv, db$annotation_table)
   out_blast <- file.path(opts$`output-dir`, paste0("blast_", gsub("[^A-Za-z0-9_]", "_", name), ".tsv"))
   if (opts$verbose) message("Running BLAST for DB: ", name)
-  run_blast(query_fa, db_path, out_blast, opts$`blast-cmd`, opts$threads, verbose = opts$verbose)
+  blast_extra <- character(0)
+  if (!is.na(opts$`blast-task`) && nzchar(trimws(opts$`blast-task`))) blast_extra <- c(blast_extra, "-task", trimws(opts$`blast-task`))
+  if (!is.na(opts$evalue) && nzchar(trimws(opts$evalue))) blast_extra <- c(blast_extra, "-evalue", trimws(opts$evalue))
+  run_blast(query_fa, db_path, out_blast, opts$`blast-cmd`, opts$threads, verbose = opts$verbose, blast_extra = blast_extra)
   genes <- hits_to_genes(out_blast, gff_path, verbose = opts$verbose)
   if (is.null(genes)) return(NULL)
   genes$db <- name
@@ -397,14 +405,17 @@ if (length(all_genes) > 0) {
   region_extra <- setdiff(names(regions), c("qseqid", "chr", "region_start", "region_end"))
   region_lookup <- regions %>%
     select("qseqid", "chr", "region_start", "region_end", any_of(region_extra)) %>%
-    rename(region_chr = .data$chr)
+    rename(region_chr = chr)
   genes_out <- genes_out %>%
     left_join(region_lookup, by = "qseqid", multiple = "first")
   genes_file <- file.path(opts$`output-dir`, "outlier_regions_genes.csv")
   write_csv(genes_out, genes_file)
   message("Wrote ", genes_file, " (", nrow(genes_out), " hit-gene rows)")
+  if (nrow(genes_out) == 0)
+    message("Tip: for divergent taxa, try --blast-task blastn (more sensitive than default megablast) and/or inspect the raw BLAST TSV files in ", opts$`output-dir`)
 } else {
   message("No BLAST hits or genes mapped.")
+  message("Tip: try --blast-task blastn for more sensitive search; check raw BLAST TSV files in ", opts$`output-dir`)
 }
 
 message("Done.")

@@ -21,6 +21,8 @@ SAMTOOLS="samtools"
 BLAST_CMD="blastn"
 THREADS=1
 PARALLEL_DBS=1
+BLAST_TASK=""
+EVALUE=""
 VERBOSE="false"
 
 # Log with timestamp (to stderr so tee still captures R stdout)
@@ -45,6 +47,8 @@ Optional:
   --blast-cmd NAME       BLAST command: blastn, blastp, etc. [default: blastn]
   --threads N            Threads per BLAST run [default: 1]
   --parallel-dbs N       Run N BLAST DBs in parallel (Unix/macOS; 1=sequential) [default: 1]
+  --blast-task TASK      BLAST -task (e.g. blastn for sensitive search; default megablast can miss divergent hits)
+  --evalue EVAL          BLAST -evalue threshold (e.g. 10)
   --verbose              Enable verbose and debug output (logged)
   -h, --help             Show this help
 
@@ -73,6 +77,8 @@ while [[ $# -gt 0 ]]; do
         --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
         --parallel-dbs) PARALLEL_DBS="$2"; shift 2 ;;
+        --blast-task) BLAST_TASK="$2"; shift 2 ;;
+        --evalue) EVALUE="$2"; shift 2 ;;
         --verbose) VERBOSE="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -98,7 +104,7 @@ mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/outlier_annotation_${TIMESTAMP}.log"
 {
-    echo "Command: $RSCRIPT $R_FILE --regions $REGIONS --reference $REFERENCE --blast-config $BLAST_CONFIG --output-dir $OUTPUT_DIR --samtools $SAMTOOLS --blast-cmd $BLAST_CMD --threads $THREADS --parallel-dbs $PARALLEL_DBS${VERBOSE:+ --verbose}"
+    echo "Command: $RSCRIPT $R_FILE --regions $REGIONS --reference $REFERENCE --blast-config $BLAST_CONFIG --output-dir $OUTPUT_DIR --samtools $SAMTOOLS --blast-cmd $BLAST_CMD --threads $THREADS --parallel-dbs $PARALLEL_DBS${BLAST_TASK:+ --blast-task $BLAST_TASK}${EVALUE:+ --evalue $EVALUE}${VERBOSE:+ --verbose}"
     echo "Started: $(date -Iseconds 2>/dev/null || date)"
 } >> "$LOG_FILE"
 log "Log file: $LOG_FILE"
@@ -108,10 +114,14 @@ log "  Reference: $REFERENCE"
 log "  BLAST config: $BLAST_CONFIG"
 log "  Output dir: $OUTPUT_DIR"
 log "  BLAST command: $BLAST_CMD  threads: $THREADS  parallel-dbs: $PARALLEL_DBS"
+[[ -n "$BLAST_TASK" ]] && log "  blast-task: $BLAST_TASK"
+[[ -n "$EVALUE" ]] && log "  evalue: $EVALUE"
 [[ "$VERBOSE" == true ]] && log "  Verbose: enabled"
 
 R_EXTRA=()
 [[ "$VERBOSE" == true ]] && R_EXTRA+=(--verbose)
+[[ -n "$BLAST_TASK" ]] && R_EXTRA+=(--blast-task "$BLAST_TASK")
+[[ -n "$EVALUE" ]] && R_EXTRA+=(--evalue "$EVALUE")
 
 "$RSCRIPT" "$R_FILE" \
     --regions "$REGIONS" \
