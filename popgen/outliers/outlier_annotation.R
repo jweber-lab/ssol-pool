@@ -449,7 +449,17 @@ process_one_db <- function(db) {
   gff_path <- coalesce_null(db$gff_path, db[[3]])
   annotation_tsv <- coalesce_null(db$annotation_tsv, db$annotation_table)
   out_blast <- file.path(opts$`output-dir`, paste0("blast_", gsub("[^A-Za-z0-9_]", "_", name), ".tsv"))
-  if (opts$verbose) message("Running BLAST for DB: ", name)
+  if (opts$verbose) {
+    message("Running BLAST for DB: ", name)
+    message("  Query: ", nrow(regions), " region(s) from ", query_fa)
+    for (i in seq_len(nrow(regions))) {
+      qlen <- regions$region_end[i] - regions$region_start[i] + 1L
+      message("    ", regions$qseqid[i], " length=", qlen)
+    }
+    min_cov_opt <- opts$`min-query-coverage`
+    use_cov <- is.numeric(min_cov_opt) && is.finite(min_cov_opt) && min_cov_opt > 0 && min_cov_opt <= 1
+    message("  min-query-coverage: ", if (use_cov) min_cov_opt else "not set (all hits kept)")
+  }
   blast_extra <- character(0)
   if (!is.na(opts$`blast-task`) && nzchar(trimws(opts$`blast-task`))) blast_extra <- c(blast_extra, "-task", trimws(opts$`blast-task`))
   if (!is.na(opts$evalue) && nzchar(trimws(opts$evalue))) blast_extra <- c(blast_extra, "-evalue", trimws(opts$evalue))
@@ -461,13 +471,44 @@ process_one_db <- function(db) {
       genes <- NULL
     } else {
       b <- read_tsv(out_blast, col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue"), show_col_types = FALSE)
+      if (opts$verbose && nrow(b) > 0) {
+        qlen_vec <- if (!is.null(regions) && "qseqid" %in% names(regions) && "region_start" %in% names(regions))
+          (regions$region_end - regions$region_start + 1L)[match(b$qseqid, regions$qseqid)] else query_length_from_qseqid(b$qseqid)
+        cov <- b %>%
+          mutate(qlen = qlen_vec) %>%
+          group_by(.data$qseqid, .data$sseqid) %>%
+          summarise(covered = merged_length(.data$qstart, .data$qend), qlen = first(.data$qlen), .groups = "drop") %>%
+          mutate(frac = .data$covered / .data$qlen)
+        message("  BLAST summary (", name, "): ", nrow(b), " HSP rows, ", nrow(cov), " unique (qseqid,sseqid) pairs")
+        message("  Query coverage (merged HSPs per pair): min=", round(min(cov$frac), 4), " median=", round(median(cov$frac), 4), " max=", round(max(cov$frac), 4))
+        n_keep <- sum(cov$frac >= min_cov)
+        n_drop <- nrow(cov) - n_keep
+        message("  Coverage filter (frac>=", min_cov, "): ", n_keep, " pairs kept, ", n_drop, " pairs dropped")
+        by_q <- cov %>% group_by(.data$qseqid) %>% summarise(n_pairs = dplyr::n(), n_kept = sum(.data$frac >= min_cov), .groups = "drop")
+        for (i in seq_len(nrow(by_q))) {
+          message("    ", by_q$qseqid[i], ": ", by_q$n_pairs[i], " pairs, ", by_q$n_kept[i], " passed")
+        }
+      }
       b <- filter_by_query_coverage(b, regions, min_cov)
+      if (opts$verbose && nrow(b) > 0) {
+        n_pairs_after <- nrow(unique(b[, c("qseqid", "sseqid")]))
+        message("  After filter: ", nrow(b), " HSP rows, ", n_pairs_after, " (qseqid,sseqid) pairs")
+      }
       genes <- hits_to_genes(b, gff_path, verbose = opts$verbose)
     }
   } else {
+    if (opts$verbose) message("  Using all BLAST hits (no min-query-coverage filter)")
     genes <- hits_to_genes(out_blast, gff_path, verbose = opts$verbose)
   }
   if (is.null(genes)) return(NULL)
+  if (opts$verbose && nrow(genes) > 0) {
+    n_uniq_genes <- length(unique(genes$gene_id))
+    message("  Genes (", name, "): ", nrow(genes), " rows (feature-type expansion), ", n_uniq_genes, " unique gene_id")
+    by_q <- genes %>% group_by(.data$qseqid) %>% summarise(n_rows = dplyr::n(), n_genes = length(unique(.data$gene_id)), .groups = "drop")
+    for (i in seq_len(nrow(by_q))) {
+      message("    ", by_q$qseqid[i], ": ", by_q$n_rows[i], " rows, ", by_q$n_genes[i], " unique genes")
+    }
+  }
   genes$db <- name
   anno_ok <- !is.null(annotation_tsv) && length(annotation_tsv) > 0 && !is.na(annotation_tsv) && nzchar(trimws(annotation_tsv))
   if (anno_ok) {

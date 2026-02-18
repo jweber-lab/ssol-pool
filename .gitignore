@@ -97,6 +97,7 @@ help/
 *backup/
 reads/*
 primers/*
+*/ptg*
 
 # --- Optional: job logs and large generated files ---
 *.log
@@ -151,6 +152,7 @@ AGENTS.md
 *.vcf.gz.gzj
 *.vcf.gz.gzk
 *.vcf.gz.gzl
+*.fa
 *.fasta
 *.fastq
 *.fastq.gz
