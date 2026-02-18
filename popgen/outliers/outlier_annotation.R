@@ -16,6 +16,10 @@
 #   - gff_path: path to GFF/GTF for mapping hits to genes (optional; warn if missing)
 #   - annotation_tsv: optional TSV with gene_id column to join extra columns (e.g. product, GO)
 #
+# Optional --min-query-coverage FRAC (e.g. 0.8): only map hits to genes when the (qseqid,sseqid)
+# pair has merged BLAST HSPs covering at least that fraction of the query region; reduces noise
+# from short/local hits on subjects that do not align the full window.
+#
 # Outputs (filenames include a suffix from the regions file basename and, if set, --blast-task and --evalue):
 #   outlier_regions_genes_<suffix>.csv: one row per (hit, overlapping gene); columns qseqid, sseqid,
 #     gene_id, gene_name, product, gene_biotype, go_terms, ec_number, dbxref, strand,
@@ -258,15 +262,68 @@ read_gff_genes <- function(gff_path, verbose = FALSE) {
 # Normalize BLAST subject IDs so they can match GFF seqids (e.g. emb|CABIJS010000716.1| -> CABIJS010000716.1).
 normalize_sseqid <- function(x) sub("^[^|]+\\|([^|]+)\\|?$", "\\1", x)
 
+# Parse qseqid "chr:start-end" to get query length (region length).
+query_length_from_qseqid <- function(qseqid) {
+  start <- as.numeric(sub("^.*:([0-9]+)-[0-9]+$", "\\1", qseqid))
+  end <- as.numeric(sub("^.*:[0-9]+-([0-9]+)$", "\\1", qseqid))
+  pmax(1L, end - start + 1)
+}
+
+# Merge intervals [start, end] and return total covered length (handles overlapping and unordered).
+merged_length <- function(start, end) {
+  o <- order(start)
+  start <- start[o]
+  end <- end[o]
+  n <- length(start)
+  if (n == 0) return(0)
+  total <- 0
+  cur_end <- -Inf
+  for (i in seq_len(n)) {
+    if (start[i] > cur_end) {
+      total <- total + (end[i] - start[i] + 1)
+      cur_end <- end[i]
+    } else if (end[i] > cur_end) {
+      total <- total + (end[i] - cur_end)
+      cur_end <- end[i]
+    }
+  }
+  total
+}
+
+# Filter BLAST tibble to (qseqid, sseqid) pairs where query coverage >= min_coverage.
+# b must have qseqid, sseqid, qstart, qend. regions must have qseqid and region_start, region_end (or we parse qseqid).
+filter_by_query_coverage <- function(b, regions, min_coverage) {
+  if (nrow(b) == 0 || min_coverage <= 0 || min_coverage > 1) return(b)
+  # Query length: from regions if qseqid matches, else parse "chr:start-end"
+  qlen <- if (!is.null(regions) && "qseqid" %in% names(regions) && "region_start" %in% names(regions)) {
+    idx <- match(b$qseqid, regions$qseqid)
+    (regions$region_end - regions$region_start + 1L)[idx]
+  } else {
+    query_length_from_qseqid(b$qseqid)
+  }
+  b$qlen <- qlen
+  cov <- b %>%
+    group_by(.data$qseqid, .data$sseqid) %>%
+    summarise(covered = merged_length(.data$qstart, .data$qend), qlen = first(.data$qlen), .groups = "drop") %>%
+    mutate(frac = .data$covered / .data$qlen)
+  keep <- cov %>% filter(.data$frac >= min_coverage) %>% select("qseqid", "sseqid")
+  b %>% select(-"qlen") %>% semi_join(keep, by = c("qseqid", "sseqid"))
+}
+
 # Overlap BLAST hits (subject coords) with GFF genes; keep BLAST cols and GFF annotation.
+# blast_tsv: path to BLAST outfmt 6 TSV, or a tibble with same columns (e.g. after coverage filter).
 hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
-  if (!file.exists(blast_tsv) || file.info(blast_tsv)$size == 0) return(NULL)
-  b <- tryCatch({
-    read_tsv(blast_tsv, col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue"), show_col_types = FALSE)
-  }, error = function(e) {
-    message("Warning: could not read BLAST output ", blast_tsv, ": ", conditionMessage(e))
-    return(NULL)
-  })
+  if (is.data.frame(blast_tsv)) {
+    b <- blast_tsv
+  } else {
+    if (!file.exists(blast_tsv) || file.info(blast_tsv)$size == 0) return(NULL)
+    b <- tryCatch({
+      read_tsv(blast_tsv, col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue"), show_col_types = FALSE)
+    }, error = function(e) {
+      message("Warning: could not read BLAST output ", blast_tsv, ": ", conditionMessage(e))
+      return(NULL)
+    })
+  }
   if (is.null(b) || nrow(b) == 0) return(b)
   b$sstart <- as.numeric(b$sstart)
   b$send <- as.numeric(b$send)
@@ -343,6 +400,8 @@ option_list <- list(
   make_option(c("--parallel-dbs"), type = "integer", default = 1L, help = "Run this many BLAST DBs in parallel (Unix/macOS only; 1 = sequential)"),
   make_option(c("--blast-task"), type = "character", default = NA_character_, help = "BLAST -task (e.g. blastn for sensitive search; default megablast can miss divergent hits)"),
   make_option(c("--evalue"), type = "character", default = NA_character_, help = "BLAST -evalue threshold (default 10)"),
+  make_option(c("--min-query-coverage"), type = "numeric", default = NA_real_, metavar = "FRAC",
+    help = "Minimum fraction of query region covered by BLAST hits per (qseqid,sseqid). Only hits from subject sequences that align to at least this fraction of the query region are mapped to genes (e.g. 0.8 = 80%%). Omit or NA to keep all hits (backward compatible)."),
   make_option(c("--verbose"), action = "store_true", default = FALSE)
 )
 parser <- OptionParser(usage = "usage: %prog --regions FILE --reference FASTA --blast-config FILE [options]", option_list = option_list)
@@ -395,7 +454,19 @@ process_one_db <- function(db) {
   if (!is.na(opts$`blast-task`) && nzchar(trimws(opts$`blast-task`))) blast_extra <- c(blast_extra, "-task", trimws(opts$`blast-task`))
   if (!is.na(opts$evalue) && nzchar(trimws(opts$evalue))) blast_extra <- c(blast_extra, "-evalue", trimws(opts$evalue))
   run_blast(query_fa, db_path, out_blast, opts$`blast-cmd`, opts$threads, verbose = opts$verbose, blast_extra = blast_extra)
-  genes <- hits_to_genes(out_blast, gff_path, verbose = opts$verbose)
+  min_cov <- opts$`min-query-coverage`
+  use_coverage_filter <- is.numeric(min_cov) && is.finite(min_cov) && min_cov > 0 && min_cov <= 1
+  if (use_coverage_filter) {
+    if (!file.exists(out_blast) || file.info(out_blast)$size == 0) {
+      genes <- NULL
+    } else {
+      b <- read_tsv(out_blast, col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue"), show_col_types = FALSE)
+      b <- filter_by_query_coverage(b, regions, min_cov)
+      genes <- hits_to_genes(b, gff_path, verbose = opts$verbose)
+    }
+  } else {
+    genes <- hits_to_genes(out_blast, gff_path, verbose = opts$verbose)
+  }
   if (is.null(genes)) return(NULL)
   genes$db <- name
   anno_ok <- !is.null(annotation_tsv) && length(annotation_tsv) > 0 && !is.na(annotation_tsv) && nzchar(trimws(annotation_tsv))
