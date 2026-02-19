@@ -25,9 +25,9 @@
 #     gene_id, gene_name, product, gene_biotype, go_terms, ec_number, dbxref, strand,
 #     feature_types, gff_source, pident, length, qstart, qend, sstart, send, evalue, db,
 #     plus region pass-through (region_chr, region_start, region_end, etc.).
-#   outlier_genes_summary_<suffix>.csv: one row per (region, db); columns qseqid, db,
-#     n_genes, gene_ids (comma-separated), best_evalue, products (semicolon-separated),
-#     plus region pass-through.
+#   outlier_genes_summary_<suffix>.csv: one row per (region, db); scalar columns first
+#     (qseqid, db, n_genes, best_evalue, region_chr, region_start, region_end, ...),
+#     then list columns last: gene_ids and products (semicolon-separated; unique genes/products only).
 # GFF/annotation fields are NA when not present; missing files produce warnings only.
 ###############################################################################
 
@@ -575,18 +575,23 @@ if (length(all_genes) > 0) {
   write_csv(genes_out, genes_file)
   message("Wrote ", genes_file, " (", nrow(genes_out), " hit-gene rows)")
 
-  # Summary: one row per (region, db) with comma-separated gene_ids, n_genes, best_evalue, products
+  # Summary: one row per (region, db); unique genes/products only (no CDS/gene/mRNA duplicates);
+  # list columns use ";" separator; scalar columns first, long list columns last.
   summary_out <- genes_out %>%
     group_by(.data$qseqid, .data$db) %>%
     summarise(
       n_genes = dplyr::n_distinct(.data$gene_id),
-      gene_ids = paste(sort(unique(na.omit(.data$gene_id))), collapse = ","),
+      gene_ids = paste(sort(unique(na.omit(.data$gene_id))), collapse = "; "),
       best_evalue = min(as.numeric(.data$evalue), na.rm = TRUE),
-      products = paste(sort(unique(na.omit(.data$product))), collapse = "; "),
+      products = paste(sort(unique(trimws(.data$product[!is.na(.data$product) & nzchar(trimws(.data$product))]))), collapse = "; "),
       .groups = "drop"
     ) %>%
     mutate(best_evalue = if_else(is.finite(.data$best_evalue), .data$best_evalue, NA_real_)) %>%
     left_join(region_lookup, by = "qseqid", multiple = "first")
+  list_cols <- c("gene_ids", "products")
+  other_cols <- setdiff(names(summary_out), c("qseqid", "db", "n_genes", "best_evalue", "region_chr", "region_start", "region_end", list_cols))
+  summary_out <- summary_out %>%
+    select("qseqid", "db", "n_genes", "best_evalue", "region_chr", "region_start", "region_end", all_of(other_cols), all_of(list_cols))
   summary_file <- file.path(opts$`output-dir`, paste0("outlier_genes_summary_", output_suffix, ".csv"))
   write_csv(summary_out, summary_file)
   message("Wrote ", summary_file, " (", nrow(summary_out), " region-DB rows)")

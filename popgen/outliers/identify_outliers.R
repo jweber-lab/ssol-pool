@@ -2029,6 +2029,36 @@ if (length(outlier_results) > 0) {
     meta_cols <- intersect(meta_cols, names(wide_outliers))
     wide_outliers <- wide_outliers %>% select("chr", "start", "end", any_of(meta_cols), all_of(value_cols))
 
+    # Populate stat and quantile columns from unfiltered data so every sample has values (not just the one that passed the threshold)
+    keys <- wide_outliers %>% select("chr", "start", "end")
+    value_cols_stat <- value_cols[!grepl("_quantile$", value_cols)]
+    if (length(value_cols_stat) > 0) {
+      windows_by_vc <- build_windows_by_value_col(
+        value_cols_stat,
+        diversity_data,
+        if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data else NULL,
+        pbe_data
+      )
+      full_long <- bind_rows(Filter(Negate(is.null), lapply(names(windows_by_vc), function(vc) {
+        w <- windows_by_vc[[vc]] %>% semi_join(keys, by = c("chr", "start", "end"))
+        if (nrow(w) == 0) return(NULL)
+        w %>% mutate(value_col = vc) %>% select("chr", "start", "end", "value_col", "value", "quantile")
+      })))
+      if (nrow(full_long) > 0) {
+        full_values <- full_long %>%
+          pivot_wider(names_from = "value_col", values_from = "value")
+        full_quants <- full_long %>%
+          pivot_wider(names_from = "value_col", values_from = "quantile", names_glue = "{.name}_quantile")
+        full_wide <- full_values %>%
+          left_join(full_quants, by = c("chr", "start", "end"))
+        wide_outliers <- wide_outliers %>%
+          select("chr", "start", "end", any_of(meta_cols)) %>%
+          left_join(full_wide, by = c("chr", "start", "end"))
+        for (col in setdiff(value_cols, names(wide_outliers))) wide_outliers[[col]] <- NA_real_
+        wide_outliers <- wide_outliers %>% select("chr", "start", "end", any_of(meta_cols), all_of(value_cols))
+      }
+    }
+
     unique_windows_outliers <- if ("window_size" %in% colnames(all_outliers)) {
         sort(unique(all_outliers$window_size[!is.na(all_outliers$window_size)]))
     } else {
