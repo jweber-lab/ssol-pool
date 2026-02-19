@@ -2096,6 +2096,16 @@ if (length(outlier_results) > 0) {
           pivot_wider(names_from = "value_col", values_from = "value")
         full_quants <- full_long %>%
           pivot_wider(names_from = "value_col", values_from = "quantile", names_glue = "{.name}_quantile")
+        if (opts$verbose) {
+          n_fv <- nrow(full_values)
+          n_fq <- nrow(full_quants)
+          u_fv <- nrow(full_values %>% distinct(.data$chr, .data$start, .data$end))
+          u_fq <- nrow(full_quants %>% distinct(.data$chr, .data$start, .data$end))
+          cat("  [fill] full_values: nrow=", n_fv, " unique(chr,start,end)=", u_fv, "\n", sep = "")
+          cat("  [fill] full_quants: nrow=", n_fq, " unique(chr,start,end)=", u_fq, "\n", sep = "")
+          if (n_fv != u_fv) cat("  [fill] -> full_values has duplicate (chr,start,end), many-to-many from values pivot\n")
+          if (n_fq != u_fq) cat("  [fill] -> full_quants has duplicate (chr,start,end), many-to-many from quantile pivot\n")
+        }
         full_wide <- full_values %>%
           left_join(full_quants, by = c("chr", "start", "end"))
         wide_outliers <- wide_outliers %>%
