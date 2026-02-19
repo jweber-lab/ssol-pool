@@ -1466,7 +1466,8 @@ if (!is.null(opts$chromosome) && nchar(trimws(opts$chromosome)) > 0) {
         region_filename_suffix <- paste0("_region_", gsub("[^A-Za-z0-9]", "_", req_chr), "_", as.integer(region_start), "_", as.integer(region_end))
         if (opts$verbose) cat("Restricting to interval [", region_start, ",", region_end, "] on ", req_chr, "\n", sep = "")
     } else {
-        region_filename_suffix <- paste0("_chr_", gsub("[^A-Za-z0-9]", "_", req_chr))
+        # Omit suffix here so we don't duplicate the chr in the filename (chr_suffix already has _chr<chr>).
+        region_filename_suffix <- ""
         if (opts$verbose) cat("Restricting to chromosome:", req_chr, "\n")
     }
 }

@@ -5,7 +5,7 @@
 #
 # Wrapper for outlier_annotation.R: annotate outlier regions using BLAST
 # against multiple DBs (from config file). Per-region BLAST, then map hits
-# to GFF for genes/GO. Output: outlier_regions_genes.csv.
+# to GFF for genes/GO. Output: outlier_genes_<suffix>.csv, outlier_genes_summary_<suffix>.csv.
 #
 # BLAST config: YAML or JSON with list of { db_path, name, gff_path }.
 ###############################################################################

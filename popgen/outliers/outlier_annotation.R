@@ -21,11 +21,11 @@
 # from short/local hits on subjects that do not align the full window.
 #
 # Outputs (filenames include a suffix from the regions file basename and, if set, --blast-task and --evalue):
-#   outlier_regions_genes_<suffix>.csv: one row per (hit, overlapping gene); columns qseqid, sseqid,
+#   outlier_genes_<suffix>.csv: one row per (hit, overlapping gene); columns qseqid, sseqid,
 #     gene_id, gene_name, product, gene_biotype, go_terms, ec_number, dbxref, strand,
 #     feature_types, gff_source, pident, length, qstart, qend, sstart, send, evalue, db,
 #     plus region pass-through (region_chr, region_start, region_end, etc.).
-#   outlier_regions_genes_summary_<suffix>.csv: one row per (region, db); columns qseqid, db,
+#   outlier_genes_summary_<suffix>.csv: one row per (region, db); columns qseqid, db,
 #     n_genes, gene_ids (comma-separated), best_evalue, products (semicolon-separated),
 #     plus region pass-through.
 # GFF/annotation fields are NA when not present; missing files produce warnings only.
@@ -571,7 +571,7 @@ if (length(all_genes) > 0) {
     rename(region_chr = chr)
   genes_out <- genes_out %>%
     left_join(region_lookup, by = "qseqid", multiple = "first")
-  genes_file <- file.path(opts$`output-dir`, paste0("outlier_regions_genes_", output_suffix, ".csv"))
+  genes_file <- file.path(opts$`output-dir`, paste0("outlier_genes_", output_suffix, ".csv"))
   write_csv(genes_out, genes_file)
   message("Wrote ", genes_file, " (", nrow(genes_out), " hit-gene rows)")
 
@@ -587,7 +587,7 @@ if (length(all_genes) > 0) {
     ) %>%
     mutate(best_evalue = if_else(is.finite(.data$best_evalue), .data$best_evalue, NA_real_)) %>%
     left_join(region_lookup, by = "qseqid", multiple = "first")
-  summary_file <- file.path(opts$`output-dir`, paste0("outlier_regions_genes_summary_", output_suffix, ".csv"))
+  summary_file <- file.path(opts$`output-dir`, paste0("outlier_genes_summary_", output_suffix, ".csv"))
   write_csv(summary_out, summary_file)
   message("Wrote ", summary_file, " (", nrow(summary_out), " region-DB rows)")
 
