@@ -2033,17 +2033,64 @@ if (length(outlier_results) > 0) {
     keys <- wide_outliers %>% select("chr", "start", "end")
     value_cols_stat <- value_cols[!grepl("_quantile$", value_cols)]
     if (length(value_cols_stat) > 0) {
+      if (opts$verbose) {
+        cat("  [fill] wide_outliers: nrow=", nrow(wide_outliers), " unique(chr,start,end)=", nrow(keys %>% distinct()), "\n", sep = "")
+        if ("window_size" %in% names(wide_outliers)) {
+          ws_out <- unique(wide_outliers$window_size[!is.na(wide_outliers$window_size)])
+          cat("  [fill] wide_outliers window_size: ", paste(ws_out, collapse = ", "), "\n", sep = "")
+        } else {
+          cat("  [fill] wide_outliers: no window_size column\n")
+        }
+        if (!is.null(diversity_data) && nrow(diversity_data) > 0) {
+          n_uniq <- nrow(diversity_data %>% distinct(.data$chr, .data$start, .data$end, .data$sample))
+          cat("  [fill] diversity_data: nrow=", nrow(diversity_data), " unique(chr,start,end,sample)=", n_uniq, "\n", sep = "")
+          if ("window_size" %in% names(diversity_data)) {
+            cat("  [fill] diversity_data window_size: ", paste(sort(unique(diversity_data$window_size[!is.na(diversity_data$window_size)])), collapse = ", "), "\n", sep = "")
+          }
+        }
+      }
+      div_for_fill <- diversity_data
+      fst_for_fill <- if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data else NULL
+      pbe_for_fill <- pbe_data
+      ws_out <- if ("window_size" %in% names(wide_outliers)) unique(wide_outliers$window_size[!is.na(wide_outliers$window_size)]) else numeric(0)
+      if (length(ws_out) > 0) {
+        if (!is.null(div_for_fill) && "window_size" %in% names(div_for_fill)) {
+          div_for_fill <- div_for_fill %>% filter(.data$window_size %in% ws_out | is.na(.data$window_size))
+          div_for_fill <- div_for_fill %>% distinct(.data$chr, .data$start, .data$end, .data$sample, .keep_all = TRUE)
+          if (opts$verbose) cat("  [fill] filtered diversity to window_size in ", paste(ws_out, collapse = ","), " nrow=", nrow(div_for_fill), "\n", sep = "")
+        }
+        if (!is.null(fst_for_fill) && "window_size" %in% names(fst_for_fill)) {
+          fst_for_fill <- fst_for_fill %>% filter(.data$window_size %in% ws_out | is.na(.data$window_size))
+          if ("sample_pair" %in% names(fst_for_fill)) {
+            fst_for_fill <- fst_for_fill %>% distinct(.data$chr, .data$start, .data$end, .data$sample_pair, .keep_all = TRUE)
+          } else {
+            fst_for_fill <- fst_for_fill %>% distinct(.data$chr, .data$start, .data$end, .keep_all = TRUE)
+          }
+          if (opts$verbose) cat("  [fill] filtered FST to window_size in ", paste(ws_out, collapse = ","), " nrow=", nrow(fst_for_fill), "\n", sep = "")
+        }
+        if (!is.null(pbe_for_fill) && "window_size" %in% names(pbe_for_fill)) {
+          pbe_for_fill <- pbe_for_fill %>% filter(.data$window_size %in% ws_out | is.na(.data$window_size))
+          by_trio <- if ("trio_id" %in% names(pbe_for_fill)) c("chr", "start", "end", "trio_id") else c("chr", "start", "end", "pop1", "pop2", "pop3")
+          pbe_for_fill <- pbe_for_fill %>% distinct(!!!syms(by_trio), .keep_all = TRUE)
+          if (opts$verbose) cat("  [fill] filtered PBE to window_size in ", paste(ws_out, collapse = ","), " nrow=", nrow(pbe_for_fill), "\n", sep = "")
+        }
+      }
       windows_by_vc <- build_windows_by_value_col(
         value_cols_stat,
-        diversity_data,
-        if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data else NULL,
-        pbe_data
+        div_for_fill,
+        fst_for_fill,
+        pbe_for_fill
       )
       full_long <- bind_rows(Filter(Negate(is.null), lapply(names(windows_by_vc), function(vc) {
         w <- windows_by_vc[[vc]] %>% semi_join(keys, by = c("chr", "start", "end"))
         if (nrow(w) == 0) return(NULL)
         w %>% mutate(value_col = vc) %>% select("chr", "start", "end", "value_col", "value", "quantile")
       })))
+      if (opts$verbose && nrow(full_long) > 0) {
+        n_uniq_fl <- nrow(full_long %>% distinct(.data$chr, .data$start, .data$end, .data$value_col))
+        cat("  [fill] full_long: nrow=", nrow(full_long), " unique(chr,start,end,value_col)=", n_uniq_fl, "\n", sep = "")
+        if (nrow(full_long) != n_uniq_fl) cat("  [fill] -> duplicates will cause many-to-many join\n")
+      }
       if (nrow(full_long) > 0) {
         full_values <- full_long %>%
           pivot_wider(names_from = "value_col", values_from = "value")
