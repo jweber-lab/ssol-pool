@@ -26,7 +26,7 @@
 #     seed-expand is used. Filename includes _across_samples or _within_samples and
 #     _seed_expand or _merge_only. Columns: chr, region_start, region_end, n_windows,
 #     outlier_stat; optional region_mean_coverage, region_mean_mapping_quality, region_n_snps;
-#     per-stat summaries (for each value column): region_mean_<name> (overlap-corrected),
+#     per-stat summaries (for each value column): region_mean_<name> (mean over overlapping windows),
 #     region_max_<name>, region_max_<name>_quantile (quantile of the most extreme window).
 #
 # How regions are built (see also --merge-across-samples):
@@ -51,6 +51,40 @@
 #
 # Summary statistics are not written here; use plot/other scripts for that.
 # Coordinates: 1-based inclusive where applicable.
+#
+# -----------------------------------------------------------------------------
+# WORKFLOW (step-by-step)
+# -----------------------------------------------------------------------------
+# 1. Parse options and validate (quantiles, statistics list, paths).
+# 2. Read data: HDF5 (--hdf5-dir) or TSV (--diversity-dir / --fst-dir). Optional
+#    --window-size filters to one window size. PBE/diversity get mean_coverage etc.
+#    from diversity when available.
+# 3. Chromosome scope: get chr lengths (from data or reference); apply
+#    --top-n-chromosomes, --min-chromosome-length, --chromosome, --region-start/end.
+#    Filter diversity, FST, PBE to selected chrs and optional interval.
+# 4. Per-statistic outlier detection (outlier_results list):
+#    - Diversity (pi, theta, tajima_d): per sample, per window size. For each
+#      (sample, window_size) apply high/low quantile threshold (or seed-then-expand:
+#      seed windows at strict quantile, expand with softer quantile, merge by gap).
+#    - FST: per sample_pair, same quantile/seed-expand logic.
+#    - PBE: per trio, same logic.
+#    Outlier rows have chr, start, end, value, quantile, sample/sample_pair, etc.
+# 5. Combine outlier_results -> all_outliers. Build wide table: one row per
+#    (chr, start, end) [and window_size when present], columns = outlier_stat,
+#    outlier_direction, window meta, then samplename.stat and samplename.stat_quantile
+#    (and FST/PBE pair columns). Initially only samples that passed the threshold
+#    have non-NA in those columns.
+# 6. Fill step (recent): Populate stat and quantile for ALL samples from the
+#    unfiltered data so non-outlier samples still show their value/quantile.
+#    Keys use (chr, start, end) and, when present, window_size so the join matches
+#    the same window definition. Source data are filtered to the same window_size(s)
+#    as the outlier table and deduped; build_windows_by_value_col returns
+#    window_size so pivot_wider uses id_cols = join_by -> one row per window.
+# 7. Build regions (if merge or seed-expand): merge nearby windows into regions,
+#    optionally across samples; add region summaries (mean/max stat, quantile).
+# 8. Write outlier_windows_*.csv and outlier_regions_*.csv; filename suffix
+#    includes window, chr, quantiles, merge/expand, and optional region.
+# -----------------------------------------------------------------------------
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -516,9 +550,9 @@ add_region_aggregates <- function(regions, windows) {
     bind_rows(out_list)
 }
 
-# For each (region, value_col): overlap-corrected mean stat, max stat, quantile of the window with max.
+# For each (region, value_col): mean stat over overlapping windows, max stat, quantile of the window with max.
 # windows_by_value_col: named list of tibbles with chr, start, end, value, and optional quantile column.
-# Weights: 1 / (number of windows overlapping this window); then weighted mean = sum(value*weight)/sum(weight).
+# Mean is simple mean of overlapping window values (no overlap correction; can be revisited for step-size-aware correction later).
 add_region_stat_summaries <- function(regions, windows_by_value_col) {
     if (is.null(regions) || nrow(regions) == 0) return(regions)
     if (length(windows_by_value_col) == 0) return(regions)
@@ -544,10 +578,7 @@ add_region_stat_summaries <- function(regions, windows_by_value_col) {
                 out_maxs[i] <- NA_real_
                 next
             }
-            # Overlap count: window i overlaps j when start[i] <= end[j] and end[i] >= start[j]; vectorized
-            n_overlap <- colSums(outer(sub$start, sub$end, "<=") & outer(sub$end, sub$start, ">="))
-            weight <- 1 / pmax(n_overlap, 1)
-            out_means[i] <- sum(sub$value * weight, na.rm = TRUE) / sum(weight, na.rm = TRUE)
+            out_means[i] <- mean(sub$value, na.rm = TRUE)
             idx_max <- which.max(sub$value)
             out_maxs[i] <- sub$value[idx_max]
             if (!is.null(qcol) && qcol %in% colnames(sub)) out_max_quants[i] <- sub[[qcol]][idx_max]
@@ -559,8 +590,9 @@ add_region_stat_summaries <- function(regions, windows_by_value_col) {
     regions
 }
 
-# Build list of window tibbles (chr, start, end, value, quantile) keyed by value_col for add_region_stat_summaries.
-# value_cols: character vector of names like "Cheney.pi", "S1:S2.fst", "S1:S2:S3.pbe".
+# Build list of window tibbles (chr, start, end, window_size when present, value, quantile) keyed by value_col.
+# Used for region summaries and for the fill step. value_cols: e.g. "Cheney.pi", "S1:S2.fst", "S1:S2:S3.pbe".
+# window_size is passed through so fill can join on (chr, start, end, window_size) and stay one-to-one.
 build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe_data) {
     out <- list()
     if (length(value_cols) == 0) return(out)
@@ -577,15 +609,19 @@ build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe
                     filter(.data$pop1 == trio_parts[1], .data$pop2 == trio_parts[2], .data$pop3 == trio_parts[3])
             }
             sub <- sub %>%
-                transmute(chr = .data$chr, start = .data$start, end = .data$end, value = .data$pbe,
-                         quantile = if ("pbe_quantile" %in% colnames(pbe_data)) .data$pbe_quantile else NA_real_)
+                transmute(chr = .data$chr, start = .data$start, end = .data$end,
+                         value = .data$pbe,
+                         quantile = if ("pbe_quantile" %in% colnames(pbe_data)) .data$pbe_quantile else NA_real_,
+                         window_size = if ("window_size" %in% colnames(pbe_data)) .data$window_size else NA_real_)
             if (nrow(sub) > 0) out[[vc]] <- sub
         } else if (grepl("\\.fst$", vc)) {
             pair <- sub("\\.fst$", "", vc)
             if (is.null(fst_data) || nrow(fst_data) == 0) next
             sub <- fst_data %>% filter(.data$sample_pair == pair) %>%
-                transmute(chr = .data$chr, start = .data$start, end = .data$end, value = .data$fst,
-                         quantile = if ("fst_quantile" %in% colnames(fst_data)) .data$fst_quantile else NA_real_)
+                transmute(chr = .data$chr, start = .data$start, end = .data$end,
+                         value = .data$fst,
+                         quantile = if ("fst_quantile" %in% colnames(fst_data)) .data$fst_quantile else NA_real_,
+                         window_size = if ("window_size" %in% colnames(fst_data)) .data$window_size else NA_real_)
             if (nrow(sub) > 0) out[[vc]] <- sub
         } else {
             # diversity: "Cheney.pi", "Echo.theta" (last segment is stat, rest is sample)
@@ -599,7 +635,8 @@ build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe
                 filter(.data$sample == sample_name) %>%
                 transmute(chr = .data$chr, start = .data$start, end = .data$end,
                          value = !!sym(stat_col),
-                         quantile = if (qcol %in% colnames(diversity_data)) !!sym(qcol) else NA_real_)
+                         quantile = if (qcol %in% colnames(diversity_data)) !!sym(qcol) else NA_real_,
+                         window_size = if ("window_size" %in% colnames(diversity_data)) .data$window_size else NA_real_)
             if (nrow(sub) > 0) out[[vc]] <- sub
         }
     }
@@ -761,7 +798,10 @@ seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id
         distinct() %>%
         mutate(window_type = "expanded")
     if (verbose) cat("  seed_expand: expand_windows", n_expand_before, "x expanded regions", n_regions, "(join by chr, many-to-many) -> tagged expanded windows", nrow(expand_used), "\n")
-    all_tagged <- bind_rows(seed_windows, expand_used)
+    expand_only <- expand_used %>% anti_join(seed_windows %>% select("chr", "start", "end"), by = c("chr", "start", "end"))
+    if (verbose && nrow(expand_only) < nrow(expand_used))
+        cat("  seed_expand: dropped ", nrow(expand_used) - nrow(expand_only), " expansion windows already in seed set\n", sep = "")
+    all_tagged <- bind_rows(seed_windows, expand_only)
     expanded <- add_region_aggregates(expanded, all_tagged)
     if (!is.null(id_cols)) {
         for (c in id_cols) if (c %in% names(seed_regions) && !c %in% names(expanded)) expanded[[c]] <- seed_regions[[c]][1]
@@ -1323,7 +1363,9 @@ read_fst_files <- function(input_dir, selected_window_size=NULL, selected_pairs=
     return(list(data=combined_data, pairs=fst_pairs))
 }
 
-# Read data
+# -----------------------------------------------------------------------------
+# Step 2: Read input data (HDF5 or TSV)
+# -----------------------------------------------------------------------------
 diversity_data <- NULL
 fst_data_list <- list()
 
@@ -1417,7 +1459,9 @@ if (length(all_data_for_chr_lengths) > 0) {
     stop("No data available for chromosome length calculation")
 }
 
-# Get chromosome lengths
+# -----------------------------------------------------------------------------
+# Step 3: Chromosome scope (lengths, filters, restrict data to selected chrs/region)
+# -----------------------------------------------------------------------------
 chr_lengths <- get_chr_lengths(combined_for_chr, opts$`reference-genome`)
 
 # Filter chromosomes by length if requested
@@ -1517,7 +1561,9 @@ if (!is.null(opts$chromosome) && (is.numeric(region_start) && is.numeric(region_
 # Whether any depth/mapq/SNP quality options are set (for filtering seeds/expansion)
 has_quality_opts <- !all(vapply(list(opts$`min-depth`, opts$`max-depth`, opts$`min-mapping-quality`, opts$`max-mapping-quality`, opts$`min-snps`, opts$`max-snps`), is.null, logical(1L)))
 
-# Now process statistics and identify outliers
+# -----------------------------------------------------------------------------
+# Step 4: Per-statistic outlier detection (diversity -> FST -> PBE)
+# -----------------------------------------------------------------------------
 outlier_results <- list()
 expanded_region_results <- list()  # when expand_mode, holds expanded regions per key
 
@@ -1983,9 +2029,16 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
     }
 }
 
-# Combine all outlier windows and build one wide table (chr, start, end, samplename.stat, ..., outlier_stat)
+# -----------------------------------------------------------------------------
+# Step 5 & 6: Combine outliers -> wide table; then fill stat/quantile for all samples
+# -----------------------------------------------------------------------------
 if (length(outlier_results) > 0) {
     all_outliers <- bind_rows(outlier_results)
+    if (nrow(all_outliers) > 0 && "window_size" %in% colnames(all_outliers)) {
+        n_ws <- length(unique(all_outliers$window_size[!is.na(all_outliers$window_size)]))
+        if (n_ws > 1L)
+            warning("Multiple window sizes present in outlier results (", n_ws, "). --window-size was intended to filter to one.")
+    }
     if (!"start" %in% colnames(all_outliers)) all_outliers$start <- all_outliers$pos
     if (!"end" %in% colnames(all_outliers)) all_outliers$end <- all_outliers$pos
     all_outliers$value_col <- ifelse(
@@ -2007,14 +2060,12 @@ if (length(outlier_results) > 0) {
             .groups = "drop"
         )
     wide_long <- all_outliers %>% select("chr", "start", "end", "value_col", "value")
-    wide_long <- wide_long %>% distinct(chr, start, end, value_col, .keep_all = TRUE)
     wide_outliers <- wide_long %>%
         pivot_wider(names_from = "value_col", values_from = "value") %>%
         left_join(stats_per_window, by = c("chr", "start", "end"))
     if ("quantile" %in% colnames(all_outliers)) {
         wide_quantile <- all_outliers %>%
             select("chr", "start", "end", "value_col", "quantile") %>%
-            distinct(chr, start, end, value_col, .keep_all = TRUE) %>%
             pivot_wider(names_from = "value_col", values_from = "quantile", names_glue = "{.name}_quantile")
         wide_outliers <- wide_outliers %>% left_join(wide_quantile, by = c("chr", "start", "end"))
     }
@@ -2029,8 +2080,11 @@ if (length(outlier_results) > 0) {
     meta_cols <- intersect(meta_cols, names(wide_outliers))
     wide_outliers <- wide_outliers %>% select("chr", "start", "end", any_of(meta_cols), all_of(value_cols))
 
-    # Populate stat and quantile columns from unfiltered data so every sample has values (not just the one that passed the threshold)
-    keys <- wide_outliers %>% select("chr", "start", "end")
+    # Fill: get value and quantile for every sample from unfiltered data (not only the sample that passed the threshold).
+    # Use (chr, start, end, window_size) when present so we match the same window and avoid many-to-many joins.
+    join_by <- c("chr", "start", "end")
+    if ("window_size" %in% names(wide_outliers)) join_by <- c(join_by, "window_size")
+    keys <- wide_outliers %>% select(all_of(join_by))
     value_cols_stat <- value_cols[!grepl("_quantile$", value_cols)]
     if (length(value_cols_stat) > 0) {
       if (opts$verbose) {
@@ -2056,23 +2110,55 @@ if (length(outlier_results) > 0) {
       if (length(ws_out) > 0) {
         if (!is.null(div_for_fill) && "window_size" %in% names(div_for_fill)) {
           div_for_fill <- div_for_fill %>% filter(.data$window_size %in% ws_out | is.na(.data$window_size))
-          div_for_fill <- div_for_fill %>% distinct(.data$chr, .data$start, .data$end, .data$sample, .keep_all = TRUE)
+        #   div_for_fill <- div_for_fill %>% distinct(.data$chr, .data$start, .data$end, .data$sample, .keep_all = TRUE)
           if (opts$verbose) cat("  [fill] filtered diversity to window_size in ", paste(ws_out, collapse = ","), " nrow=", nrow(div_for_fill), "\n", sep = "")
         }
         if (!is.null(fst_for_fill) && "window_size" %in% names(fst_for_fill)) {
           fst_for_fill <- fst_for_fill %>% filter(.data$window_size %in% ws_out | is.na(.data$window_size))
-          if ("sample_pair" %in% names(fst_for_fill)) {
-            fst_for_fill <- fst_for_fill %>% distinct(.data$chr, .data$start, .data$end, .data$sample_pair, .keep_all = TRUE)
-          } else {
-            fst_for_fill <- fst_for_fill %>% distinct(.data$chr, .data$start, .data$end, .keep_all = TRUE)
-          }
+        #   if ("sample_pair" %in% names(fst_for_fill)) {
+        #     fst_for_fill <- fst_for_fill %>% distinct(.data$chr, .data$start, .data$end, .data$sample_pair, .keep_all = TRUE)
+        #   } else {
+        #     fst_for_fill <- fst_for_fill %>% distinct(.data$chr, .data$start, .data$end, .keep_all = TRUE)
+        #   }
           if (opts$verbose) cat("  [fill] filtered FST to window_size in ", paste(ws_out, collapse = ","), " nrow=", nrow(fst_for_fill), "\n", sep = "")
         }
         if (!is.null(pbe_for_fill) && "window_size" %in% names(pbe_for_fill)) {
           pbe_for_fill <- pbe_for_fill %>% filter(.data$window_size %in% ws_out | is.na(.data$window_size))
           by_trio <- if ("trio_id" %in% names(pbe_for_fill)) c("chr", "start", "end", "trio_id") else c("chr", "start", "end", "pop1", "pop2", "pop3")
-          pbe_for_fill <- pbe_for_fill %>% distinct(!!!syms(by_trio), .keep_all = TRUE)
+        #   pbe_for_fill <- pbe_for_fill %>% distinct(!!!syms(by_trio), .keep_all = TRUE)
           if (opts$verbose) cat("  [fill] filtered PBE to window_size in ", paste(ws_out, collapse = ","), " nrow=", nrow(pbe_for_fill), "\n", sep = "")
+        }
+      }
+      # Warn if fill data have duplicate keys (avoids silent many-to-many joins).
+      if (!is.null(div_for_fill) && nrow(div_for_fill) > 0) {
+        key_div <- c("chr", "start", "end", "sample")
+        if ("window_size" %in% names(div_for_fill)) key_div <- c(key_div, "window_size")
+        if (all(key_div %in% names(div_for_fill))) {
+          n_div <- nrow(div_for_fill)
+          u_div <- nrow(div_for_fill %>% distinct(!!!syms(key_div)))
+          if (n_div != u_div)
+            warning("Fill diversity data has duplicate key (", paste(key_div, collapse = ", "), "); nrow=", n_div, " unique=", u_div, ". Join may be many-to-many.")
+        }
+      }
+      if (!is.null(fst_for_fill) && nrow(fst_for_fill) > 0) {
+        key_fst <- if ("sample_pair" %in% names(fst_for_fill)) c("chr", "start", "end", "sample_pair") else c("chr", "start", "end")
+        if ("window_size" %in% names(fst_for_fill)) key_fst <- c(key_fst, "window_size")
+        if (all(key_fst %in% names(fst_for_fill))) {
+          n_fst <- nrow(fst_for_fill)
+          u_fst <- nrow(fst_for_fill %>% distinct(!!!syms(key_fst)))
+          if (n_fst != u_fst)
+            warning("Fill FST data has duplicate key (", paste(key_fst, collapse = ", "), "); nrow=", n_fst, " unique=", u_fst, ". Join may be many-to-many.")
+        }
+      }
+      if (!is.null(pbe_for_fill) && nrow(pbe_for_fill) > 0) {
+        by_trio_fill <- if ("trio_id" %in% names(pbe_for_fill)) c("chr", "start", "end", "trio_id") else c("chr", "start", "end", "pop1", "pop2", "pop3")
+        key_pbe <- by_trio_fill
+        if ("window_size" %in% names(pbe_for_fill)) key_pbe <- c(key_pbe, "window_size")
+        if (all(key_pbe %in% names(pbe_for_fill))) {
+          n_pbe <- nrow(pbe_for_fill)
+          u_pbe <- nrow(pbe_for_fill %>% distinct(!!!syms(key_pbe)))
+          if (n_pbe != u_pbe)
+            warning("Fill PBE data has duplicate key (", paste(key_pbe, collapse = ", "), "); nrow=", n_pbe, " unique=", u_pbe, ". Join may be many-to-many.")
         }
       }
       windows_by_vc <- build_windows_by_value_col(
@@ -2082,37 +2168,38 @@ if (length(outlier_results) > 0) {
         pbe_for_fill
       )
       full_long <- bind_rows(Filter(Negate(is.null), lapply(names(windows_by_vc), function(vc) {
-        w <- windows_by_vc[[vc]] %>% semi_join(keys, by = c("chr", "start", "end"))
+        w <- windows_by_vc[[vc]] %>% semi_join(keys, by = join_by)
         if (nrow(w) == 0) return(NULL)
-        w %>% mutate(value_col = vc) %>% select("chr", "start", "end", "value_col", "value", "quantile")
+        w %>% mutate(value_col = vc) %>% select(all_of(join_by), "value_col", "value", "quantile")
       })))
-      if (opts$verbose && nrow(full_long) > 0) {
+      if (nrow(full_long) > 0) {
         n_uniq_fl <- nrow(full_long %>% distinct(.data$chr, .data$start, .data$end, .data$value_col))
-        cat("  [fill] full_long: nrow=", nrow(full_long), " unique(chr,start,end,value_col)=", n_uniq_fl, "\n", sep = "")
-        if (nrow(full_long) != n_uniq_fl) cat("  [fill] -> duplicates will cause many-to-many join\n")
+        if (opts$verbose) cat("  [fill] full_long: nrow=", nrow(full_long), " unique(chr,start,end,value_col)=", n_uniq_fl, "\n", sep = "")
+        if (nrow(full_long) != n_uniq_fl)
+          warning("Fill full_long has duplicate (chr, start, end, value_col); nrow=", nrow(full_long), " unique=", n_uniq_fl, ". Join may be many-to-many.")
       }
       if (nrow(full_long) > 0) {
         full_values <- full_long %>%
-          pivot_wider(names_from = "value_col", values_from = "value")
+          pivot_wider(names_from = "value_col", values_from = "value", id_cols = all_of(join_by))
         full_quants <- full_long %>%
-          pivot_wider(names_from = "value_col", values_from = "quantile", names_glue = "{.name}_quantile")
+          pivot_wider(names_from = "value_col", values_from = "quantile", names_glue = "{.name}_quantile", id_cols = all_of(join_by))
         if (opts$verbose) {
           n_fv <- nrow(full_values)
           n_fq <- nrow(full_quants)
-          u_fv <- nrow(full_values %>% distinct(.data$chr, .data$start, .data$end))
-          u_fq <- nrow(full_quants %>% distinct(.data$chr, .data$start, .data$end))
-          cat("  [fill] full_values: nrow=", n_fv, " unique(chr,start,end)=", u_fv, "\n", sep = "")
-          cat("  [fill] full_quants: nrow=", n_fq, " unique(chr,start,end)=", u_fq, "\n", sep = "")
-          if (n_fv != u_fv) cat("  [fill] -> full_values has duplicate (chr,start,end), many-to-many from values pivot\n")
-          if (n_fq != u_fq) cat("  [fill] -> full_quants has duplicate (chr,start,end), many-to-many from quantile pivot\n")
+          u_fv <- nrow(full_values %>% distinct(!!!syms(join_by)))
+          u_fq <- nrow(full_quants %>% distinct(!!!syms(join_by)))
+          cat("  [fill] full_values: nrow=", n_fv, " unique(", paste(join_by, collapse = ","), ")=", u_fv, "\n", sep = "")
+          cat("  [fill] full_quants: nrow=", n_fq, " unique(", paste(join_by, collapse = ","), ")=", u_fq, "\n", sep = "")
+          if (n_fv != u_fv) cat("  [fill] -> full_values has duplicate key, many-to-many from values pivot\n")
+          if (n_fq != u_fq) cat("  [fill] -> full_quants has duplicate key, many-to-many from quantile pivot\n")
         }
         full_wide <- full_values %>%
-          left_join(full_quants, by = c("chr", "start", "end"))
+          left_join(full_quants, by = join_by)
         wide_outliers <- wide_outliers %>%
-          select("chr", "start", "end", any_of(meta_cols)) %>%
-          left_join(full_wide, by = c("chr", "start", "end"))
+          select(all_of(join_by), any_of(meta_cols)) %>%
+          left_join(full_wide, by = join_by)
         for (col in setdiff(value_cols, names(wide_outliers))) wide_outliers[[col]] <- NA_real_
-        wide_outliers <- wide_outliers %>% select("chr", "start", "end", any_of(meta_cols), all_of(value_cols))
+        wide_outliers <- wide_outliers %>% select(all_of(join_by), any_of(meta_cols), all_of(value_cols))
       }
     }
 
@@ -2165,6 +2252,7 @@ if (length(outlier_results) > 0) {
     cat("Saved outlier windows to:", outliers_file, "\n")
     cat("Total outlier windows:", nrow(wide_outliers), "\n")
 
+    # Step 7: Build merged/expanded regions and write region CSV
     if (expand_mode && length(expanded_region_results) > 0) {
         all_expanded <- bind_rows(expanded_region_results)
         if (opts$verbose) cat("Seed-expand: all_expanded rows =", nrow(all_expanded), "\n")

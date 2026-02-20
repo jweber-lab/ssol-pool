@@ -8,6 +8,9 @@
 # Main options: --hdf5-dir or --diversity-dir/--fst-dir, --output-dir,
 # --high-quantile, --low-quantile, --statistics (pi, theta, tajima_d, pbe, fst).
 # For output file formats and column naming, see the header of identify_outliers.R.
+#
+# Workflow: Validates args and dirs -> builds Rscript command with all flags
+# -> runs identify_outliers.R -> logs command and first rows of output CSVs.
 # Usage: See below or --help
 ###############################################################################
 
@@ -131,7 +134,7 @@ Examples:
 
 Output files:
   - {output_dir}/outlier_windows*.csv: Wide table: chr, start, end; window_size; optional mean_coverage, mean_mapping_quality, n_snps; outlier_stat, outlier_direction (high/low); optional window_type (seed/expanded); samplename.stat and samplename.stat_quantile columns.
-  - {output_dir}/outlier_regions*.csv: Merged/expanded regions when --merge-distance or seed-expand used. Filename includes _across_samples or _within_samples and _seed_expand or _merge_only. Columns include per-stat region mean (overlap-corrected), max value, and quantile of the most extreme window.
+  - {output_dir}/outlier_regions*.csv: Merged/expanded regions when --merge-distance or seed-expand used. Filename includes _across_samples or _within_samples and _seed_expand or _merge_only. Columns include per-stat region mean (over overlapping windows), max value, and quantile of the most extreme window.
 
 EOF
 }
