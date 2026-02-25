@@ -433,7 +433,7 @@ if (length(panels_to_plot) == 0)
 # Shared theme (no x-axis title; added only to bottom panel)
 # ---------------------------------------------------------------------------
 theme_panel <- theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
-  theme(panel.grid.minor = element_blank(), axis.title.x = element_blank())
+  theme(panel.grid.minor = element_blank())
 
 use_points <- (opts$`plot-style` == "line_points")
 
@@ -529,15 +529,24 @@ if (length(panels) == 0)
   stop("No panels could be built. Check data availability for requested statistics.")
 
 # ---------------------------------------------------------------------------
-# X-axis label on bottom panel: "Position on <chr> (bp)"
+# X-axis: label bottom panel with scaffold; hide title + ticks on upper panels
 # ---------------------------------------------------------------------------
 x_label <- paste0("Position on ", chr_region, " (bp)")
-panels[[length(panels)]] <- panels[[length(panels)]] + labs(x = x_label)
+n_panels <- length(panels)
+for (i in seq_len(n_panels)) {
+  if (i < n_panels) {
+    panels[[i]] <- panels[[i]] +
+      labs(x = NULL) +
+      theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  } else {
+    panels[[i]] <- panels[[i]] + labs(x = x_label)
+  }
+}
 
 # ---------------------------------------------------------------------------
 # Combine with patchwork
 # ---------------------------------------------------------------------------
-combined <- wrap_plots(panels, ncol = 1, heights = rep(1, length(panels))) +
+combined <- wrap_plots(panels, ncol = 1, heights = rep(1, n_panels)) +
   plot_layout(guides = "collect") +
   plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") &
   theme(legend.position = "right",
