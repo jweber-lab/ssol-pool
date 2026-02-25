@@ -173,10 +173,66 @@ apply_transform <- function(values, tfm) {
   }
 }
 
+# Build scale_y_continuous with ticks at nice original-scale values,
+# positioned at their transformed coordinates, labeled with the original values.
+build_y_scale <- function(original_values, tfm) {
+  if (tfm == "none") return(NULL)
+
+  orig_range <- range(original_values, na.rm = TRUE)
+  if (any(!is.finite(orig_range))) return(NULL)
+
+  min_v <- min(original_values, na.rm = TRUE)
+
+  if (tfm == "log") {
+    use_log1p <- (min_v <= 0)
+    fwd <- if (use_log1p) function(x) log1p(pmax(0, x)) else log
+    # Nice breaks in original space
+    if (min_v > 0 && orig_range[2] / orig_range[1] > 10) {
+      # Span multiple orders of magnitude: use log-spaced breaks
+      log_lo <- floor(log10(max(orig_range[1], 1e-10)))
+      log_hi <- ceiling(log10(orig_range[2]))
+      orig_ticks <- 10^seq(log_lo, log_hi)
+      orig_ticks <- orig_ticks[orig_ticks >= orig_range[1] * 0.9 & orig_ticks <= orig_range[2] * 1.1]
+      if (length(orig_ticks) < 3) orig_ticks <- pretty(orig_range, n = 6)
+    } else {
+      orig_ticks <- pretty(orig_range, n = 6)
+    }
+    orig_ticks <- orig_ticks[orig_ticks >= 0 | !use_log1p]
+    if (length(orig_ticks) < 2) orig_ticks <- pretty(orig_range, n = 6)
+    y_breaks <- fwd(orig_ticks)
+
+  } else if (tfm == "asinh") {
+    med <- median(original_values, na.rm = TRUE)
+    s <- sd(original_values, na.rm = TRUE)
+    if (is.na(s) || s == 0) s <- 1
+    fwd <- function(x) asinh((x - med) / s)
+    orig_ticks <- pretty(orig_range, n = 6)
+    y_breaks <- fwd(orig_ticks)
+
+  } else {
+    return(NULL)
+  }
+
+  # Format tick labels concisely
+  fmt_label <- function(x) {
+    sapply(x, function(v) {
+      if (!is.finite(v) || is.na(v)) return("")
+      av <- abs(v)
+      if (av == 0) "0"
+      else if (av >= 1e4 || av < 1e-3) formatC(v, format = "g", digits = 3)
+      else {
+        s <- formatC(v, format = "f", digits = 4)
+        sub("0+$", "", sub("\\.$", "", s))
+      }
+    })
+  }
+
+  scale_y_continuous(breaks = y_breaks, labels = fmt_label(orig_ticks))
+}
+
 y_label <- function(base_label, tfm) {
-  if (tfm == "log") paste0("log(", base_label, ")")
-  else if (tfm == "asinh") paste0("asinh(", base_label, ")")
-  else base_label
+  # Keep original stat name; the inverse-labeled ticks make the transform clear
+  base_label
 }
 
 # ---------------------------------------------------------------------------
@@ -393,11 +449,13 @@ for (stat_name in panels_to_plot) {
     if (!"sample" %in% names(cov_data)) cov_data <- cov_data %>% mutate(sample = "sample")
     samples <- sort(unique(cov_data$sample))
     pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    orig_vals <- cov_data$mean_coverage
     cov_data <- cov_data %>% mutate(y_val = apply_transform(mean_coverage, tfm))
     p <- ggplot(cov_data, aes(x = pos, y = y_val, color = sample, group = sample)) +
       geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
       scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
       labs(y = y_label("Mean coverage", tfm)) + theme_panel
+    ys <- build_y_scale(orig_vals, tfm); if (!is.null(ys)) p <- p + ys
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
 
@@ -405,11 +463,13 @@ for (stat_name in panels_to_plot) {
     if (!"sample" %in% names(mapq_data)) mapq_data <- mapq_data %>% mutate(sample = "sample")
     samples <- sort(unique(mapq_data$sample))
     pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    orig_vals <- mapq_data$mean_mapping_quality
     mapq_data <- mapq_data %>% mutate(y_val = apply_transform(mean_mapping_quality, tfm))
     p <- ggplot(mapq_data, aes(x = pos, y = y_val, color = sample, group = sample)) +
       geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
       scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
       labs(y = y_label("Mean MAPQ", tfm)) + theme_panel
+    ys <- build_y_scale(orig_vals, tfm); if (!is.null(ys)) p <- p + ys
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
 
@@ -418,6 +478,7 @@ for (stat_name in panels_to_plot) {
     if (!stat_name %in% names(div_data)) next
     samples <- sort(unique(div_data$sample))
     pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    orig_vals <- div_data[[stat_name]]
     plot_df <- div_data %>%
       filter(!is.na(.data[[stat_name]])) %>%
       mutate(y_val = apply_transform(.data[[stat_name]], tfm))
@@ -428,6 +489,7 @@ for (stat_name in panels_to_plot) {
       geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
       scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
       labs(y = y_label(base_lbl, tfm)) + theme_panel
+    ys <- build_y_scale(orig_vals[!is.na(orig_vals)], tfm); if (!is.null(ys)) p <- p + ys
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
 
@@ -435,12 +497,14 @@ for (stat_name in panels_to_plot) {
     if (!"sample_pair" %in% names(fst_data)) next
     pairs <- sort(unique(fst_data$sample_pair))
     pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(pairs)), pairs)
+    orig_vals <- fst_data$fst
     fst_data <- fst_data %>% mutate(y_val = apply_transform(fst, tfm))
     base_lbl <- if (opts$`y-value` == "rank") "FST rank" else if (opts$`y-value` == "quantile") "FST quantile" else "FST"
     p <- ggplot(fst_data, aes(x = pos, y = y_val, color = sample_pair, group = sample_pair)) +
       geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
       scale_color_manual(name = "Pair", values = pal, drop = FALSE) +
       labs(y = y_label(base_lbl, tfm)) + theme_panel
+    ys <- build_y_scale(orig_vals[!is.na(orig_vals)], tfm); if (!is.null(ys)) p <- p + ys
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
 
@@ -448,12 +512,14 @@ for (stat_name in panels_to_plot) {
     if (!"trio" %in% names(pbe_data)) next
     trios <- sort(unique(pbe_data$trio))
     pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(trios)), trios)
+    orig_vals <- pbe_data$pbe
     pbe_data <- pbe_data %>% mutate(y_val = apply_transform(pbe, tfm))
     base_lbl <- if (opts$`y-value` == "rank") "PBE rank" else if (opts$`y-value` == "quantile") "PBE quantile" else "PBE"
     p <- ggplot(pbe_data, aes(x = pos, y = y_val, color = trio, group = trio)) +
       geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
       scale_color_manual(name = "Trio", values = pal, drop = FALSE) +
       labs(y = y_label(base_lbl, tfm)) + theme_panel
+    ys <- build_y_scale(orig_vals[!is.na(orig_vals)], tfm); if (!is.null(ys)) p <- p + ys
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
   }
