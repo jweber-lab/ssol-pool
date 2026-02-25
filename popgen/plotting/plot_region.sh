@@ -63,7 +63,7 @@ Optional:
   --file-prefix PREFIX       Prefix for output filename
   --y-value VALUE            Y-axis for diversity/FST/PBE: value, rank, or quantile (default: value)
   --statistics LIST          Comma-separated panels to include, in order:
-                               coverage, pi, theta, tajima_d, fst, pbe (default: all with data)
+                               coverage, mapq, pi, theta, tajima_d, fst, pbe (default: all with data)
   --transform SPEC           Per-stat transforms as STAT:TRANSFORM pairs, comma-separated.
                                TRANSFORM = none, log, or asinh.
                                Example: coverage:log,pi:none,fst:asinh (default: none for all)
@@ -78,7 +78,7 @@ Optional:
 
 Output:
   region_plot_CHR_START_END.png (or .pdf/.svg) in --output-dir.
-  Panel order: Coverage, π, θ, Tajima's D, FST, PBE (or as specified by --statistics).
+  Panel order: Coverage, MAPQ, π, θ, Tajima's D, FST, PBE (or as specified by --statistics).
 
 Examples:
   $0 --chromosome chr1 --hdf5-dir ./collate_out --reference-genome ref.fa --output-dir ./plots

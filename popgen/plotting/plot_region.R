@@ -112,7 +112,7 @@ dpi_use <- if (!is.null(opts$dpi) && !is.na(opts$dpi)) opts$dpi else PLOT_DPI
 # ---------------------------------------------------------------------------
 # Parse --statistics (panel order)
 # ---------------------------------------------------------------------------
-valid_stats <- c("coverage", "pi", "theta", "tajima_d", "fst", "pbe")
+valid_stats <- c("coverage", "mapq", "pi", "theta", "tajima_d", "fst", "pbe")
 requested_stats <- NULL
 if (!is.null(opts$statistics) && nzchar(opts$statistics)) {
   requested_stats <- trimws(strsplit(opts$statistics, ",")[[1]])
@@ -186,6 +186,7 @@ div_data <- NULL
 fst_data <- NULL
 pbe_data <- NULL
 cov_data <- NULL
+mapq_data <- NULL
 window_size_use <- opts$`window-size`
 step_size_use <- opts$`step-size`
 
@@ -222,6 +223,12 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
             cov_data <- div_data %>%
               select(any_of(c("chr", "start", "end", "sample", "mean_coverage", "pos"))) %>%
               filter(!is.na(mean_coverage))
+          }
+          # Mapping quality from diversity HDF5 if present
+          if ("mean_mapping_quality" %in% names(div_data) && is.null(mapq_data)) {
+            mapq_data <- div_data %>%
+              select(any_of(c("chr", "start", "end", "sample", "mean_mapping_quality", "pos"))) %>%
+              filter(!is.na(mean_mapping_quality))
           }
         }
       }
@@ -278,19 +285,23 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
 # ---------------------------------------------------------------------------
 # TSV fallbacks
 # ---------------------------------------------------------------------------
-if (is.null(cov_data) && !is.null(opts$`seq-qual-dir`) && dir.exists(opts$`seq-qual-dir`)) {
+if ((is.null(cov_data) || is.null(mapq_data)) && !is.null(opts$`seq-qual-dir`) && dir.exists(opts$`seq-qual-dir`)) {
   sq_files <- list.files(opts$`seq-qual-dir`, pattern = "seq_qual.*\\.tsv$",
     full.names = TRUE, recursive = TRUE)
   if (length(sq_files) > 0) {
     sq_list <- lapply(sq_files, function(f) {
       x <- read_tsv(f, show_col_types = FALSE)
       if ("chromosome" %in% names(x) && !"chr" %in% names(x)) x <- x %>% rename(chr = chromosome)
-      if ("mean_coverage" %in% names(x)) add_pos(x) else NULL
+      if (any(c("mean_coverage", "mean_mapping_quality") %in% names(x))) add_pos(x) else NULL
     })
     sq_list <- sq_list[!sapply(sq_list, is.null)]
     if (length(sq_list) > 0) {
-      cov_data <- bind_rows(sq_list) %>% filter_region()
-      if (nrow(cov_data) > 0 && !"pos" %in% names(cov_data)) cov_data <- add_pos(cov_data)
+      sq_combined <- bind_rows(sq_list) %>% filter_region()
+      if (nrow(sq_combined) > 0 && !"pos" %in% names(sq_combined)) sq_combined <- add_pos(sq_combined)
+      if (is.null(cov_data) && "mean_coverage" %in% names(sq_combined))
+        cov_data <- sq_combined %>% filter(!is.na(mean_coverage))
+      if (is.null(mapq_data) && "mean_mapping_quality" %in% names(sq_combined))
+        mapq_data <- sq_combined %>% filter(!is.na(mean_mapping_quality))
     }
   }
 }
@@ -343,6 +354,7 @@ if (is.null(pbe_data) && !is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`))
 # ---------------------------------------------------------------------------
 has_data <- c(
   coverage  = !is.null(cov_data) && nrow(cov_data) > 0 && "mean_coverage" %in% names(cov_data),
+  mapq      = !is.null(mapq_data) && nrow(mapq_data) > 0 && "mean_mapping_quality" %in% names(mapq_data),
   pi        = !is.null(div_data) && nrow(div_data) > 0 && "pi" %in% names(div_data),
   theta     = !is.null(div_data) && nrow(div_data) > 0 && "theta" %in% names(div_data),
   tajima_d  = !is.null(div_data) && nrow(div_data) > 0 && "tajima_d" %in% names(div_data),
@@ -386,6 +398,18 @@ for (stat_name in panels_to_plot) {
       geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
       scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
       labs(y = y_label("Mean coverage", tfm)) + theme_panel
+    if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    panels[[length(panels) + 1]] <- p
+
+  } else if (stat_name == "mapq") {
+    if (!"sample" %in% names(mapq_data)) mapq_data <- mapq_data %>% mutate(sample = "sample")
+    samples <- sort(unique(mapq_data$sample))
+    pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    mapq_data <- mapq_data %>% mutate(y_val = apply_transform(mean_mapping_quality, tfm))
+    p <- ggplot(mapq_data, aes(x = pos, y = y_val, color = sample, group = sample)) +
+      geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+      scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
+      labs(y = y_label("Mean MAPQ", tfm)) + theme_panel
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
 
