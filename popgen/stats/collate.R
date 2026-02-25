@@ -188,39 +188,58 @@ write_df_to_h5_group <- function(grp, d) {
   }
 }
 
-# Summary companion: mean, median, variance, skew, q01, q05, q95, q99, n per stat (and optional group)
+# Summary companion: mean, median, variance, skew, q01, q05, q95, q99, n per stat (and optional group).
+# Summarises each stat column separately to avoid pivot_longer's 2^31 long-vector limit on large tables.
 # If summary_path is NULL and return_df is TRUE, returns the summary tibble; otherwise writes to summary_path.
 write_summary_companion <- function(data, summary_path, stat_cols = NULL, group_cols = character(0), quantile_probs = c(0.01, 0.05, 0.95, 0.99), return_df = FALSE) {
   num_cols <- names(data)[vapply(data, is.numeric, logical(1L))]
   num_cols <- num_cols[!grepl("_rank$|_quantile$", num_cols)]
-  # Exclude coordinate columns (window/site positions), not statistics
   num_cols <- num_cols[!num_cols %in% c("start", "end", "pos")]
   if (length(num_cols) == 0) return(if (return_df) NULL else invisible(NULL))
   if (!is.null(stat_cols)) num_cols <- intersect(num_cols, stat_cols)
   group_cols <- intersect(group_cols, names(data))
   num_cols <- num_cols[!num_cols %in% group_cols]
   if (length(num_cols) == 0) return(if (return_df) NULL else invisible(NULL))
-  long <- data %>%
-    pivot_longer(all_of(num_cols), names_to = "stat", values_to = "value") %>%
-    filter(!is.na(value))
-  if (length(group_cols) > 0) {
-    long <- long %>% group_by(stat, across(all_of(group_cols)))
-  } else {
-    long <- long %>% group_by(stat)
-  }
   qnames <- paste0("q", sub("\\.", "", sprintf("%.2f", quantile_probs)))
-  sum_exprs <- list(
-    mean = quote(mean(value, na.rm = TRUE)),
-    median = quote(median(value, na.rm = TRUE)),
-    variance = quote(var(value, na.rm = TRUE)),
-    skew = quote(skewness(value)),
-    n = quote(n())
-  )
-  for (i in seq_along(quantile_probs)) {
-    sum_exprs[[qnames[i]]] <- bquote(quantile(value, probs = .(quantile_probs[i]), na.rm = TRUE))
-  }
-  out <- long %>%
-    summarise(!!!sum_exprs, .groups = "drop")
+  results <- lapply(num_cols, function(col) {
+    keep <- !is.na(data[[col]])
+    if (sum(keep) == 0L) return(NULL)
+    if (length(group_cols) > 0) {
+      sub <- data[keep, c(group_cols, col), drop = FALSE]
+      names(sub)[names(sub) == col] <- ".val"
+      s <- sub %>%
+        group_by(across(all_of(group_cols))) %>%
+        summarise(
+          mean = mean(.val),
+          median = median(.val),
+          variance = var(.val),
+          skew = skewness(.val),
+          n = dplyr::n(),
+          .q = list(quantile(.val, probs = quantile_probs)),
+          .groups = "drop"
+        )
+      q_mat <- do.call(rbind, s$.q)
+      for (i in seq_along(qnames)) s[[qnames[i]]] <- q_mat[, i]
+      s$.q <- NULL
+    } else {
+      vals <- data[[col]][keep]
+      qs <- quantile(vals, probs = quantile_probs)
+      s <- tibble(
+        mean = mean(vals),
+        median = median(vals),
+        variance = var(vals),
+        skew = skewness(vals),
+        n = length(vals)
+      )
+      for (i in seq_along(qnames)) s[[qnames[i]]] <- as.numeric(qs[i])
+    }
+    s$stat <- col
+    s
+  })
+  out <- bind_rows(results)
+  col_order <- unique(c("stat", group_cols, "mean", "median", "variance", "skew", "n", qnames))
+  col_order <- intersect(col_order, names(out))
+  out <- out[, col_order, drop = FALSE]
   if (return_df) return(out)
   if (!is.null(summary_path)) {
     readr::write_tsv(out, summary_path)
@@ -552,7 +571,7 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
     grp_name <- if (is_single) "sites" else "windows"
     write_fst_h5(d_long, out_path, grp_name)
     h5_preview(out_path, grp_name)
-    if (write_summary) write_summary_companion(d_long, sub("\\.h5$", "_summary.tsv", out_path), group_cols = c("pop1", "pop2"))
+    if (write_summary) write_summary_companion(d_long, sub("\\.h5$", "_summary.tsv", out_path), stat_cols = "fst", group_cols = c("pop1", "pop2"))
   }
   invisible(NULL)
 }
@@ -629,7 +648,7 @@ read_one_pbe <- function(path, trio_name, drop_all_na = FALSE) {
   d$pop2 <- pops$pop2
   d$pop3 <- pops$pop3
   d$trio_name <- trio_name
-  d
+  d %>% select(any_of(c("chr", "pos", "start", "end", "pbe", "pbe_rank", "pbe_quantile", "pop1", "pop2", "pop3", "trio_name")))
 }
 
 write_pbe_groups_h5 <- function(tbl_list, out_path, group_prefix = "windows_trio", sites = FALSE) {
@@ -695,7 +714,7 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
     h5_preview(out_path, grp_name)
     if (write_summary && length(tbl_list) > 0) {
       all_d <- bind_rows(lapply(tbl_list, function(x) x$data))
-      write_summary_companion(all_d, sub("\\.h5$", "_summary.tsv", out_path), group_cols = c("pop1", "pop2", "pop3"))
+      write_summary_companion(all_d, sub("\\.h5$", "_summary.tsv", out_path), stat_cols = "pbe", group_cols = c("pop1", "pop2", "pop3"))
     }
   }
   invisible(NULL)
