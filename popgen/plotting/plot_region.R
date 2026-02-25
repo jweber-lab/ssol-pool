@@ -3,12 +3,12 @@
 ###############################################################################
 # plot_region.R
 #
-# One stacked figure for a genomic region: coverage, π, FST, PBE panels with
-# shared x-axis and shared color key for sample/pair/trio.
+# One stacked figure for a genomic region: coverage, π, θ, Tajima's D, FST,
+# PBE panels with shared x-axis and shared color key.
 # Reads from TSV dirs and/or HDF5 (collate output).
 #
-# Requires: ggplot2, dplyr, tidyr, readr, optparse, patchwork (for combining).
-# Optional: hdf5r when using --hdf5-dir.
+# Requires: ggplot2, dplyr, tidyr, readr, optparse, patchwork
+# Optional: hdf5r when using --hdf5-dir
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -23,7 +23,6 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
 }
 library(patchwork)
 
-# Source plot_common (read_h5_windows, PLOT_PALETTE_QUALITATIVE, PLOT_DPI, etc.)
 initial_args <- commandArgs(trailingOnly = FALSE)
 file_arg <- initial_args[substr(initial_args, 1, 7) == "--file="]
 script_dir <- if (length(file_arg) > 0) dirname(sub("^--file=", "", file_arg)) else "."
@@ -33,27 +32,50 @@ if (!file.exists(plot_common_path)) stop("plot_common.R not found in script dir 
 source(plot_common_path)
 
 option_list <- list(
-  make_option(c("--chromosome"), type = "character", default = NULL, help = "Chromosome to plot (full)"),
-  make_option(c("--region"), type = "character", default = NULL, help = "Region CHR:START-END"),
-  make_option(c("--diversity-dir"), type = "character", default = NULL),
-  make_option(c("--fst-dir"), type = "character", default = NULL),
-  make_option(c("--pbe-dir"), type = "character", default = NULL),
-  make_option(c("--seq-qual-dir"), type = "character", default = NULL),
-  make_option(c("--hdf5-dir"), type = "character", default = NULL),
-  make_option(c("--window-size"), type = "numeric", default = NULL),
-  make_option(c("--step-size"), type = "numeric", default = NULL),
-  make_option(c("--reference-genome"), type = "character", default = NULL),
-  make_option(c("--output-dir"), type = "character", default = "."),
-  make_option(c("--file-prefix"), type = "character", default = ""),
-  make_option(c("--y-value"), type = "character", default = "value", help = "value, rank, or quantile"),
-  make_option(c("--width"), type = "numeric", default = 12),
-  make_option(c("--height"), type = "numeric", default = 10),
-  make_option(c("--dpi"), type = "numeric", default = NULL),
-  make_option(c("--plot-format"), type = "character", default = "png")
+  make_option("--chromosome", type = "character", default = NULL,
+    help = "Chromosome to plot (full)"),
+  make_option("--region", type = "character", default = NULL,
+    help = "Region CHR:START-END"),
+  make_option("--diversity-dir", type = "character", default = NULL,
+    help = "Directory with diversity TSVs"),
+  make_option("--fst-dir", type = "character", default = NULL,
+    help = "Directory with FST TSVs"),
+  make_option("--pbe-dir", type = "character", default = NULL,
+    help = "Directory with PBE TSVs"),
+  make_option("--seq-qual-dir", type = "character", default = NULL,
+    help = "Directory with seq_qual TSVs"),
+  make_option("--hdf5-dir", type = "character", default = NULL,
+    help = "Collate output dir with .h5 files"),
+  make_option("--window-size", type = "numeric", default = NULL,
+    help = "Window size to use"),
+  make_option("--step-size", type = "numeric", default = NULL,
+    help = "Step size (optional)"),
+  make_option("--reference-genome", type = "character", default = NULL,
+    help = "Reference genome FASTA"),
+  make_option("--output-dir", type = "character", default = "."),
+  make_option("--file-prefix", type = "character", default = ""),
+  make_option("--y-value", type = "character", default = "value",
+    help = "Default y-axis for all stats: value, rank, or quantile [default: value]"),
+  make_option("--statistics", type = "character", default = NULL,
+    help = paste0("Comma-separated panels to include, in order. ",
+      "Valid: coverage, pi, theta, tajima_d, fst, pbe. ",
+      "Default: all that have data")),
+  make_option("--transform", type = "character", default = "",
+    help = paste0("Per-stat transforms as STAT:TRANSFORM pairs, comma-separated. ",
+      "TRANSFORM is none, log, or asinh. Example: coverage:log,pi:none,fst:asinh. ",
+      "Stats not listed use 'none'.")),
+  make_option("--plot-style", type = "character", default = "line",
+    help = "line or line_points [default: line]"),
+  make_option("--width", type = "numeric", default = 12),
+  make_option("--height", type = "numeric", default = 10),
+  make_option("--dpi", type = "numeric", default = NULL),
+  make_option("--plot-format", type = "character", default = "png")
 )
 opts <- parse_args(OptionParser(option_list = option_list, usage = "usage: %prog [options]"))
 
+# ---------------------------------------------------------------------------
 # Parse region
+# ---------------------------------------------------------------------------
 chr_region <- opts$chromosome
 start_region <- NA_real_
 end_region <- NA_real_
@@ -68,40 +90,98 @@ if (!is.null(opts$region) && nzchar(opts$region)) {
     }
   }
 }
-if (is.null(chr_region) || !nzchar(chr_region)) stop("--chromosome or --region CHR:START-END is required")
+if (is.null(chr_region) || !nzchar(chr_region))
+  stop("--chromosome or --region CHR:START-END is required")
 
-# Chromosome lengths (optional)
+# ---------------------------------------------------------------------------
+# Read reference genome .fai (suppress "New names" by giving proper col_names)
+# ---------------------------------------------------------------------------
 chr_lengths <- tibble(chr = character(), length = numeric())
 if (!is.null(opts$`reference-genome`) && nzchar(opts$`reference-genome`)) {
   fai <- paste0(opts$`reference-genome`, ".fai")
   if (file.exists(fai)) {
-    chr_lengths <- readr::read_tsv(fai, col_names = c("chr", "length", NA, NA, NA), show_col_types = FALSE)
+    chr_lengths <- read_tsv(fai,
+      col_names = c("chr", "length", "offset", "linebases", "linewidth"),
+      col_types = "cnnnn") %>%
+      select(chr, length)
   }
 }
 
 dpi_use <- if (!is.null(opts$dpi) && !is.na(opts$dpi)) opts$dpi else PLOT_DPI
 
-# Filter to region helper
-filter_region <- function(d, chr_col = "chr", start_col = "start", end_col = "end") {
-  d <- d %>% filter(.data[[chr_col]] == chr_region)
-  if (!is.na(start_region) && start_col %in% names(d))
-    d <- d %>% filter(.data[[end_col]] >= start_region)
-  if (!is.na(end_region) && end_col %in% names(d))
-    d <- d %>% filter(.data[[start_col]] <= end_region)
+# ---------------------------------------------------------------------------
+# Parse --statistics (panel order)
+# ---------------------------------------------------------------------------
+valid_stats <- c("coverage", "pi", "theta", "tajima_d", "fst", "pbe")
+requested_stats <- NULL
+if (!is.null(opts$statistics) && nzchar(opts$statistics)) {
+  requested_stats <- trimws(strsplit(opts$statistics, ",")[[1]])
+  bad <- setdiff(requested_stats, valid_stats)
+  if (length(bad) > 0) stop("Unknown --statistics: ", paste(bad, collapse = ", "),
+    ". Valid: ", paste(valid_stats, collapse = ", "))
+}
+
+# ---------------------------------------------------------------------------
+# Parse --transform (per-stat transforms)
+# ---------------------------------------------------------------------------
+stat_transforms <- setNames(rep("none", length(valid_stats)), valid_stats)
+if (nzchar(opts$transform)) {
+  pairs <- trimws(strsplit(opts$transform, ",")[[1]])
+  for (p in pairs) {
+    kv <- trimws(strsplit(p, ":")[[1]])
+    if (length(kv) != 2) stop("Bad --transform entry: '", p, "'. Expected STAT:TRANSFORM")
+    if (!kv[1] %in% valid_stats) stop("Unknown stat in --transform: ", kv[1])
+    if (!kv[2] %in% c("none", "log", "asinh")) stop("Unknown transform: ", kv[2], ". Use none, log, or asinh")
+    stat_transforms[kv[1]] <- kv[2]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+filter_region <- function(d) {
+  d <- d %>% filter(.data$chr == chr_region)
+  if (!is.na(start_region) && "end" %in% names(d))
+    d <- d %>% filter(.data$end >= start_region)
+  if (!is.na(end_region) && "start" %in% names(d))
+    d <- d %>% filter(.data$start <= end_region)
   d
 }
 
-# Shared x: use mid position or start for alignment
 add_pos <- function(d) {
   if ("start" %in% names(d) && "end" %in% names(d))
     d <- d %>% mutate(pos = (.data$start + .data$end) / 2)
-  else if ("pos" %in% names(d)) { }
-  else if ("position" %in% names(d)) d <- d %>% rename(pos = .data$position)
-  else if ("start" %in% names(d)) d <- d %>% mutate(pos = .data$start)
+  else if (!"pos" %in% names(d) && "position" %in% names(d))
+    d <- d %>% rename(pos = "position")
+  else if (!"pos" %in% names(d) && "start" %in% names(d))
+    d <- d %>% mutate(pos = .data$start)
   d
 }
 
-# --- Load data: HDF5 path takes precedence when provided ---
+apply_transform <- function(values, tfm) {
+  if (tfm == "log") {
+    min_v <- min(values, na.rm = TRUE)
+    if (min_v <= 0) log1p(pmax(0, values))
+    else log(values)
+  } else if (tfm == "asinh") {
+    med <- median(values, na.rm = TRUE)
+    s <- sd(values, na.rm = TRUE)
+    if (is.na(s) || s == 0) s <- 1
+    asinh((values - med) / s)
+  } else {
+    values
+  }
+}
+
+y_label <- function(base_label, tfm) {
+  if (tfm == "log") paste0("log(", base_label, ")")
+  else if (tfm == "asinh") paste0("asinh(", base_label, ")")
+  else base_label
+}
+
+# ---------------------------------------------------------------------------
+# Load data from HDF5
+# ---------------------------------------------------------------------------
 div_data <- NULL
 fst_data <- NULL
 pbe_data <- NULL
@@ -111,76 +191,100 @@ step_size_use <- opts$`step-size`
 
 if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
   hdir <- opts$`hdf5-dir`
-  # Diversity
+
+  # --- Diversity HDF5 ---
   div_h5 <- list.files(hdir, pattern = "^diversity_.*\\.h5$", full.names = TRUE)
   if (length(div_h5) > 0) {
-    # Match window/step if specified
-    if (!is.null(window_size_use)) {
+    if (!is.null(window_size_use))
       div_h5 <- div_h5[grepl(paste0("_w", window_size_use, "_"), div_h5, fixed = TRUE)]
-      if (length(div_h5) > 0 && !is.null(step_size_use))
-        div_h5 <- div_h5[grepl(paste0("_s", step_size_use, "\\."), div_h5, fixed = TRUE)]
-    }
+    if (length(div_h5) > 0 && !is.null(step_size_use))
+      div_h5 <- div_h5[grepl(paste0("_s", step_size_use, "\\."), div_h5, fixed = TRUE)]
     if (length(div_h5) > 0) {
       div_h5 <- div_h5[1]
       ws <- parse_window_step_from_filename(basename(div_h5))
       if (is.null(window_size_use)) window_size_use <- ws$window_size
       d <- read_h5_windows(div_h5, "windows")
       if (!is.null(d) && nrow(d) > 0) {
-        d <- d %>% mutate(window_size = ws$window_size, step_size = ws$step_size)
-        div_data <- add_pos(d) %>% filter_region()
-        y_col <- switch(opts$`y-value`, rank = "pi_rank", quantile = "pi_quantile", "pi")
-        if (y_col %in% names(div_data)) div_data <- div_data %>% rename(pi = .data[[y_col]])
-        if ("mean_coverage" %in% names(div_data) && is.null(cov_data)) {
-          cov_data <- div_data %>% select(.data$chr, .data$start, .data$end, .data$sample, .data$mean_coverage, .data$pos) %>%
-            filter(!is.na(.data$mean_coverage))
+        d <- add_pos(d) %>% filter_region()
+        if (nrow(d) > 0) {
+          div_data <- d
+          # Handle y-value mapping for each diversity stat
+          for (stat in c("pi", "theta", "tajima_d")) {
+            y_col <- switch(opts$`y-value`,
+              rank = paste0(stat, "_rank"),
+              quantile = paste0(stat, "_quantile"),
+              stat)
+            if (y_col %in% names(div_data) && y_col != stat)
+              div_data[[stat]] <- div_data[[y_col]]
+          }
+          # Coverage from diversity HDF5 if present
+          if ("mean_coverage" %in% names(div_data) && is.null(cov_data)) {
+            cov_data <- div_data %>%
+              select(any_of(c("chr", "start", "end", "sample", "mean_coverage", "pos"))) %>%
+              filter(!is.na(mean_coverage))
+          }
         }
       }
     }
   }
-  # FST
+
+  # --- FST HDF5 ---
   fst_h5 <- list.files(hdir, pattern = "^fst_.*\\.h5$", full.names = TRUE)
   if (length(fst_h5) > 0) {
-    if (!is.null(window_size_use)) fst_h5 <- fst_h5[grepl(paste0("_w", window_size_use), fst_h5, fixed = TRUE)]
+    if (!is.null(window_size_use))
+      fst_h5 <- fst_h5[grepl(paste0("_w", window_size_use), fst_h5, fixed = TRUE)]
     if (length(fst_h5) > 0) {
       fst_h5 <- fst_h5[1]
       d <- read_h5_windows(fst_h5, "windows")
-      if (is.null(d) && "sites" %in% names(tryCatch(hdf5r::H5File$new(fst_h5, "r"), error = function(e) NULL)))
-        d <- read_h5_windows(fst_h5, "sites")
+      if (is.null(d)) d <- read_h5_windows(fst_h5, "sites")
       if (!is.null(d) && nrow(d) > 0) {
         if (!"sample_pair" %in% names(d) && all(c("pop1", "pop2") %in% names(d)))
-          d <- d %>% mutate(sample_pair = paste(.data$pop1, .data$pop2, sep = ":"))
-        fst_data <- add_pos(d) %>% filter_region()
-        y_col <- switch(opts$`y-value`, rank = "fst_rank", quantile = "fst_quantile", "fst")
-        if (y_col %in% names(fst_data)) fst_data <- fst_data %>% rename(fst = .data[[y_col]])
+          d <- d %>% mutate(sample_pair = paste(pop1, pop2, sep = ":"))
+        d <- add_pos(d) %>% filter_region()
+        if (nrow(d) > 0) {
+          fst_data <- d
+          y_col <- switch(opts$`y-value`, rank = "fst_rank", quantile = "fst_quantile", "fst")
+          if (y_col %in% names(fst_data) && y_col != "fst")
+            fst_data[["fst"]] <- fst_data[[y_col]]
+        }
       }
     }
   }
-  # PBE
+
+  # --- PBE HDF5 ---
   pbe_h5 <- list.files(hdir, pattern = "^pbe_.*\\.h5$", full.names = TRUE)
   if (length(pbe_h5) > 0) {
-    if (!is.null(window_size_use)) pbe_h5 <- pbe_h5[grepl(paste0("_w", window_size_use), pbe_h5, fixed = TRUE)]
+    if (!is.null(window_size_use))
+      pbe_h5 <- pbe_h5[grepl(paste0("_w", window_size_use), pbe_h5, fixed = TRUE)]
     if (length(pbe_h5) > 0) {
       pbe_h5 <- pbe_h5[1]
       d <- read_h5_windows(pbe_h5, "windows")
       if (is.null(d)) d <- read_h5_windows(pbe_h5, "sites")
       if (!is.null(d) && nrow(d) > 0) {
         if (!"trio" %in% names(d) && all(c("pop1", "pop2", "pop3") %in% names(d)))
-          d <- d %>% mutate(trio = paste(.data$pop1, .data$pop2, .data$pop3, sep = ":"))
-        pbe_data <- add_pos(d) %>% filter_region()
-        y_col <- switch(opts$`y-value`, rank = "pbe_rank", quantile = "pbe_quantile", "pbe")
-        if (y_col %in% names(pbe_data)) pbe_data <- pbe_data %>% rename(pbe = .data[[y_col]])
+          d <- d %>% mutate(trio = paste(pop1, pop2, pop3, sep = ":"))
+        d <- add_pos(d) %>% filter_region()
+        if (nrow(d) > 0) {
+          pbe_data <- d
+          y_col <- switch(opts$`y-value`, rank = "pbe_rank", quantile = "pbe_quantile", "pbe")
+          if (y_col %in% names(pbe_data) && y_col != "pbe")
+            pbe_data[["pbe"]] <- pbe_data[[y_col]]
+        }
       }
     }
   }
 }
 
+# ---------------------------------------------------------------------------
 # TSV fallbacks
+# ---------------------------------------------------------------------------
 if (is.null(cov_data) && !is.null(opts$`seq-qual-dir`) && dir.exists(opts$`seq-qual-dir`)) {
-  sq_files <- list.files(opts$`seq-qual-dir`, pattern = "seq_qual.*\\.tsv$", full.names = TRUE, recursive = TRUE)
+  sq_files <- list.files(opts$`seq-qual-dir`, pattern = "seq_qual.*\\.tsv$",
+    full.names = TRUE, recursive = TRUE)
   if (length(sq_files) > 0) {
     sq_list <- lapply(sq_files, function(f) {
-      x <- readr::read_tsv(f, show_col_types = FALSE)
-      x <- x %>% rename(chr = any_of(c("chromosome", "chr")), start = any_of("start"), end = any_of("end"))
+      x <- read_tsv(f, show_col_types = FALSE)
+      if ("chromosome" %in% names(x) && !"chr" %in% names(x)) x <- x %>% rename(chr = chromosome)
       if ("mean_coverage" %in% names(x)) add_pos(x) else NULL
     })
     sq_list <- sq_list[!sapply(sq_list, is.null)]
@@ -194,8 +298,9 @@ if (is.null(cov_data) && !is.null(opts$`seq-qual-dir`) && dir.exists(opts$`seq-q
 if (is.null(div_data) && !is.null(opts$`diversity-dir`) && dir.exists(opts$`diversity-dir`)) {
   div_tsv <- list.files(opts$`diversity-dir`, pattern = "diversity.*\\.tsv$", full.names = TRUE)
   if (length(div_tsv) > 0) {
-    d <- readr::read_tsv(div_tsv[1], show_col_types = FALSE)
-    d <- d %>% rename(chr = any_of(c("chromosome", "chr")), pos = any_of(c("position", "pos", "start")))
+    d <- read_tsv(div_tsv[1], show_col_types = FALSE)
+    if ("chromosome" %in% names(d) && !"chr" %in% names(d)) d <- d %>% rename(chr = chromosome)
+    if ("position" %in% names(d) && !"pos" %in% names(d)) d <- d %>% rename(pos = position)
     if ("pi" %in% names(d)) {
       if (!"sample" %in% names(d)) d <- d %>% mutate(sample = "sample")
       div_data <- add_pos(d) %>% filter_region()
@@ -206,11 +311,12 @@ if (is.null(div_data) && !is.null(opts$`diversity-dir`) && dir.exists(opts$`dive
 if (is.null(fst_data) && !is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`)) {
   fst_tsv <- list.files(opts$`fst-dir`, pattern = "fst.*\\.tsv$", full.names = TRUE)
   if (length(fst_tsv) > 0) {
-    d <- readr::read_tsv(fst_tsv[1], show_col_types = FALSE)
-    d <- d %>% rename(chr = any_of(c("chromosome", "chr")), pos = any_of(c("position", "pos", "start")))
+    d <- read_tsv(fst_tsv[1], show_col_types = FALSE)
+    if ("chromosome" %in% names(d) && !"chr" %in% names(d)) d <- d %>% rename(chr = chromosome)
+    if ("position" %in% names(d) && !"pos" %in% names(d)) d <- d %>% rename(pos = position)
     fst_col <- names(d)[grepl("\\.fst$", names(d), ignore.case = TRUE)][1]
     if (!is.na(fst_col)) {
-      d <- d %>% rename(fst = .data[[fst_col]])
+      d <- d %>% rename(fst = all_of(fst_col))
       if (!"sample_pair" %in% names(d)) d <- d %>% mutate(sample_pair = sub("\\.fst$", "", fst_col))
       fst_data <- add_pos(d) %>% filter_region()
     }
@@ -220,106 +326,153 @@ if (is.null(fst_data) && !is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`))
 if (is.null(pbe_data) && !is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
   pbe_tsv <- list.files(opts$`pbe-dir`, pattern = "pbe.*\\.tsv$", full.names = TRUE)
   if (length(pbe_tsv) > 0) {
-    d <- readr::read_tsv(pbe_tsv[1], show_col_types = FALSE)
-    d <- d %>% rename(chr = any_of(c("chromosome", "chr")), pos = any_of(c("position", "pos", "start")))
+    d <- read_tsv(pbe_tsv[1], show_col_types = FALSE)
+    if ("chromosome" %in% names(d) && !"chr" %in% names(d)) d <- d %>% rename(chr = chromosome)
+    if ("position" %in% names(d) && !"pos" %in% names(d)) d <- d %>% rename(pos = position)
     pbe_col <- names(d)[grepl("pbe", names(d), ignore.case = TRUE)][1]
     if (!is.na(pbe_col)) {
-      d <- d %>% rename(pbe = .data[[pbe_col]])
+      d <- d %>% rename(pbe = all_of(pbe_col))
       if (!"trio" %in% names(d)) d <- d %>% mutate(trio = "trio")
       pbe_data <- add_pos(d) %>% filter_region()
     }
   }
 }
 
-# Build panels (only include if data present)
-panels <- list()
+# ---------------------------------------------------------------------------
+# Determine which panels have data
+# ---------------------------------------------------------------------------
+has_data <- c(
+  coverage  = !is.null(cov_data) && nrow(cov_data) > 0 && "mean_coverage" %in% names(cov_data),
+  pi        = !is.null(div_data) && nrow(div_data) > 0 && "pi" %in% names(div_data),
+  theta     = !is.null(div_data) && nrow(div_data) > 0 && "theta" %in% names(div_data),
+  tajima_d  = !is.null(div_data) && nrow(div_data) > 0 && "tajima_d" %in% names(div_data),
+  fst       = !is.null(fst_data) && nrow(fst_data) > 0 && "fst" %in% names(fst_data),
+  pbe       = !is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% names(pbe_data)
+)
 
+if (is.null(requested_stats)) {
+  panels_to_plot <- valid_stats[has_data[valid_stats]]
+} else {
+  panels_to_plot <- requested_stats[has_data[requested_stats]]
+  skipped <- requested_stats[!has_data[requested_stats]]
+  if (length(skipped) > 0) message("No data for: ", paste(skipped, collapse = ", "))
+}
+
+if (length(panels_to_plot) == 0)
+  stop("No data found for the specified region and inputs. Check --chromosome/--region and input dirs.")
+
+# ---------------------------------------------------------------------------
+# Shared theme (no x-axis title; added only to bottom panel)
+# ---------------------------------------------------------------------------
 theme_panel <- theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
   theme(panel.grid.minor = element_blank(), axis.title.x = element_blank())
 
-# Coverage
-if (!is.null(cov_data) && nrow(cov_data) > 0 && "sample" %in% names(cov_data)) {
-  samples <- sort(unique(cov_data$sample))
-  pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
-  p_cov <- ggplot(cov_data, aes(x = .data$pos, y = .data$mean_coverage, color = .data$sample, group = .data$sample)) +
-    geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
-    scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
-    labs(y = "Mean coverage") +
-    theme_panel
-  panels[[length(panels) + 1]] <- p_cov
+use_points <- (opts$`plot-style` == "line_points")
+
+# ---------------------------------------------------------------------------
+# Build one panel per stat
+# ---------------------------------------------------------------------------
+panels <- list()
+
+for (stat_name in panels_to_plot) {
+  tfm <- stat_transforms[stat_name]
+
+  if (stat_name == "coverage") {
+    if (!"sample" %in% names(cov_data)) cov_data <- cov_data %>% mutate(sample = "sample")
+    samples <- sort(unique(cov_data$sample))
+    pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    cov_data <- cov_data %>% mutate(y_val = apply_transform(mean_coverage, tfm))
+    p <- ggplot(cov_data, aes(x = pos, y = y_val, color = sample, group = sample)) +
+      geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+      scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
+      labs(y = y_label("Mean coverage", tfm)) + theme_panel
+    if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    panels[[length(panels) + 1]] <- p
+
+  } else if (stat_name %in% c("pi", "theta", "tajima_d")) {
+    if (!"sample" %in% names(div_data)) div_data <- div_data %>% mutate(sample = "sample")
+    if (!stat_name %in% names(div_data)) next
+    samples <- sort(unique(div_data$sample))
+    pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    plot_df <- div_data %>%
+      filter(!is.na(.data[[stat_name]])) %>%
+      mutate(y_val = apply_transform(.data[[stat_name]], tfm))
+    base_lbl <- switch(stat_name, pi = "\u03c0", theta = "\u03b8", tajima_d = "Tajima's D")
+    if (opts$`y-value` == "rank") base_lbl <- paste(base_lbl, "rank")
+    else if (opts$`y-value` == "quantile") base_lbl <- paste(base_lbl, "quantile")
+    p <- ggplot(plot_df, aes(x = pos, y = y_val, color = sample, group = sample)) +
+      geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+      scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
+      labs(y = y_label(base_lbl, tfm)) + theme_panel
+    if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    panels[[length(panels) + 1]] <- p
+
+  } else if (stat_name == "fst") {
+    if (!"sample_pair" %in% names(fst_data)) next
+    pairs <- sort(unique(fst_data$sample_pair))
+    pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(pairs)), pairs)
+    fst_data <- fst_data %>% mutate(y_val = apply_transform(fst, tfm))
+    base_lbl <- if (opts$`y-value` == "rank") "FST rank" else if (opts$`y-value` == "quantile") "FST quantile" else "FST"
+    p <- ggplot(fst_data, aes(x = pos, y = y_val, color = sample_pair, group = sample_pair)) +
+      geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+      scale_color_manual(name = "Pair", values = pal, drop = FALSE) +
+      labs(y = y_label(base_lbl, tfm)) + theme_panel
+    if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    panels[[length(panels) + 1]] <- p
+
+  } else if (stat_name == "pbe") {
+    if (!"trio" %in% names(pbe_data)) next
+    trios <- sort(unique(pbe_data$trio))
+    pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(trios)), trios)
+    pbe_data <- pbe_data %>% mutate(y_val = apply_transform(pbe, tfm))
+    base_lbl <- if (opts$`y-value` == "rank") "PBE rank" else if (opts$`y-value` == "quantile") "PBE quantile" else "PBE"
+    p <- ggplot(pbe_data, aes(x = pos, y = y_val, color = trio, group = trio)) +
+      geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+      scale_color_manual(name = "Trio", values = pal, drop = FALSE) +
+      labs(y = y_label(base_lbl, tfm)) + theme_panel
+    if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    panels[[length(panels) + 1]] <- p
+  }
 }
 
-# π
-if (!is.null(div_data) && nrow(div_data) > 0 && "pi" %in% names(div_data)) {
-  if (!"sample" %in% names(div_data)) div_data <- div_data %>% mutate(sample = "sample")
-  samples <- sort(unique(div_data$sample))
-  pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
-  p_pi <- ggplot(div_data, aes(x = .data$pos, y = .data$pi, color = .data$sample, group = .data$sample)) +
-    geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
-    scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
-    labs(y = if (opts$`y-value` == "rank") "π rank" else if (opts$`y-value` == "quantile") "π quantile" else "π") +
-    theme_panel
-  panels[[length(panels) + 1]] <- p_pi
-}
+if (length(panels) == 0)
+  stop("No panels could be built. Check data availability for requested statistics.")
 
-# FST
-if (!is.null(fst_data) && nrow(fst_data) > 0 && "fst" %in% names(fst_data)) {
-  pairs <- sort(unique(fst_data$sample_pair))
-  pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(pairs)), pairs)
-  p_fst <- ggplot(fst_data, aes(x = .data$pos, y = .data$fst, color = .data$sample_pair, group = .data$sample_pair)) +
-    geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
-    scale_color_manual(name = "Pair", values = pal, drop = FALSE) +
-    labs(y = if (opts$`y-value` == "rank") "FST rank" else if (opts$`y-value` == "quantile") "FST quantile" else "FST") +
-    theme_panel
-  panels[[length(panels) + 1]] <- p_fst
-}
+# ---------------------------------------------------------------------------
+# X-axis label on bottom panel: "Position on <chr> (bp)"
+# ---------------------------------------------------------------------------
+x_label <- paste0("Position on ", chr_region, " (bp)")
+panels[[length(panels)]] <- panels[[length(panels)]] + labs(x = x_label)
 
-# PBE
-if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% names(pbe_data)) {
-  trios <- sort(unique(pbe_data$trio))
-  pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(trios)), trios)
-  p_pbe <- ggplot(pbe_data, aes(x = .data$pos, y = .data$pbe, color = .data$trio, group = .data$trio)) +
-    geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
-    scale_color_manual(name = "Trio", values = pal, drop = FALSE) +
-    labs(y = if (opts$`y-value` == "rank") "PBE rank" else if (opts$`y-value` == "quantile") "PBE quantile" else "PBE") +
-    theme_panel
-  panels[[length(panels) + 1]] <- p_pbe
-}
-
-if (length(panels) == 0) {
-  stop("No data found for the specified region and inputs. Check --chromosome/--region and input dirs.")
-}
-
-# Add x-axis label to bottom panel only
-panels[[length(panels)]] <- panels[[length(panels)]] + labs(x = "Position (bp)")
-# Combine: stack vertically, collect legends, panel labels (a), (b), ...
+# ---------------------------------------------------------------------------
+# Combine with patchwork
+# ---------------------------------------------------------------------------
 combined <- wrap_plots(panels, ncol = 1, heights = rep(1, length(panels))) +
   plot_layout(guides = "collect") +
   plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") &
-  theme(legend.position = "right", plot.tag = element_text(size = PLOT_BASE_SIZE + 2, face = "bold"), plot.tag.position = "topleft")
+  theme(legend.position = "right",
+    plot.tag = element_text(size = PLOT_BASE_SIZE + 2, face = "bold"),
+    plot.tag.position = "topleft")
 
-# Position label
+# ---------------------------------------------------------------------------
+# Save
+# ---------------------------------------------------------------------------
 chr_safe <- gsub("[^A-Za-z0-9]", "_", chr_region)
-pos_suffix <- if (!is.na(start_region) && !is.na(end_region)) paste0("_", chr_safe, "_", start_region, "_", end_region) else paste0("_", chr_safe)
+pos_suffix <- if (!is.na(start_region) && !is.na(end_region))
+  paste0("_", chr_safe, "_", start_region, "_", end_region) else paste0("_", chr_safe)
 base_name <- paste0(opts$`file-prefix`, "region_plot", pos_suffix)
 
 format_parts <- trimws(tolower(strsplit(opts$`plot-format`, ",")[[1]]))
 if ("both" %in% format_parts) format_parts <- c(setdiff(format_parts, "both"), "png", "pdf")
 if ("all" %in% format_parts) format_parts <- c(setdiff(format_parts, "all"), "png", "pdf", "svg")
 for (fmt in unique(format_parts)) {
+  out_path <- file.path(opts$`output-dir`, paste0(base_name, ".", fmt))
   if (fmt == "png") {
-    path <- file.path(opts$`output-dir`, paste0(base_name, ".png"))
-    ggsave(path, combined, width = opts$width, height = opts$height, dpi = dpi_use)
-    message("Saved: ", path)
-  } else if (fmt == "pdf") {
-    path <- file.path(opts$`output-dir`, paste0(base_name, ".pdf"))
-    ggsave(path, combined, width = opts$width, height = opts$height)
-    message("Saved: ", path)
-  } else if (fmt == "svg") {
-    path <- file.path(opts$`output-dir`, paste0(base_name, ".svg"))
-    ggsave(path, combined, width = opts$width, height = opts$height)
-    message("Saved: ", path)
+    ggsave(out_path, combined, width = opts$width, height = opts$height, dpi = dpi_use)
+  } else {
+    ggsave(out_path, combined, width = opts$width, height = opts$height)
   }
+  message("Saved: ", out_path)
 }
 
 message("Done.")

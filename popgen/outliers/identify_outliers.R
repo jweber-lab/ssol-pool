@@ -789,7 +789,8 @@ seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id
     expanded <- bind_rows(expanded_list)
     expanded <- merge_regions(expanded, max_gap = 0)
     seed_windows$window_type <- "seed"
-    n_expand_before <- nrow(expand_windows)
+    n_seed_windows <- nrow(seed_windows)
+    n_expand_windows <- nrow(expand_windows)
     n_regions <- nrow(expanded)
     expand_used <- expand_windows %>%
         inner_join(expanded %>% select("chr", "region_start", "region_end"), by = "chr", relationship = "many-to-many") %>%
@@ -797,7 +798,7 @@ seed_expand_regions <- function(seed_windows, expand_windows, merge_distance, id
         select(all_of(names(expand_windows))) %>%
         distinct() %>%
         mutate(window_type = "expanded")
-    if (verbose) cat("  seed_expand: expand_windows", n_expand_before, "x expanded regions", n_regions, "(join by chr, many-to-many) -> tagged expanded windows", nrow(expand_used), "\n")
+    if (verbose) cat("  seed_expand:", n_seed_windows, "seed windows; ", n_expand_windows, "expansion windows; ", n_regions, "expanded regions; ", nrow(expand_used), "tagged expanded windows\n")
     expand_only <- expand_used %>% anti_join(seed_windows %>% select("chr", "start", "end"), by = c("chr", "start", "end"))
     if (verbose && nrow(expand_only) < nrow(expand_used))
         cat("  seed_expand: dropped ", nrow(expand_used) - nrow(expand_only), " expansion windows already in seed set\n", sep = "")

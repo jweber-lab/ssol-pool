@@ -4,7 +4,7 @@
 # plot_region.sh
 #
 # Bash wrapper for plot_region.R to create a single stacked figure for a
-# genomic region (coverage, π, FST, PBE) with shared x-axis and color key.
+# genomic region (coverage, π, θ, Tajima's D, FST, PBE) with shared x-axis.
 #
 # Author: ssol-pool
 # Usage: See README.md or run with --help
@@ -25,6 +25,9 @@ REFERENCE_GENOME=""
 OUTPUT_DIR="./"
 FILE_PREFIX=""
 Y_VALUE="value"
+STATISTICS=""
+TRANSFORM=""
+PLOT_STYLE="line"
 WIDTH=12
 HEIGHT=10
 DPI=300
@@ -57,23 +60,30 @@ Optional:
   --step-size N              Step size (optional)
   --reference-genome FILE    Reference genome FASTA (for chromosome lengths)
   --output-dir DIR           Output directory (default: ./)
-  --file-prefix PREFIX        Prefix for output filename
+  --file-prefix PREFIX       Prefix for output filename
   --y-value VALUE            Y-axis for diversity/FST/PBE: value, rank, or quantile (default: value)
+  --statistics LIST          Comma-separated panels to include, in order:
+                               coverage, pi, theta, tajima_d, fst, pbe (default: all with data)
+  --transform SPEC           Per-stat transforms as STAT:TRANSFORM pairs, comma-separated.
+                               TRANSFORM = none, log, or asinh.
+                               Example: coverage:log,pi:none,fst:asinh (default: none for all)
+  --plot-style STYLE         line or line_points (default: line)
   --width N                  Figure width in inches (default: 12)
   --height N                 Figure height in inches (default: 10)
   --dpi N                    DPI for PNG (default: 300)
-  --plot-format FORMAT        png, pdf, svg, both, or all (default: png)
+  --plot-format FORMAT       png, pdf, svg, both, or all (default: png)
   --rscript PATH             Path to plot_region.R (default: same directory as this script)
   --dry-run                  Preview commands without executing
   -h, --help                 Show this help
 
 Output:
   region_plot_CHR_START_END.png (or .pdf/.svg) in --output-dir.
-  Panel order: Coverage (if seq_qual/diversity HDF5), π, FST, PBE.
+  Panel order: Coverage, π, θ, Tajima's D, FST, PBE (or as specified by --statistics).
 
-Example:
+Examples:
   $0 --chromosome chr1 --hdf5-dir ./collate_out --reference-genome ref.fa --output-dir ./plots
-  $0 --region chr2:5000000-6000000 --diversity-dir ./div --fst-dir ./fst --seq-qual-dir ./sq
+  $0 --region chr2:5M-6M --diversity-dir ./div --fst-dir ./fst --seq-qual-dir ./sq
+  $0 --region chr1:1-5000000 --hdf5-dir ./h5 --statistics coverage,pi,fst --transform coverage:log
 EOF
 }
 
@@ -135,6 +145,18 @@ while [[ $# -gt 0 ]]; do
             Y_VALUE="$2"
             shift 2
             ;;
+        --statistics)
+            STATISTICS="$2"
+            shift 2
+            ;;
+        --transform)
+            TRANSFORM="$2"
+            shift 2
+            ;;
+        --plot-style)
+            PLOT_STYLE="$2"
+            shift 2
+            ;;
         --width)
             WIDTH="$2"
             shift 2
@@ -177,8 +199,8 @@ if [[ -z "$CHROMOSOME" && -z "$REGION" ]]; then
     exit 1
 fi
 
-if [[ -z "$DIVERSITY_DIR" && -z "$FST_DIR" && -z "$PBE_DIR" && -z "$HDF5_DIR" ]]; then
-    log_error "At least one input is required: --diversity-dir, --fst-dir, --pbe-dir, or --hdf5-dir"
+if [[ -z "$DIVERSITY_DIR" && -z "$FST_DIR" && -z "$PBE_DIR" && -z "$HDF5_DIR" && -z "$SEQ_QUAL_DIR" ]]; then
+    log_error "At least one input is required: --diversity-dir, --fst-dir, --pbe-dir, --seq-qual-dir, or --hdf5-dir"
     usage
     exit 1
 fi
@@ -209,6 +231,9 @@ R_CMD=(Rscript "$RSCRIPT")
 R_CMD+=(--output-dir "$OUTPUT_DIR" --width "$WIDTH" --height "$HEIGHT" --dpi "$DPI" --plot-format "$PLOT_FORMAT")
 [[ -n "$FILE_PREFIX" ]] && R_CMD+=(--file-prefix "$FILE_PREFIX")
 [[ -n "$Y_VALUE" ]] && R_CMD+=(--y-value "$Y_VALUE")
+[[ -n "$STATISTICS" ]] && R_CMD+=(--statistics "$STATISTICS")
+[[ -n "$TRANSFORM" ]] && R_CMD+=(--transform "$TRANSFORM")
+[[ -n "$PLOT_STYLE" ]] && R_CMD+=(--plot-style "$PLOT_STYLE")
 
 if [[ "$DRY_RUN" == true ]]; then
     log "DRY-RUN: ${R_CMD[*]}"
