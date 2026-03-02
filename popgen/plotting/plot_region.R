@@ -173,6 +173,30 @@ apply_transform <- function(values, tfm) {
   }
 }
 
+# Log-friendly tick values: 1,2,5,10,20,50,100,... (and 0 for log1p).
+# Gives even spacing in log space and interpretable labels.
+log_friendly_ticks <- function(orig_range, include_zero = FALSE) {
+  lo <- orig_range[1]
+  hi <- orig_range[2]
+  if (hi <= 0 && !include_zero) return(NULL)
+  if (hi <= 0) return(0)
+  # For the 1,2,5 series start from the decade that covers the positive part of the range
+  lo_positive <- if (lo <= 0) 1 else lo
+  log_lo <- floor(log10(max(lo_positive, 1e-10)))
+  log_hi <- ceiling(log10(hi))
+  log_lo <- max(log_lo, -2)  # avoid too many sub-decimal ticks
+  base <- c(1, 2, 5)
+  out <- numeric(0)
+  for (e in seq(log_lo, log_hi)) {
+    out <- c(out, base * 10^e)
+  }
+  out <- sort(unique(out))
+  out <- out[out >= lo_positive * 0.95 & out <= hi * 1.05]
+  if (include_zero && lo <= 0) out <- c(0, out)
+  if (length(out) < 2) out <- unique(c(if (include_zero && lo <= 0) 0 else NULL, 10^log_lo, 10^log_hi, hi))
+  out
+}
+
 # Build scale_y_continuous with ticks at nice original-scale values,
 # positioned at their transformed coordinates, labeled with the original values.
 build_y_scale <- function(original_values, tfm) {
@@ -186,19 +210,13 @@ build_y_scale <- function(original_values, tfm) {
   if (tfm == "log") {
     use_log1p <- (min_v <= 0)
     fwd <- if (use_log1p) function(x) log1p(pmax(0, x)) else log
-    # Nice breaks in original space
-    if (min_v > 0 && orig_range[2] / orig_range[1] > 10) {
-      # Span multiple orders of magnitude: use log-spaced breaks
-      log_lo <- floor(log10(max(orig_range[1], 1e-10)))
-      log_hi <- ceiling(log10(orig_range[2]))
-      orig_ticks <- 10^seq(log_lo, log_hi)
-      orig_ticks <- orig_ticks[orig_ticks >= orig_range[1] * 0.9 & orig_ticks <= orig_range[2] * 1.1]
-      if (length(orig_ticks) < 3) orig_ticks <- pretty(orig_range, n = 6)
-    } else {
-      orig_ticks <- pretty(orig_range, n = 6)
-    }
+    # Use log-friendly ticks so spacing is even in log space and labels are interpretable
+    orig_ticks <- log_friendly_ticks(orig_range, include_zero = use_log1p)
     orig_ticks <- orig_ticks[orig_ticks >= 0 | !use_log1p]
-    if (length(orig_ticks) < 2) orig_ticks <- pretty(orig_range, n = 6)
+    if (length(orig_ticks) < 2) {
+      orig_ticks <- pretty(c(max(orig_range[1], 0), orig_range[2]), n = 5)
+      orig_ticks <- orig_ticks[orig_ticks > 0 | use_log1p]
+    }
     y_breaks <- fwd(orig_ticks)
 
   } else if (tfm == "asinh") {
@@ -411,6 +429,7 @@ if (is.null(pbe_data) && !is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`))
 has_data <- c(
   coverage  = !is.null(cov_data) && nrow(cov_data) > 0 && "mean_coverage" %in% names(cov_data),
   mapq      = !is.null(mapq_data) && nrow(mapq_data) > 0 && "mean_mapping_quality" %in% names(mapq_data),
+  n_snps    = !is.null(div_data) && nrow(div_data) > 0 && "n_snps" %in% names(div_data),
   pi        = !is.null(div_data) && nrow(div_data) > 0 && "pi" %in% names(div_data),
   theta     = !is.null(div_data) && nrow(div_data) > 0 && "theta" %in% names(div_data),
   tajima_d  = !is.null(div_data) && nrow(div_data) > 0 && "tajima_d" %in% names(div_data),
@@ -470,6 +489,23 @@ for (stat_name in panels_to_plot) {
       scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
       labs(y = y_label("Mean MAPQ", tfm)) + theme_panel
     ys <- build_y_scale(orig_vals, tfm); if (!is.null(ys)) p <- p + ys
+    if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
+    panels[[length(panels) + 1]] <- p
+
+  } else if (stat_name == "n_snps") {
+    if (!"sample" %in% names(div_data)) div_data <- div_data %>% mutate(sample = "sample")
+    if (!"n_snps" %in% names(div_data)) next
+    samples <- sort(unique(div_data$sample))
+    pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(samples)), samples)
+    orig_vals <- div_data$n_snps
+    plot_df <- div_data %>%
+      filter(!is.na(n_snps)) %>%
+      mutate(y_val = apply_transform(n_snps, tfm))
+    p <- ggplot(plot_df, aes(x = pos, y = y_val, color = sample, group = sample)) +
+      geom_line(alpha = 0.7, linewidth = 0.5, na.rm = TRUE) +
+      scale_color_manual(name = "Sample", values = pal, drop = FALSE) +
+      labs(y = y_label("Number of SNPs", tfm)) + theme_panel
+    ys <- build_y_scale(orig_vals[!is.na(orig_vals)], tfm); if (!is.null(ys)) p <- p + ys
     if (use_points) p <- p + geom_point(size = 1, alpha = 0.7, na.rm = TRUE)
     panels[[length(panels) + 1]] <- p
 
