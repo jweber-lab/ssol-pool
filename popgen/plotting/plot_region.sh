@@ -4,7 +4,7 @@
 # plot_region.sh
 #
 # Bash wrapper for plot_region.R to create a single stacked figure for a
-# genomic region (coverage, π, θ, Tajima's D, FST, PBE) with shared x-axis.
+# genomic region (coverage, mapq, n_snps, π, θ, Tajima's D, FST, PBE) with shared x-axis.
 #
 # Author: ssol-pool
 # Usage: See README.md or run with --help
@@ -63,7 +63,7 @@ Optional:
   --file-prefix PREFIX       Prefix for output filename
   --y-value VALUE            Y-axis for diversity/FST/PBE: value, rank, or quantile (default: value)
   --statistics LIST          Comma-separated panels to include, in order:
-                               coverage, mapq, pi, theta, tajima_d, fst, pbe (default: all with data)
+                               coverage, mapq, n_snps, pi, theta, tajima_d, fst, pbe (default: all with data)
   --transform SPEC           Per-stat transforms as STAT:TRANSFORM pairs, comma-separated.
                                TRANSFORM = none, log, or asinh.
                                Example: coverage:log,pi:none,fst:asinh (default: none for all)
@@ -78,12 +78,12 @@ Optional:
 
 Output:
   region_plot_CHR_START_END.png (or .pdf/.svg) in --output-dir.
-  Panel order: Coverage, MAPQ, π, θ, Tajima's D, FST, PBE (or as specified by --statistics).
+  Panel order: Coverage, MAPQ, n_snps, π, θ, Tajima's D, FST, PBE (or as specified by --statistics).
 
 Examples:
   $0 --chromosome chr1 --hdf5-dir ./collate_out --reference-genome ref.fa --output-dir ./plots
   $0 --region chr2:5M-6M --diversity-dir ./div --fst-dir ./fst --seq-qual-dir ./sq
-  $0 --region chr1:1-5000000 --hdf5-dir ./h5 --statistics coverage,pi,fst --transform coverage:log
+  $0 --region chr1:1-5000000 --hdf5-dir ./h5 --statistics coverage,mapq,n_snps,pi,fst --transform coverage:log
 EOF
 }
 

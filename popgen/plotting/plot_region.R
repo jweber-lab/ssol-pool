@@ -112,7 +112,7 @@ dpi_use <- if (!is.null(opts$dpi) && !is.na(opts$dpi)) opts$dpi else PLOT_DPI
 # ---------------------------------------------------------------------------
 # Parse --statistics (panel order)
 # ---------------------------------------------------------------------------
-valid_stats <- c("coverage", "mapq", "pi", "theta", "tajima_d", "fst", "pbe")
+valid_stats <- c("coverage", "mapq", "n_snps", "pi", "theta", "tajima_d", "fst", "pbe")
 requested_stats <- NULL
 if (!is.null(opts$statistics) && nzchar(opts$statistics)) {
   requested_stats <- trimws(strsplit(opts$statistics, ",")[[1]])
