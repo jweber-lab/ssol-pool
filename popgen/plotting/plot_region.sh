@@ -14,6 +14,7 @@ set -euo pipefail
 
 CHROMOSOME=""
 REGION=""
+REGIONS_FILE=""
 DIVERSITY_DIR=""
 FST_DIR=""
 PBE_DIR=""
@@ -46,7 +47,9 @@ Usage: $0 [OPTIONS]
 
 Region (at least one required):
   --chromosome CHR           Plot full chromosome CHR
-  --region CHR:START-END     Plot region (e.g. chr1:1000000-2000000)
+  --region CHR:START-END     Plot single region (e.g. chr1:1000000-2000000)
+  --regions-file FILE        File with one region per line: CHR or CHR:START-END
+                             (blank lines and # comments ignored; mixed entries allowed)
 
 Input (at least one required; use TSV dirs and/or --hdf5-dir):
   --diversity-dir DIR        Directory with diversity TSV or HDF5
@@ -84,6 +87,7 @@ Examples:
   $0 --chromosome chr1 --hdf5-dir ./collate_out --reference-genome ref.fa --output-dir ./plots
   $0 --region chr2:5M-6M --diversity-dir ./div --fst-dir ./fst --seq-qual-dir ./sq
   $0 --region chr1:1-5000000 --hdf5-dir ./h5 --statistics coverage,mapq,n_snps,pi,fst --transform coverage:log
+  $0 --regions-file regions.txt --hdf5-dir ./h5 --reference-genome ref.fa --output-dir ./plots
 EOF
 }
 
@@ -99,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --region)
             REGION="$2"
+            shift 2
+            ;;
+        --regions-file)
+            REGIONS_FILE="$2"
             shift 2
             ;;
         --diversity-dir)
@@ -193,9 +201,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$CHROMOSOME" && -z "$REGION" ]]; then
-    log_error "At least one of --chromosome or --region is required"
+if [[ -z "$CHROMOSOME" && -z "$REGION" && -z "$REGIONS_FILE" ]]; then
+    log_error "At least one of --chromosome, --region, or --regions-file is required"
     usage
+    exit 1
+fi
+
+if [[ -n "$REGIONS_FILE" && ( -n "$CHROMOSOME" || -n "$REGION" ) ]]; then
+    log_warn "Using --regions-file; ignoring --chromosome/--region"
+    CHROMOSOME=""
+    REGION=""
+fi
+
+if [[ -n "$REGIONS_FILE" && ! -f "$REGIONS_FILE" ]]; then
+    log_error "Regions file not found: $REGIONS_FILE"
     exit 1
 fi
 
@@ -217,28 +236,68 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-R_CMD=(Rscript "$RSCRIPT")
-[[ -n "$CHROMOSOME" ]] && R_CMD+=(--chromosome "$CHROMOSOME")
-[[ -n "$REGION" ]] && R_CMD+=(--region "$REGION")
-[[ -n "$DIVERSITY_DIR" ]] && R_CMD+=(--diversity-dir "$DIVERSITY_DIR")
-[[ -n "$FST_DIR" ]] && R_CMD+=(--fst-dir "$FST_DIR")
-[[ -n "$PBE_DIR" ]] && R_CMD+=(--pbe-dir "$PBE_DIR")
-[[ -n "$SEQ_QUAL_DIR" ]] && R_CMD+=(--seq-qual-dir "$SEQ_QUAL_DIR")
-[[ -n "$HDF5_DIR" ]] && R_CMD+=(--hdf5-dir "$HDF5_DIR")
-[[ -n "$WINDOW_SIZE" ]] && R_CMD+=(--window-size "$WINDOW_SIZE")
-[[ -n "$STEP_SIZE" ]] && R_CMD+=(--step-size "$STEP_SIZE")
-[[ -n "$REFERENCE_GENOME" ]] && R_CMD+=(--reference-genome "$REFERENCE_GENOME")
-R_CMD+=(--output-dir "$OUTPUT_DIR" --width "$WIDTH" --height "$HEIGHT" --dpi "$DPI" --plot-format "$PLOT_FORMAT")
-[[ -n "$FILE_PREFIX" ]] && R_CMD+=(--file-prefix "$FILE_PREFIX")
-[[ -n "$Y_VALUE" ]] && R_CMD+=(--y-value "$Y_VALUE")
-[[ -n "$STATISTICS" ]] && R_CMD+=(--statistics "$STATISTICS")
-[[ -n "$TRANSFORM" ]] && R_CMD+=(--transform "$TRANSFORM")
-[[ -n "$PLOT_STYLE" ]] && R_CMD+=(--plot-style "$PLOT_STYLE")
+run_one_region() {
+    local line="$1"
+    line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -z "$line" ]] && return 0
+    [[ "$line" = \#* ]] && return 0
+    local R_CMD=(Rscript "$RSCRIPT")
+    if [[ "$line" == *:* ]]; then
+        R_CMD+=(--region "$line")
+    else
+        R_CMD+=(--chromosome "$line")
+    fi
+    [[ -n "$DIVERSITY_DIR" ]] && R_CMD+=(--diversity-dir "$DIVERSITY_DIR")
+    [[ -n "$FST_DIR" ]] && R_CMD+=(--fst-dir "$FST_DIR")
+    [[ -n "$PBE_DIR" ]] && R_CMD+=(--pbe-dir "$PBE_DIR")
+    [[ -n "$SEQ_QUAL_DIR" ]] && R_CMD+=(--seq-qual-dir "$SEQ_QUAL_DIR")
+    [[ -n "$HDF5_DIR" ]] && R_CMD+=(--hdf5-dir "$HDF5_DIR")
+    [[ -n "$WINDOW_SIZE" ]] && R_CMD+=(--window-size "$WINDOW_SIZE")
+    [[ -n "$STEP_SIZE" ]] && R_CMD+=(--step-size "$STEP_SIZE")
+    [[ -n "$REFERENCE_GENOME" ]] && R_CMD+=(--reference-genome "$REFERENCE_GENOME")
+    R_CMD+=(--output-dir "$OUTPUT_DIR" --width "$WIDTH" --height "$HEIGHT" --dpi "$DPI" --plot-format "$PLOT_FORMAT")
+    [[ -n "$FILE_PREFIX" ]] && R_CMD+=(--file-prefix "$FILE_PREFIX")
+    [[ -n "$Y_VALUE" ]] && R_CMD+=(--y-value "$Y_VALUE")
+    [[ -n "$STATISTICS" ]] && R_CMD+=(--statistics "$STATISTICS")
+    [[ -n "$TRANSFORM" ]] && R_CMD+=(--transform "$TRANSFORM")
+    [[ -n "$PLOT_STYLE" ]] && R_CMD+=(--plot-style "$PLOT_STYLE")
+    if [[ "$DRY_RUN" == true ]]; then
+        log "DRY-RUN: ${R_CMD[*]}"
+    else
+        log "Region: $line"
+        "${R_CMD[@]}"
+    fi
+}
 
-if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN: ${R_CMD[*]}"
-    exit 0
+if [[ -n "$REGIONS_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        run_one_region "$line"
+    done < "$REGIONS_FILE"
+    log "Done (regions file)."
+else
+    R_CMD=(Rscript "$RSCRIPT")
+    [[ -n "$CHROMOSOME" ]] && R_CMD+=(--chromosome "$CHROMOSOME")
+    [[ -n "$REGION" ]] && R_CMD+=(--region "$REGION")
+    [[ -n "$DIVERSITY_DIR" ]] && R_CMD+=(--diversity-dir "$DIVERSITY_DIR")
+    [[ -n "$FST_DIR" ]] && R_CMD+=(--fst-dir "$FST_DIR")
+    [[ -n "$PBE_DIR" ]] && R_CMD+=(--pbe-dir "$PBE_DIR")
+    [[ -n "$SEQ_QUAL_DIR" ]] && R_CMD+=(--seq-qual-dir "$SEQ_QUAL_DIR")
+    [[ -n "$HDF5_DIR" ]] && R_CMD+=(--hdf5-dir "$HDF5_DIR")
+    [[ -n "$WINDOW_SIZE" ]] && R_CMD+=(--window-size "$WINDOW_SIZE")
+    [[ -n "$STEP_SIZE" ]] && R_CMD+=(--step-size "$STEP_SIZE")
+    [[ -n "$REFERENCE_GENOME" ]] && R_CMD+=(--reference-genome "$REFERENCE_GENOME")
+    R_CMD+=(--output-dir "$OUTPUT_DIR" --width "$WIDTH" --height "$HEIGHT" --dpi "$DPI" --plot-format "$PLOT_FORMAT")
+    [[ -n "$FILE_PREFIX" ]] && R_CMD+=(--file-prefix "$FILE_PREFIX")
+    [[ -n "$Y_VALUE" ]] && R_CMD+=(--y-value "$Y_VALUE")
+    [[ -n "$STATISTICS" ]] && R_CMD+=(--statistics "$STATISTICS")
+    [[ -n "$TRANSFORM" ]] && R_CMD+=(--transform "$TRANSFORM")
+    [[ -n "$PLOT_STYLE" ]] && R_CMD+=(--plot-style "$PLOT_STYLE")
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log "DRY-RUN: ${R_CMD[*]}"
+        exit 0
+    fi
+
+    "${R_CMD[@]}"
+    log "Done."
 fi
-
-"${R_CMD[@]}"
-log "Done."

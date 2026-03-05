@@ -1,0 +1,16 @@
+# Regions file to regenerate all plots in reg/
+# Full chromosomes
+ptg000014l
+ptg000025l
+ptg000026l
+ptg000028l
+ptg000030l
+ptg000032l
+ptg000037l
+ptg000064l
+ptg000152l
+ptg000187l
+# Position-defined regions (ptg000152l)
+ptg000152l:12000000-18000000
+ptg000152l:14000000-14500000
+ptg000152l:15400000-15600000
