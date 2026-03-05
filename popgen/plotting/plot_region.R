@@ -173,27 +173,55 @@ apply_transform <- function(values, tfm) {
   }
 }
 
-# Log-friendly tick values: 1,2,5,10,20,50,100,... (and 0 for log1p).
-# Gives even spacing in log space and interpretable labels.
-log_friendly_ticks <- function(orig_range, include_zero = FALSE) {
+# Log-friendly tick values with density chosen to avoid overlap.
+# Tries: dense (1,2,5,10,...), medium (1,3,10,...), sparse (1,10,100,...).
+# max_ticks caps count so labels fit; use fewer ticks when range spans many decades.
+LOG_TICK_MAX <- 8L  # target max ticks per axis to keep labels readable
+
+log_friendly_ticks <- function(orig_range, include_zero = FALSE, max_ticks = LOG_TICK_MAX) {
   lo <- orig_range[1]
   hi <- orig_range[2]
   if (hi <= 0 && !include_zero) return(NULL)
   if (hi <= 0) return(0)
-  # For the 1,2,5 series start from the decade that covers the positive part of the range
   lo_positive <- if (lo <= 0) 1 else lo
   log_lo <- floor(log10(max(lo_positive, 1e-10)))
   log_hi <- ceiling(log10(hi))
-  log_lo <- max(log_lo, -2)  # avoid too many sub-decimal ticks
-  base <- c(1, 2, 5)
-  out <- numeric(0)
-  for (e in seq(log_lo, log_hi)) {
-    out <- c(out, base * 10^e)
+  log_lo <- max(log_lo, -2)
+
+  # Build candidate ticks for a given base set (e.g. c(1,2,5) or c(1,3,10) or c(1))
+  build_candidates <- function(base) {
+    out <- numeric(0)
+    for (e in seq(log_lo, log_hi)) {
+      out <- c(out, base * 10^e)
+    }
+    out <- sort(unique(out))
+    out <- out[out >= lo_positive * 0.95 & out <= hi * 1.05]
+    if (include_zero && lo <= 0) out <- c(0, out)
+    out
   }
-  out <- sort(unique(out))
-  out <- out[out >= lo_positive * 0.95 & out <= hi * 1.05]
-  if (include_zero && lo <= 0) out <- c(0, out)
-  if (length(out) < 2) out <- unique(c(if (include_zero && lo <= 0) 0 else NULL, 10^log_lo, 10^log_hi, hi))
+
+  # Try dense (1,2,5) -> medium (1,3,10) -> sparse (powers of 10); pick first with <= max_ticks
+  bases <- list(
+    dense  = c(1, 2, 5),
+    medium = c(1, 3, 10),
+    sparse = 1
+  )
+  out <- NULL
+  for (b in bases) {
+    cand <- build_candidates(b)
+    if (length(cand) >= 2L && length(cand) <= max_ticks) {
+      out <- cand
+      break
+    }
+    if (length(cand) >= 2L) out <- cand
+  }
+  if (is.null(out) || length(out) < 2L)
+    out <- unique(c(if (include_zero && lo <= 0) 0 else NULL, 10^log_lo, 10^log_hi, hi))
+  # If still too many (e.g. many decades), thin to max_ticks roughly evenly in index
+  if (length(out) > max_ticks) {
+    idx <- unique(round(seq(1, length(out), length.out = max_ticks)))
+    out <- out[idx]
+  }
   out
 }
 
