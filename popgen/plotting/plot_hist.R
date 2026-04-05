@@ -178,13 +178,32 @@ build_x_scale <- function(original_values, tfm) {
   if (tfm == "log") {
     min_v <- min(original_values, na.rm = TRUE)
     use_log1p <- (min_v <= 0)
-    fwd <- if (use_log1p) function(x) log1p(pmax(0, x)) else log
-    # Use pretty ticks on original scale; for log, also include powers-of-10-ish values when possible.
-    orig_ticks <- pretty(orig_range, n = 7)
-    if (use_log1p && !0 %in% orig_ticks) orig_ticks <- sort(c(0, orig_ticks))
-    orig_ticks <- orig_ticks[is.finite(orig_ticks)]
-    x_breaks <- fwd(orig_ticks)
-    scale_x_continuous(breaks = x_breaks, labels = fmt_label(orig_ticks))
+    if (!use_log1p) {
+      # Data x is log(value): space ticks evenly in log-space (not linear pretty on originals),
+      # otherwise marks cluster toward high x.
+      ov <- original_values[is.finite(original_values) & original_values > 0]
+      if (length(ov) < 1L) return(NULL)
+      lr <- range(log(ov), na.rm = TRUE)
+      if (!all(is.finite(lr))) return(NULL)
+      x_breaks <- pretty(lr, n = 7)
+      x_breaks <- x_breaks[is.finite(x_breaks)]
+      orig_ticks <- exp(x_breaks)
+      ok <- is.finite(orig_ticks) & orig_ticks > 0
+      x_breaks <- x_breaks[ok]
+      orig_ticks <- orig_ticks[ok]
+      if (length(x_breaks) < 1L) return(NULL)
+      scale_x_continuous(breaks = x_breaks, labels = fmt_label(orig_ticks))
+    } else {
+      xv <- log1p(pmax(0, original_values[is.finite(original_values)]))
+      if (length(xv) < 1L) return(NULL)
+      xr <- range(xv, na.rm = TRUE)
+      if (!all(is.finite(xr))) return(NULL)
+      x_breaks <- pretty(xr, n = 7)
+      x_breaks <- x_breaks[is.finite(x_breaks) & x_breaks >= 0]
+      if (length(x_breaks) < 1L) return(NULL)
+      orig_lab <- pmax(0, expm1(x_breaks))
+      scale_x_continuous(breaks = x_breaks, labels = fmt_label(orig_lab))
+    }
   } else if (tfm == "asinh") {
     med <- median(original_values, na.rm = TRUE)
     s <- sd(original_values, na.rm = TRUE)
