@@ -3,10 +3,9 @@
 ###############################################################################
 # plot_hist.R
 #
-# Genome-wide (or subset) distributions for a chosen statistic as:
-# - Histogram (count or density)
-# - Density estimate
-# - ECDF
+# Genome-wide (or subset) distributions for a chosen statistic.
+# By default only a histogram is drawn; optional panels: kernel density, ECDF.
+# --hist-mode controls histogram bar heights (count vs density), not the optional density panel.
 #
 # Inputs mirror plot_region.R: reads from TSV dirs and/or HDF5 (collate output).
 #
@@ -53,8 +52,11 @@ option_list <- list(
   make_option("--transform", type = "character", default = "none",
     help = "Transform on the statistic axis: none, log, or asinh [default: %default]"),
   make_option("--bins", type = "integer", default = 60L, help = "Histogram bins [default: %default]"),
+  make_option("--panels", type = "character", default = "histogram",
+    help = paste0("Comma-separated figure panels: histogram, density, ecdf ",
+      "(default: histogram only; density here is a separate smooth curve, not --hist-mode).")),
   make_option("--hist-mode", type = "character", default = "count",
-    help = "Histogram y-axis: count or density [default: %default]"),
+    help = "Histogram bar heights: count or after_stat(density) for bars only [default: %default]"),
   make_option("--overlay", action = "store_true", default = FALSE,
     help = "Overlay multiple groups in a single panel (color/fill = group)"),
   make_option("--max-groups", type = "integer", default = 30L,
@@ -74,6 +76,13 @@ if (!opts$stat %in% valid_stats) stop("--stat must be one of: ", paste(valid_sta
 if (!opts$`y-value` %in% c("value", "rank", "quantile")) stop("--y-value must be one of: value, rank, quantile")
 if (!opts$transform %in% c("none", "log", "asinh")) stop("--transform must be one of: none, log, asinh")
 if (!opts$`hist-mode` %in% c("count", "density")) stop("--hist-mode must be one of: count, density")
+panels_req <- trimws(tolower(strsplit(opts$panels, ",")[[1]]))
+panels_req <- panels_req[nzchar(panels_req)]
+valid_panels <- c("histogram", "density", "ecdf")
+bad_p <- setdiff(panels_req, valid_panels)
+if (length(bad_p) > 0) stop("Unknown --panels: ", paste(bad_p, collapse = ", "), ". Valid: ", paste(valid_panels, collapse = ", "))
+if (length(panels_req) == 0) stop("--panels must list at least one of: ", paste(valid_panels, collapse = ", "))
+panels_req <- panels_req[!duplicated(panels_req)]
 
 format_parts <- trimws(tolower(strsplit(opts$`plot-format`, ",")[[1]]))
 if ("both" %in% format_parts) format_parts <- c(setdiff(format_parts, "both"), "png", "pdf")
@@ -447,26 +456,46 @@ p_ecdf <- ggplot(plot_df, ecdf_aes) +
 if (opts$overlay) p_ecdf <- p_ecdf + scale_color_manual(name = legend_title, values = pal, drop = FALSE)
 if (!opts$overlay) p_ecdf <- p_ecdf + facet_wrap(~ group)
 
-# Quantile lines: draw on histogram and density for interpretability
+# Quantile lines: draw on histogram and/or kernel density panel when present
 if (nrow(q_df) > 0) {
-  if (opts$overlay) {
-    p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x, color = .data$group), linewidth = 0.4, alpha = 0.8, show.legend = FALSE)
-    p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x, color = .data$group), linewidth = 0.4, alpha = 0.8, show.legend = FALSE)
-  } else {
-    p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.8)
-    p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.8)
+  if ("histogram" %in% panels_req) {
+    if (opts$overlay) {
+      p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x, color = .data$group), linewidth = 0.4, alpha = 0.8, show.legend = FALSE)
+    } else {
+      p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.8)
+    }
+  }
+  if ("density" %in% panels_req) {
+    if (opts$overlay) {
+      p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x, color = .data$group), linewidth = 0.4, alpha = 0.8, show.legend = FALSE)
+    } else {
+      p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.8)
+    }
   }
 }
 
 xs <- build_x_scale(orig_vals, opts$transform)
 if (!is.null(xs)) {
-  p_hist <- p_hist + xs
-  p_dens <- p_dens + xs
-  p_ecdf <- p_ecdf + xs
+  if ("histogram" %in% panels_req) p_hist <- p_hist + xs
+  if ("density" %in% panels_req) p_dens <- p_dens + xs
+  if ("ecdf" %in% panels_req) p_ecdf <- p_ecdf + xs
 }
 
-combined <- (p_hist / p_dens / p_ecdf) + plot_layout(guides = "collect") &
-  theme(legend.position = if (opts$overlay) "right" else "none")
+plot_list <- list()
+for (pname in panels_req) {
+  plot_list[[length(plot_list) + 1L]] <- switch(pname, histogram = p_hist, density = p_dens, ecdf = p_ecdf)
+}
+n_p <- length(plot_list)
+# Match previous 3-panel layout: total height opts$height for three stacked panels; one panel uses full opts$height
+out_height <- if (n_p == 1L) opts$height else opts$height * n_p / 3
+combined <- if (n_p == 1L) {
+  p1 <- plot_list[[1L]]
+  if (opts$overlay) p1 <- p1 + theme(legend.position = "right") else p1 <- p1 + theme(legend.position = "none")
+  p1
+} else {
+  wrap_plots(plot_list, ncol = 1L) + plot_layout(guides = "collect") &
+    theme(legend.position = if (opts$overlay) "right" else "none")
+}
 
 chr_safe <- if (!is.null(chr_region) && nzchar(chr_region)) gsub("[^A-Za-z0-9]", "_", chr_region) else "All"
 pos_suffix <- if (!is.na(start_region) && !is.na(end_region)) paste0("_", chr_safe, "_", start_region, "_", end_region) else paste0("_", chr_safe)
@@ -474,13 +503,14 @@ stat_safe <- gsub("[^A-Za-z0-9]", "_", opts$stat)
 overlay_suffix <- if (opts$overlay) "_overlay" else ""
 tfm_suffix <- if (opts$transform != "none") paste0("_", opts$transform, "trans") else ""
 yv_suffix <- if (opts$`y-value` != "value" && opts$stat %in% c("pi", "theta", "tajima_d", "fst", "pbe")) paste0("_", opts$`y-value`) else ""
-base_name <- paste0(opts$`file-prefix`, "hist_", stat_safe, pos_suffix, overlay_suffix, tfm_suffix, yv_suffix)
+panels_suffix <- if (length(panels_req) == 1L && panels_req[1] == "histogram") "" else paste0("_", paste(panels_req, collapse = "-"))
+base_name <- paste0(opts$`file-prefix`, "hist_", stat_safe, pos_suffix, overlay_suffix, tfm_suffix, yv_suffix, panels_suffix)
 
 dpi_use <- if (!is.null(opts$dpi) && !is.na(opts$dpi)) opts$dpi else PLOT_DPI
 for (fmt in format_parts) {
   out_path <- file.path(opts$`output-dir`, paste0(base_name, ".", fmt))
-  if (fmt == "png") ggsave(out_path, combined, width = opts$width, height = opts$height, dpi = dpi_use)
-  else ggsave(out_path, combined, width = opts$width, height = opts$height)
+  if (fmt == "png") ggsave(out_path, combined, width = opts$width, height = out_height, dpi = dpi_use)
+  else ggsave(out_path, combined, width = opts$width, height = out_height)
   message("Saved: ", out_path)
 }
 

@@ -4,7 +4,7 @@
 # plot_hist.sh
 #
 # Bash wrapper for plot_hist.R to plot genome-wide (or subset) distributions
-# (histogram + density + ECDF) for a chosen statistic.
+# for a chosen statistic. Default: histogram only; add panels with --panels.
 #
 # Mirrors plot_region.sh inputs so you can point it at the same directories:
 #   - TSV dirs: --diversity-dir / --fst-dir / --pbe-dir / --seq-qual-dir
@@ -28,6 +28,7 @@ STAT="pi"
 Y_VALUE="value"
 TRANSFORM="none"
 BINS=60
+PANELS="histogram"
 HIST_MODE="count"
 OVERLAY=false
 MAX_GROUPS=30
@@ -69,7 +70,9 @@ Optional:
   --y-value VALUE          For diversity/FST/PBE: value, rank, or quantile (default: value)
   --transform TRANSFORM    Transform on stat axis: none, log, or asinh (default: none)
   --bins N                 Histogram bins (default: 60)
-  --hist-mode MODE         Histogram y-axis: count or density (default: count)
+  --panels LIST            Comma-separated figure panels: histogram, density, ecdf (default: histogram).
+                            \"density\" is a kernel-density curve panel, not the same as --hist-mode.
+  --hist-mode MODE         Histogram bar y-axis: count or density (ggplot after_stat(density) for bars only; default: count)
   --overlay                Overlay groups in one panel (color/fill = group); otherwise facet by group
   --max-groups N           Refuse to plot >N groups (default: 30)
   --q-lines LIST           Quantile lines to mark (comma-separated; default: 0.5,0.95,0.99)
@@ -86,8 +89,14 @@ Examples:
   # Genome-wide pi histogram from collate output:
   $0 --hdf5-dir ./collated --stat pi --output-dir ./plots --overlay
 
-  # Coverage distribution from seq_qual TSV:
-  $0 --seq-qual-dir ./stats_out --stat coverage --transform log --hist-mode density -o ./plots
+  # Histogram + kernel density + ECDF (stacked figure):
+  $0 --hdf5-dir ./collated --stat pi --panels histogram,density,ecdf -o ./plots
+
+  # Bar heights normalized (still histogram panel only; not the density curve panel):
+  $0 --hdf5-dir ./collated --stat coverage --hist-mode density -o ./hist/
+
+  # Coverage: log x-axis transform and kernel density panel:
+  $0 --seq-qual-dir ./stats_out --stat coverage --transform log --panels histogram,density -o ./plots
 
   # Subset to chromosome and use ranks:
   $0 --hdf5-dir ./collated --chromosome ptg000624l --stat fst --y-value rank --overlay -o ./plots
@@ -115,6 +124,7 @@ while [[ $# -gt 0 ]]; do
     --y-value) Y_VALUE="$2"; shift 2 ;;
     --transform) TRANSFORM="$2"; shift 2 ;;
     --bins) BINS="$2"; shift 2 ;;
+    --panels) PANELS="$2"; shift 2 ;;
     --hist-mode) HIST_MODE="$2"; shift 2 ;;
     --overlay) OVERLAY=true; shift ;;
     --max-groups) MAX_GROUPS="$2"; shift 2 ;;
@@ -164,7 +174,7 @@ R_CMD+=(--output-dir "$OUTPUT_DIR" --width "$WIDTH" --height "$HEIGHT" --dpi "$D
 [[ -n "$STAT" ]] && R_CMD+=(--stat "$STAT")
 [[ -n "$Y_VALUE" ]] && R_CMD+=(--y-value "$Y_VALUE")
 [[ -n "$TRANSFORM" ]] && R_CMD+=(--transform "$TRANSFORM")
-R_CMD+=(--bins "$BINS" --hist-mode "$HIST_MODE" --max-groups "$MAX_GROUPS" --q-lines "$Q_LINES")
+R_CMD+=(--bins "$BINS" --panels "$PANELS" --hist-mode "$HIST_MODE" --max-groups "$MAX_GROUPS" --q-lines "$Q_LINES")
 [[ "$OVERLAY" == true ]] && R_CMD+=(--overlay)
 [[ "$VERBOSE" == true ]] && R_CMD+=(--verbose)
 
