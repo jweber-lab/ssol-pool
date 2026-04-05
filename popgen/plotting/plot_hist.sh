@@ -33,6 +33,7 @@ HIST_MODE="count"
 OVERLAY=false
 MAX_GROUPS=30
 Q_LINES="0.5,0.95,0.99"
+COMPARE=""
 WIDTH=12
 HEIGHT=8
 DPI=300
@@ -75,7 +76,8 @@ Optional:
   --hist-mode MODE         Histogram bar y-axis: count or density (ggplot after_stat(density) for bars only; default: count)
   --overlay                Overlay groups in one panel (color/fill = group); otherwise facet by group
   --max-groups N           Refuse to plot >N groups (default: 30)
-  --q-lines LIST           Quantile lines to mark (comma-separated; default: 0.5,0.95,0.99)
+  --q-lines LIST           Quantiles of the pooled distribution to mark (comma-separated; default: 0.5,0.95,0.99)
+  --compare A,B            Keep two groups only; add diff panel (bin proportion A minus B; same breaks as histogram)
   --width N                Figure width in inches (default: 12)
   --height N               Figure height in inches (default: 8)
   --dpi N                  DPI for PNG (default: 300)
@@ -100,6 +102,9 @@ Examples:
 
   # Subset to chromosome and use ranks:
   $0 --hdf5-dir ./collated --chromosome ptg000624l --stat fst --y-value rank --overlay -o ./plots
+
+  # Two-sample bin proportion difference (histogram + diff; breaks/quantiles pooled over all data before filter):
+  $0 --hdf5-dir ./collated --stat coverage --compare Echo,Cheney --overlay -o ./plots
 EOF
 }
 
@@ -129,6 +134,7 @@ while [[ $# -gt 0 ]]; do
     --overlay) OVERLAY=true; shift ;;
     --max-groups) MAX_GROUPS="$2"; shift 2 ;;
     --q-lines) Q_LINES="$2"; shift 2 ;;
+    --compare) COMPARE="$2"; shift 2 ;;
     --width) WIDTH="$2"; shift 2 ;;
     --height) HEIGHT="$2"; shift 2 ;;
     --dpi) DPI="$2"; shift 2 ;;
@@ -175,6 +181,7 @@ R_CMD+=(--output-dir "$OUTPUT_DIR" --width "$WIDTH" --height "$HEIGHT" --dpi "$D
 [[ -n "$Y_VALUE" ]] && R_CMD+=(--y-value "$Y_VALUE")
 [[ -n "$TRANSFORM" ]] && R_CMD+=(--transform "$TRANSFORM")
 R_CMD+=(--bins "$BINS" --panels "$PANELS" --hist-mode "$HIST_MODE" --max-groups "$MAX_GROUPS" --q-lines "$Q_LINES")
+[[ -n "$COMPARE" ]] && R_CMD+=(--compare "$COMPARE")
 [[ "$OVERLAY" == true ]] && R_CMD+=(--overlay)
 [[ "$VERBOSE" == true ]] && R_CMD+=(--verbose)
 

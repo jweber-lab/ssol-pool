@@ -4,7 +4,10 @@
 # plot_hist.R
 #
 # Genome-wide (or subset) distributions for a chosen statistic.
-# By default only a histogram is drawn; optional panels: kernel density, ECDF.
+# By default only a histogram is drawn; optional panels: kernel density, ECDF, diff.
+# Histogram bin breaks and --q-lines quantiles use the pooled (all-group) distribution
+# so facets/overlays are comparable. --compare A,B filters to two groups and adds a
+# diff panel: proportion in bin for A minus proportion for B on those same breaks.
 # --hist-mode controls histogram bar heights (count vs density), not the optional density panel.
 #
 # Inputs mirror plot_region.R: reads from TSV dirs and/or HDF5 (collate output).
@@ -53,8 +56,8 @@ option_list <- list(
     help = "Transform on the statistic axis: none, log, or asinh [default: %default]"),
   make_option("--bins", type = "integer", default = 60L, help = "Histogram bins [default: %default]"),
   make_option("--panels", type = "character", default = "histogram",
-    help = paste0("Comma-separated figure panels: histogram, density, ecdf ",
-      "(default: histogram only; density here is a separate smooth curve, not --hist-mode).")),
+    help = paste0("Comma-separated figure panels: histogram, density, ecdf, diff ",
+      "(diff requires --compare; default: histogram only; density = kernel curve, not --hist-mode).")),
   make_option("--hist-mode", type = "character", default = "count",
     help = "Histogram bar heights: count or after_stat(density) for bars only [default: %default]"),
   make_option("--overlay", action = "store_true", default = FALSE,
@@ -62,7 +65,9 @@ option_list <- list(
   make_option("--max-groups", type = "integer", default = 30L,
     help = "Maximum number of groups to plot (to avoid unreadable legends) [default: %default]"),
   make_option("--q-lines", type = "character", default = "0.5,0.95,0.99",
-    help = "Comma-separated quantiles to mark as vertical lines [default: %default]"),
+    help = "Comma-separated quantiles of the pooled sample to mark as vertical lines [default: %default]"),
+  make_option("--compare", type = "character", default = NULL,
+    help = "Two group names 'A,B' (first minus second in diff panel); limits data to those groups and adds diff panel"),
   make_option("--width", type = "numeric", default = 12, help = "Figure width (in)"),
   make_option("--height", type = "numeric", default = 8, help = "Figure height (in)"),
   make_option("--dpi", type = "numeric", default = NULL, help = "DPI for PNG (default: 300)"),
@@ -71,6 +76,15 @@ option_list <- list(
 )
 opts <- parse_args(OptionParser(option_list = option_list, usage = "usage: %prog [options]"))
 
+compare_pair <- NULL
+if (!is.null(opts$compare) && nzchar(opts$compare)) {
+  parts <- trimws(strsplit(opts$compare, ",")[[1]])
+  if (length(parts) != 2L || !nzchar(parts[1L]) || !nzchar(parts[2L])) {
+    stop("--compare must be exactly two comma-separated group names, e.g. Echo,Cheney")
+  }
+  compare_pair <- parts
+}
+
 valid_stats <- c("coverage", "mapq", "n_snps", "pi", "theta", "tajima_d", "fst", "pbe")
 if (!opts$stat %in% valid_stats) stop("--stat must be one of: ", paste(valid_stats, collapse = ", "))
 if (!opts$`y-value` %in% c("value", "rank", "quantile")) stop("--y-value must be one of: value, rank, quantile")
@@ -78,11 +92,14 @@ if (!opts$transform %in% c("none", "log", "asinh")) stop("--transform must be on
 if (!opts$`hist-mode` %in% c("count", "density")) stop("--hist-mode must be one of: count, density")
 panels_req <- trimws(tolower(strsplit(opts$panels, ",")[[1]]))
 panels_req <- panels_req[nzchar(panels_req)]
-valid_panels <- c("histogram", "density", "ecdf")
+valid_panels <- c("histogram", "density", "ecdf", "diff")
 bad_p <- setdiff(panels_req, valid_panels)
 if (length(bad_p) > 0) stop("Unknown --panels: ", paste(bad_p, collapse = ", "), ". Valid: ", paste(valid_panels, collapse = ", "))
 if (length(panels_req) == 0) stop("--panels must list at least one of: ", paste(valid_panels, collapse = ", "))
 panels_req <- panels_req[!duplicated(panels_req)]
+if (!is.null(compare_pair) && !"diff" %in% panels_req) panels_req <- c(panels_req, "diff")
+panels_req <- panels_req[!duplicated(panels_req)]
+if ("diff" %in% panels_req && is.null(compare_pair)) stop("Panel 'diff' requires --compare 'A,B'")
 
 format_parts <- trimws(tolower(strsplit(opts$`plot-format`, ",")[[1]]))
 if ("both" %in% format_parts) format_parts <- c(setdiff(format_parts, "both"), "png", "pdf")
@@ -392,22 +409,81 @@ if (length(groups) > opts$`max-groups`) {
   stop("Too many groups to plot (", length(groups), " > --max-groups ", opts$`max-groups`, "). Use subsetting inputs or increase --max-groups.")
 }
 
-orig_vals <- plot_df$value
 plot_df <- plot_df %>% mutate(x_val = apply_transform(.data$value, opts$transform))
 
+# Pooled x range -> shared histogram bin breaks for every group / facet / overlay
+xv_all <- plot_df$x_val[is.finite(plot_df$x_val)]
+if (length(xv_all) < 1L) stop("No finite x values to plot (after transform).")
+rng_x <- range(xv_all, na.rm = TRUE)
+if (!is.finite(rng_x[1]) || !is.finite(rng_x[2])) stop("Non-finite range for transformed x values.")
+if (rng_x[1] == rng_x[2]) {
+  eps <- if (rng_x[1] == 0) 0.5 else max(abs(rng_x[1]) * 1e-6, .Machine$double.eps)
+  rng_x <- rng_x + c(-eps, eps)
+}
+nb <- as.integer(opts$bins)
+if (is.na(nb) || nb < 1L) stop("--bins must be a positive integer")
+global_breaks <- seq(rng_x[1], rng_x[2], length.out = nb + 1L)
+
+# Quantiles of the pooled distribution (raw --stat values), drawn at transformed positions
 q_probs <- suppressWarnings(as.numeric(trimws(strsplit(opts$`q-lines`, ",")[[1]])))
 q_probs <- q_probs[is.finite(q_probs) & q_probs >= 0 & q_probs <= 1]
 q_probs <- unique(q_probs)
-q_df <- plot_df %>%
-  group_by(.data$group) %>%
-  summarise(.q = list(stats::quantile(.data$value, probs = q_probs, na.rm = TRUE)), .groups = "drop") %>%
-  mutate(q_prob = list(q_probs)) %>%
-  # String column names in cols= (not .data$...) for tidyselect >= 1.2.0
-  tidyr::unnest(cols = c(".q", "q_prob"), keep_empty = TRUE) %>%
-  rename(q_value = `.q`)
-q_df <- q_df %>% mutate(q_x = apply_transform(.data$q_value, opts$transform))
+q_df <- if (length(q_probs) > 0L) {
+  tibble(
+    q_prob = q_probs,
+    q_value = as.numeric(stats::quantile(plot_df$value, probs = q_probs, na.rm = TRUE))
+  ) %>%
+    mutate(q_x = apply_transform(.data$q_value, opts$transform))
+} else {
+  tibble(q_prob = numeric(0), q_value = numeric(0), q_x = numeric(0))
+}
+
+# Original-scale values for x-axis tick mapping (pooled; unchanged by --compare filter)
+orig_vals_pooled_for_x_scale <- plot_df$value
+
+compare_suffix <- ""
+if (!is.null(compare_pair)) {
+  miss <- setdiff(compare_pair, unique(plot_df$group))
+  if (length(miss) > 0L) {
+    stop("--compare name(s) not in data: ", paste(miss, collapse = ", "), ". Available: ", paste(sort(unique(plot_df$group)), collapse = ", "))
+  }
+  compare_suffix <- paste0(
+    "_compare_",
+    gsub("[^A-Za-z0-9]+", "_", compare_pair[1L]),
+    "_vs_",
+    gsub("[^A-Za-z0-9]+", "_", compare_pair[2L])
+  )
+  plot_df <- plot_df %>% filter(.data$group %in% compare_pair)
+  plot_df$group <- factor(plot_df$group, levels = compare_pair)
+  groups <- compare_pair
+}
+
+if (nrow(plot_df) == 0L) stop("No rows left after --compare filter.")
+
+plot_df$group <- as.character(plot_df$group)
 
 pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(groups)), groups)
+
+# Bin proportion difference (compare_pair[1] - compare_pair[2]) on global breaks
+diff_df <- NULL
+bar_width_diff <- mean(diff(global_breaks), na.rm = TRUE) * 0.92
+if (!is.finite(bar_width_diff) || bar_width_diff <= 0) bar_width_diff <- 0.01
+if ("diff" %in% panels_req) {
+  g1 <- compare_pair[1L]
+  g2 <- compare_pair[2L]
+  x1 <- plot_df$x_val[plot_df$group == g1]
+  x2 <- plot_df$x_val[plot_df$group == g2]
+  x1 <- x1[is.finite(x1)]
+  x2 <- x2[is.finite(x2)]
+  h1 <- graphics::hist(x1, breaks = global_breaks, plot = FALSE, include.lowest = TRUE)
+  h2 <- graphics::hist(x2, breaks = global_breaks, plot = FALSE, include.lowest = TRUE)
+  n1 <- sum(h1$counts)
+  n2 <- sum(h2$counts)
+  p1 <- if (n1 > 0L) h1$counts / n1 else rep(0, length(h1$counts))
+  p2 <- if (n2 > 0L) h2$counts / n2 else rep(0, length(h2$counts))
+  mids <- (h1$breaks[-length(h1$breaks)] + h1$breaks[-1]) / 2
+  diff_df <- tibble(mid_x = mids, diff_prop = as.numeric(p1 - p2))
+}
 
 theme_panel <- theme_bw(base_size = PLOT_BASE_SIZE, base_family = "sans") +
   theme(panel.grid.minor = element_blank())
@@ -431,7 +507,7 @@ if (opts$overlay) {
 p_hist <- ggplot(plot_df, hist_aes) +
   geom_histogram(
     aes(y = if (opts$`hist-mode` == "density") after_stat(density) else after_stat(count)),
-    bins = opts$bins,
+    breaks = global_breaks,
     alpha = if (opts$overlay) 0.4 else 0.85,
     position = "identity",
     color = "grey30",
@@ -457,34 +533,41 @@ p_ecdf <- ggplot(plot_df, ecdf_aes) +
 if (opts$overlay) p_ecdf <- p_ecdf + scale_color_manual(name = legend_title, values = pal, drop = FALSE)
 if (!opts$overlay) p_ecdf <- p_ecdf + facet_wrap(~ group)
 
-# Quantile lines: draw on histogram and/or kernel density panel when present
+# Quantile lines (pooled distribution): same x-intercepts in every facet/overlay
 if (nrow(q_df) > 0) {
   if ("histogram" %in% panels_req) {
-    if (opts$overlay) {
-      p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x, color = .data$group), linewidth = 0.4, alpha = 0.8, show.legend = FALSE)
-    } else {
-      p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.8)
-    }
+    p_hist <- p_hist + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.85, color = "grey20")
   }
   if ("density" %in% panels_req) {
-    if (opts$overlay) {
-      p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x, color = .data$group), linewidth = 0.4, alpha = 0.8, show.legend = FALSE)
-    } else {
-      p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.8)
-    }
+    p_dens <- p_dens + geom_vline(data = q_df, aes(xintercept = .data$q_x), linewidth = 0.4, alpha = 0.85, color = "grey20")
   }
 }
 
-xs <- build_x_scale(orig_vals, opts$transform)
+xs <- build_x_scale(orig_vals_pooled_for_x_scale, opts$transform)
 if (!is.null(xs)) {
   if ("histogram" %in% panels_req) p_hist <- p_hist + xs
   if ("density" %in% panels_req) p_dens <- p_dens + xs
   if ("ecdf" %in% panels_req) p_ecdf <- p_ecdf + xs
 }
 
+p_diff <- NULL
+if ("diff" %in% panels_req) {
+  p_diff <- ggplot(diff_df, aes(x = .data$mid_x, y = .data$diff_prop)) +
+    geom_hline(yintercept = 0, linetype = 2, linewidth = 0.3, color = "grey55") +
+    geom_col(width = bar_width_diff, fill = "steelblue4", alpha = 0.88, color = "grey25", linewidth = 0.12) +
+    labs(
+      x = xlab,
+      y = "\u0394 bin proportion (1st \u2212 2nd in --compare)",
+      title = paste0("Bin proportion difference (", compare_pair[1L], " \u2212 ", compare_pair[2L], ")")
+    ) +
+    theme_panel
+  if (!is.null(xs)) p_diff <- p_diff + xs
+}
+
 plot_list <- list()
 for (pname in panels_req) {
-  plot_list[[length(plot_list) + 1L]] <- switch(pname, histogram = p_hist, density = p_dens, ecdf = p_ecdf)
+  plot_list[[length(plot_list) + 1L]] <- switch(pname,
+    histogram = p_hist, density = p_dens, ecdf = p_ecdf, diff = p_diff)
 }
 n_p <- length(plot_list)
 # Match previous 3-panel layout: total height opts$height for three stacked panels; one panel uses full opts$height
@@ -505,7 +588,7 @@ overlay_suffix <- if (opts$overlay) "_overlay" else ""
 tfm_suffix <- if (opts$transform != "none") paste0("_", opts$transform, "trans") else ""
 yv_suffix <- if (opts$`y-value` != "value" && opts$stat %in% c("pi", "theta", "tajima_d", "fst", "pbe")) paste0("_", opts$`y-value`) else ""
 panels_suffix <- if (length(panels_req) == 1L && panels_req[1] == "histogram") "" else paste0("_", paste(panels_req, collapse = "-"))
-base_name <- paste0(opts$`file-prefix`, "hist_", stat_safe, pos_suffix, overlay_suffix, tfm_suffix, yv_suffix, panels_suffix)
+base_name <- paste0(opts$`file-prefix`, "hist_", stat_safe, pos_suffix, overlay_suffix, compare_suffix, tfm_suffix, yv_suffix, panels_suffix)
 
 dpi_use <- if (!is.null(opts$dpi) && !is.na(opts$dpi)) opts$dpi else PLOT_DPI
 for (fmt in format_parts) {
