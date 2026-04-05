@@ -402,8 +402,9 @@ q_df <- plot_df %>%
   group_by(.data$group) %>%
   summarise(.q = list(stats::quantile(.data$value, probs = q_probs, na.rm = TRUE)), .groups = "drop") %>%
   mutate(q_prob = list(q_probs)) %>%
-  tidyr::unnest(cols = c(.data$.q, .data$q_prob), keep_empty = TRUE) %>%
-  rename(q_value = .data$.q)
+  # String column names in cols= (not .data$...) for tidyselect >= 1.2.0
+  tidyr::unnest(cols = c(".q", "q_prob"), keep_empty = TRUE) %>%
+  rename(q_value = `.q`)
 q_df <- q_df %>% mutate(q_x = apply_transform(.data$q_value, opts$transform))
 
 pal <- setNames(rep(PLOT_PALETTE_QUALITATIVE, length.out = length(groups)), groups)
