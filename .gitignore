@@ -98,6 +98,7 @@ help/
 reads/*
 primers/*
 */ptg*
+popgen/alignment/masking*
 
 # --- Optional: job logs and large generated files ---
 *.log

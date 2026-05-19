@@ -48,6 +48,15 @@ If you use this pipeline in your research, please cite this repository and the o
 |----------|-------------------|
 | **Unmasked** (or soft-masked; BWA treats both the same) | `--reference` in `process_poolseq.sh`; same FASTA for `variant_call.sh` mpileup |
 | **RepeatMasker BED** (e.g. `*.out.bed`) | `--filter-mask-total-bed` in `calculate_pi_theta.sh` / `calculate_fst.sh`; `--exclude-regions-bed` in `variant_call.sh` |
+
+**`.out` → BED:** convert RepeatMasker output with [`repeatmasker_bed.sh`](repeatmasker_bed.sh) (merges overlaps with bedtools by default):
+
+```bash
+./repeatmasker_bed.sh -i genome.fa.out -o genome.out.bed
+# If BAM/VCF use "chr" prefix but .out does not:
+./repeatmasker_bed.sh -i genome.fa.out -o genome.out.bed --chr-prefix chr
+```
+
 | **Unmasked + GFF** | `--reference` in `variant_csq.sh` (codon translation; must match GFF coordinates) |
 
 **Why not hard-mask before alignment?** Masking repeats as `N` before mapping can push reads to wrong loci (paralogs), adding false signal. It is better to map honestly, then drop low-confidence alignments and repeat intervals at the stats stage.

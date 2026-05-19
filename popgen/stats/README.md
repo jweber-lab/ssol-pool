@@ -66,7 +66,7 @@ After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked
 
 ### End-to-end example
 
-Assume `ref.unmasked.fa`, `repeats.out.bed` from RepeatMasker, and BAMs from alignment.
+Assume `ref.unmasked.fa`, `genome.out.bed` from `repeatmasker_bed.sh`, and BAMs from alignment.
 
 ```bash
 # 1–2. Alignment (in popgen/alignment/)
@@ -74,13 +74,13 @@ Assume `ref.unmasked.fa`, `repeats.out.bed` from RepeatMasker, and BAMs from ali
 
 # 3. Diversity + FST (same repeat BED for comparable windows)
 ./calculate_pi_theta.sh --sample-info ../../sample_info.csv \
-  --filter-mask-total-bed repeats.out.bed -o pi_out ...
+  --filter-mask-total-bed genome.out.bed -o pi_out ...
 ./calculate_fst.sh --sample-info ../../sample_info.csv \
-  --filter-mask-total-bed repeats.out.bed -o fst_out ...
+  --filter-mask-total-bed genome.out.bed -o fst_out ...
 
 # 4. Variants (unmasked ref; exclude repeats after call)
 ./variant_call.sh --reference ref.unmasked.fa --sample-info ../../sample_info.csv \
-  --exclude-regions-bed repeats.out.bed --also-tsv -o variants/calls.bcf
+  --exclude-regions-bed genome.out.bed --also-tsv -o variants/calls.bcf
 
 # 5. CSQ (unmasked ref + GFF; BCF from step 4)
 ./variant_csq.sh --bcf variants/calls.bcf --reference ref.unmasked.fa \
