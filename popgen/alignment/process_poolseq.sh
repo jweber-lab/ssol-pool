@@ -46,6 +46,8 @@ MULTIPLEXER=""
 FILE_PREFIX=""  # Optional prefix for output files (default: no prefix)
 LOG_DIR_PARENT=""  # Parent log directory (passed from parallel mode to child jobs)
 BBTOOLS_MEMORY=""  # Maximum Java heap size for BBtools (e.g., "8g" or "16000m"), empty = auto
+BAM_MIN_MAPQ=0          # If >0, filter final BAM with samtools view -q (post-alignment)
+BAM_PRIMARY_ONLY=false  # If true, drop secondary/supplementary alignments (samtools view -F 2304)
 
 # Colors for output
 RED='\033[0;31m'
@@ -62,7 +64,9 @@ Required options:
   -n, --sample-name NAME      Sample name (e.g., Echo_Pool_S1)
   -1, --read1 FILE            Path to R1 fastq.gz file
   -2, --read2 FILE            Path to R2 fastq.gz file
-  -r, --reference FILE        Path to reference genome (FASTA, can be .gz)
+  -r, --reference FILE        Path to reference genome (FASTA, can be .gz).
+                              Use the **unmasked** assembly for alignment (see README:
+                              Repeat masking). Soft-masked FASTA behaves like unmasked for BWA.
   -o, --output-dir DIR        Output directory for final results (default: ./)
 
 Required for full pipeline:
@@ -81,6 +85,9 @@ Optional:
   --min-overlap0 N            Minimum overlap0 for bbmerge (default: 15)
   --trimq N                   Quality threshold for trimming in merge step (default: 20)
   --mpileup-min-qual N        Minimum quality for mpileup (default: 20)
+  --bam-min-mapq N            After merge, filter final BAM: keep reads with MAPQ >= N (default: 0 = off).
+                              Recommended for pop-gen stats: 20 (use with --bam-primary-only).
+  --bam-primary-only          After merge, exclude secondary and supplementary alignments from final BAM.
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
   --bbtools-memory SIZE       Maximum Java heap size for BBtools (e.g., "8g" or "16000m")
                               Default: auto-detect available memory and allocate 80% divided by parallel jobs
@@ -663,6 +670,14 @@ while [[ $# -gt 0 ]]; do
             MPILEUP_MIN_QUAL="$2"
             shift 2
             ;;
+        --bam-min-mapq)
+            BAM_MIN_MAPQ="$2"
+            shift 2
+            ;;
+        --bam-primary-only)
+            BAM_PRIMARY_ONLY=true
+            shift
+            ;;
         --skip-sync)
             SKIP_SYNC=true
             shift
@@ -918,6 +933,8 @@ if [[ "$PARALLEL" == true ]]; then
         [[ -n "$BBTOOLS_MEMORY" ]] && CMD="$CMD --bbtools-memory \"$BBTOOLS_MEMORY\""
         [[ "$USE_GRENEDALF_SYNC" == true ]] && CMD="$CMD --use-grenedalf-sync"
         [[ "$SKIP_SYNC" == true ]] && CMD="$CMD --skip-sync"
+        [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null && CMD="$CMD --bam-min-mapq \"$BAM_MIN_MAPQ\""
+        [[ "$BAM_PRIMARY_ONLY" == true ]] && CMD="$CMD --bam-primary-only"
         # Pass CSV file path to each job so it can update it when BAM is created
         [[ -n "$SAMPLE_INFO_CSV" ]] && CMD="$CMD --sample-info \"$SAMPLE_INFO_CSV\""
         # Pass log directory to child jobs so all logs go to the same place
@@ -1665,6 +1682,7 @@ if [[ ! -f "$FINAL_BAM" ]]; then
         samtools index -@ "$THREADS" "$FINAL_BAM"
     fi
     log "BAM merging complete"
+
     # For MAPQ threshold vs depth assessment, see mapq_threshold_counts.sh (e.g. run on this BAM with -i sample_info -o dir).
     # Update CSV file with BAM path if CSV file is provided
     # Use file locking if we might be running in parallel (when SAMPLE_INFO_CSV is provided,
@@ -1676,6 +1694,27 @@ if [[ ! -f "$FINAL_BAM" ]]; then
     fi
 else
     log "BAM files already merged, skipping..."
+fi
+
+# Optional post-alignment BAM QC (recommended before grenedalf / variant calling)
+if [[ -f "$FINAL_BAM" ]] && { [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null || [[ "$BAM_PRIMARY_ONLY" == true ]]; }; then
+    log "Filtering final BAM (MAPQ>=${BAM_MIN_MAPQ:-0}, primary-only=${BAM_PRIMARY_ONLY})..."
+    FILTERED_BAM="${FINAL_BAM%.bam}.filt.bam"
+    VIEW_ARGS=(-b -@ "$THREADS")
+    if [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null; then
+        VIEW_ARGS+=(-q "$BAM_MIN_MAPQ")
+    fi
+    if [[ "$BAM_PRIMARY_ONLY" == true ]]; then
+        VIEW_ARGS+=(-F 2304)  # exclude secondary (256) + supplementary (2048)
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dry_run "Would execute: samtools view ${VIEW_ARGS[*]} $FINAL_BAM > $FILTERED_BAM && mv && samtools index"
+    else
+        samtools view "${VIEW_ARGS[@]}" "$FINAL_BAM" > "$FILTERED_BAM"
+        mv "$FILTERED_BAM" "$FINAL_BAM"
+        samtools index -@ "$THREADS" "$FINAL_BAM"
+    fi
+    log "BAM filtering complete"
 fi
 
 # Step 7: Create mpileup

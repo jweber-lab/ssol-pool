@@ -33,6 +33,8 @@ DRY_RUN=false
 WINDOW_AVERAGE_POLICY="valid-loci"
 TAJIMA_D_POLICY="empirical-min-read-depth"
 REFERENCE_GENOME=""
+FILTER_MASK_TOTAL_FASTA=""
+FILTER_MASK_TOTAL_BED=""
 FILE_PREFIX=""  # Optional prefix for output files (default: no prefix)
 PARALLEL_WINDOWS=false  # Run multiple window/step combinations in parallel
 PARALLEL_MAX_JOBS=0     # Maximum concurrent window jobs (0 = number of CPU cores)
@@ -80,6 +82,8 @@ Optional options:
   --window-average-policy     Window averaging policy: window-length, available-loci, valid-loci, valid-snps, sum (default: valid-loci)
   --tajima-d-policy           Tajima's D denominator policy: empirical-min-read-depth, provided-min-read-depth, popoolation-bugs, pool-size, uncorrected (default: empirical-min-read-depth)
   --reference-genome FILE     Reference genome FASTA file (optional, for better chromosome ordering)
+  --filter-mask-total-fasta FILE  Grenedalf mask FASTA (vcftools-style; optional; exclude repeats from windows)
+  --filter-mask-total-bed FILE    RepeatMasker BED (or other) for grenedalf to skip masked intervals (optional)
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
   --separator-char SEP        Output separator: comma, tab, space, semicolon (default: comma)
   --overwrite-output          Allow overwriting existing output files (default: false)
@@ -368,6 +372,14 @@ while [[ $# -gt 0 ]]; do
             REFERENCE_GENOME="$2"
             shift 2
             ;;
+        --filter-mask-total-fasta)
+            FILTER_MASK_TOTAL_FASTA="$2"
+            shift 2
+            ;;
+        --filter-mask-total-bed)
+            FILTER_MASK_TOTAL_BED="$2"
+            shift 2
+            ;;
         --file-prefix)
             FILE_PREFIX="$2"
             shift 2
@@ -413,6 +425,23 @@ if [[ -z "$OUTPUT_DIR" ]]; then
     log_error "Missing required argument: --output-dir"
     usage
     exit 1
+fi
+
+# Validate repeat mask inputs (grenedalf accepts one mask type)
+if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
+    if [[ ! -f "$FILTER_MASK_TOTAL_FASTA" ]]; then
+        log_error "FASTA mask file not found: $FILTER_MASK_TOTAL_FASTA"
+        exit 1
+    fi
+fi
+if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ "$DRY_RUN" == false ]]; then
+    if [[ ! -f "$FILTER_MASK_TOTAL_BED" ]]; then
+        log_error "BED mask file not found: $FILTER_MASK_TOTAL_BED"
+        exit 1
+    fi
+fi
+if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ -n "$FILTER_MASK_TOTAL_BED" ]]; then
+    log_warn "Both FASTA and BED mask files specified. Grenedalf uses only one (FASTA takes precedence if both are valid)."
 fi
 
 # Initialize log file (create output/log directory)
@@ -776,6 +805,12 @@ for i in "${!SAMPLE_BAMS[@]}"; do
         # Add reference genome if provided
         if [[ -n "$REFERENCE_GENOME" ]]; then
             GRENEDALF_CMD+=(--reference-genome-fasta "$REFERENCE_GENOME")
+        fi
+
+        if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]]; then
+            GRENEDALF_CMD+=(--filter-mask-total-fasta "$FILTER_MASK_TOTAL_FASTA")
+        elif [[ -n "$FILTER_MASK_TOTAL_BED" ]]; then
+            GRENEDALF_CMD+=(--filter-mask-total-bed "$FILTER_MASK_TOTAL_BED")
         fi
         
         # Add file prefix if provided (goes before "diversity" base name)

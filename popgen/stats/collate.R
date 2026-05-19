@@ -8,18 +8,19 @@
 # sample/pop1,pop2/pop1,pop2,pop3 as columns. Missing or empty FST/PBE input
 # dirs are skipped without failing.
 # Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR]
-#        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [options]
+#        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [--variant-feature-dir DIR] [options]
 # Options: --drop-all-na  Drop rows/sites where every statistic value is NA before ranking/collation.
 #
 # Output files:
 #   diversity_w{W}_s{S}.h5  (windowed only; single is not supported)
 #     Group /windows: chr, start, end, sample, pi, theta, tajima_d,
-#     *_rank, *_quantile, mean_coverage, mean_mapping_quality, n_snps (total.passed), n_total (total.passed + total.invariant)
+#     *_rank, *_quantile, mean_coverage, mean_mapping_quality, n_snps (total.passed), n_total (total.passed + total.invariant),
+#     optional n_sites / n_csq_* / n_region_* / n_effect_* when --variant-feature-dir is set
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
 #   fst_w{W}_s{S}.h5  (or fst_single.h5)
 #     Group /windows or /sites: chr, start, end, pos, pop1, pop2, fst,
-#     fst_rank, fst_quantile, n_snps (optional)
+#     fst_rank, fst_quantile, n_snps (optional), optional variant feature counts from --variant-feature-dir
 #   fst_*_summary.tsv  Companion summary by pop1, pop2
 #
 #   pbe_w{W}_s{S}.h5  (or pbe_single.h5)
@@ -362,7 +363,7 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   d %>% select(any_of(c("chr", "pos", "start", "end", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
 }
 
-collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, write_summary = TRUE, verbose = FALSE) {
+collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, variant_feature_dir = NULL, write_summary = TRUE, verbose = FALSE) {
   infos <- find_diversity_files(diversity_dir)
   if (length(infos) == 0) return(invisible(NULL))
   scale_key <- vapply(infos, function(x) {
@@ -420,6 +421,18 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
         if (verbose) message("[verbose] diversity ", key, " after seq_qual join: n_row ", n_before_join, " -> ", nrow(d), " (duplicates if >before)")
       }
     }
+    if (!is.null(variant_feature_dir) && nzchar(variant_feature_dir) && dir.exists(variant_feature_dir)) {
+      vf <- load_variant_features_tsv(variant_feature_dir, scale_infos[[1]]$window_size, scale_infos[[1]]$step_size)
+      if (!is.null(vf)) {
+        n_before_join <- nrow(d)
+        vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
+        if (length(vf_cols) > 0L) {
+          vf <- vf %>% mutate(across(any_of(vf_cols), as.numeric))
+          d <- d %>% left_join(vf, by = c("chr", "start", "end"))
+        }
+        if (verbose) message("[verbose] diversity ", key, " after variant features join: n_row ", n_before_join, " -> ", nrow(d))
+      }
+    }
     out_path <- file.path(output_dir, paste0("diversity_", key, ".h5"))
     write_diversity_h5(d, out_path)
     message("Wrote ", out_path)
@@ -437,11 +450,14 @@ write_diversity_h5 <- function(d, path) {
   grp[["start"]] <- as.numeric(d$start)
   grp[["end"]] <- as.numeric(d$end)
   grp[["sample"]] <- as.character(d$sample)
-  num_cols <- intersect(
+  core_num <- intersect(
     c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile",
       "tajima_d_rank", "tajima_d_quantile", "mean_coverage", "mean_mapping_quality", "n_snps", "n_total"),
     names(d)
   )
+  vf_num <- grep("^n_(csq|region|effect|sites)", names(d), value = TRUE, ignore.case = TRUE)
+  vf_num <- vf_num[vapply(vf_num, function(nm) is.numeric(d[[nm]]) || is.integer(d[[nm]]), logical(1L))]
+  num_cols <- unique(c(core_num, vf_num))
   for (col in num_cols) grp[[col]] <- as.numeric(d[[col]])
   invisible()
 }
@@ -538,7 +554,7 @@ write_fst_h5 <- function(d, out_path, group_name = "windows") {
   message("Wrote ", out_path)
 }
 
-collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_tsv_dir = NULL, drop_all_na = FALSE, verbose = FALSE) {
+collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_tsv_dir = NULL, variant_feature_dir = NULL, drop_all_na = FALSE, verbose = FALSE) {
   infos <- find_fst_files(fst_dir)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
@@ -563,6 +579,17 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
       message("FST: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
     }
     is_single <- scale == "single"
+    if (!is_single && !is.null(variant_feature_dir) && nzchar(variant_feature_dir) && dir.exists(variant_feature_dir)) {
+      vf <- load_variant_features_tsv(variant_feature_dir, scale_infos[[1]]$window_size, scale_infos[[1]]$step_size)
+      if (!is.null(vf)) {
+        vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
+        if (length(vf_cols) > 0L) {
+          vf <- vf %>% mutate(across(any_of(vf_cols), as.numeric))
+          d_long <- d_long %>% left_join(vf, by = c("chr", "start", "end"))
+        }
+        if (verbose) message("[verbose] FST ", scale, " joined variant feature columns (first 5): ", paste(head(vf_cols, 5), collapse = ", "))
+      }
+    }
     if (is_single && single_position_merged && !is.null(single_position_data)) {
       single_position_data$fst <- d_long
       next
@@ -674,6 +701,8 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   keep_cols <- c("chr", "start", "end", "pos", "pop1", "pop2", "pop3", "pbe")
   if ("pbe_rank" %in% names(all_d)) keep_cols <- c(keep_cols, "pbe_rank")
   if ("pbe_quantile" %in% names(all_d)) keep_cols <- c(keep_cols, "pbe_quantile")
+  vf_extra <- grep("^n_(csq|region|effect|sites)", names(all_d), value = TRUE, ignore.case = TRUE)
+  keep_cols <- unique(c(keep_cols, vf_extra))
   keep_cols <- intersect(keep_cols, names(all_d))
   all_d <- all_d[, keep_cols]
   h5 <- hdf5r::H5File$new(out_path, mode = "w")
@@ -685,7 +714,7 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   message("Wrote ", out_path)
 }
 
-collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, drop_all_na = FALSE, verbose = FALSE) {
+collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_feature_dir = NULL, drop_all_na = FALSE, verbose = FALSE) {
   infos <- find_pbe_files(pbe_dir)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
@@ -699,6 +728,19 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
     tbl_list <- tbl_list[!vapply(tbl_list, is.null, logical(1L))]
     if (length(tbl_list) == 0) next
     is_single <- scale == "single"
+    if (!is_single && !is.null(variant_feature_dir) && nzchar(variant_feature_dir) && dir.exists(variant_feature_dir)) {
+      vf <- load_variant_features_tsv(variant_feature_dir, scale_infos[[1]]$window_size, scale_infos[[1]]$step_size)
+      if (!is.null(vf)) {
+        vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
+        if (length(vf_cols) > 0L) {
+          vf <- vf %>% mutate(across(any_of(vf_cols), as.numeric))
+          tbl_list <- lapply(tbl_list, function(x) {
+            x$data <- x$data %>% left_join(vf, by = c("chr", "start", "end"))
+            x
+          })
+        }
+      }
+    }
     if (is_single && single_position_merged && !is.null(single_position_data)) {
       single_position_data$pbe <- tbl_list
       next
@@ -755,6 +797,27 @@ add_n_snps_from_variants <- function(window_df, variant_tsv_dir) {
     filter(.data$pos >= .data$start, .data$pos <= .data$end) %>%
     count(chr, start, end, name = "n_snps")
   window_df %>% left_join(n_snps_df, by = c("chr", "start", "end"))
+}
+
+# Per-window variant feature counts from variant_csq_windows.R (variant_features_wW_sS.tsv)
+find_variant_feature_file <- function(variant_feature_dir, window_size, step_size) {
+  if (is.null(variant_feature_dir) || !nzchar(variant_feature_dir) || !dir.exists(variant_feature_dir)) return(NULL)
+  if (is.na(window_size) || is.na(step_size)) return(NULL)
+  pat <- sprintf("^variant_features_w%s_s%s\\.tsv$", window_size, step_size)
+  files <- list.files(variant_feature_dir, pattern = pat, full.names = TRUE, ignore.case = TRUE)
+  if (length(files) > 0L) return(files[[1L]])
+  NULL
+}
+
+load_variant_features_tsv <- function(variant_feature_dir, window_size, step_size) {
+  f <- find_variant_feature_file(variant_feature_dir, window_size, step_size)
+  if (is.null(f)) return(NULL)
+  d <- read_tab(f) %>% rename_all(tolower)
+  if (!all(c("chr", "start", "end") %in% names(d))) {
+    message("Variant features file missing chr/start/end: ", f)
+    return(NULL)
+  }
+  d
 }
 
 collate_variant_tsv <- function(variant_tsv_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL) {
@@ -871,6 +934,7 @@ option_list <- list(
   make_option(c("--pbe-dir"), type = "character", default = NULL, help = "Directory containing PBE TSV/CSV"),
   make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV"),
   make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with variant/sites TSV (e.g. from bcftools query export)"),
+  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv from variant_csq_windows.R"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
   make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Merge per-locus FST, PBE, and variant TSV into single_position.h5"),
   make_option(c("--no-summary"), action = "store_true", default = FALSE, help = "Do not write companion *_summary.tsv files"),
@@ -891,13 +955,13 @@ drop_all_na <- opts$`drop-all-na`
 single_position_data <- if (single_position_merged) list(fst = NULL, pbe = NULL, variants = NULL) else NULL
 
 if (!is.null(opts$`diversity-dir`) && dir.exists(opts$`diversity-dir`)) {
-  collate_diversity(opts$`diversity-dir`, opts$`output-dir`, opts$`seq-qual-dir`, opts$`variant-tsv-dir`, write_summary = write_summary, verbose = opts$verbose)
+  collate_diversity(opts$`diversity-dir`, opts$`output-dir`, opts$`seq-qual-dir`, opts$`variant-tsv-dir`, opts$`variant-feature-dir`, write_summary = write_summary, verbose = opts$verbose)
 }
 if (!is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`)) {
-  collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
+  collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
 }
 if (!is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
-  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, drop_all_na = drop_all_na, verbose = opts$verbose)
+  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
 }
 if (!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) {
   collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data)

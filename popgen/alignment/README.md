@@ -40,12 +40,38 @@ If you use this pipeline in your research, please cite this repository and the o
 - **popoolation2** (optional) - for sync file generation and legacy analyses
   - Available at: https://sourceforge.net/projects/popoolation2/
 
-### Reference Genome
+### Reference genome and repeat masking
 
-First pass mapping was done to an temporary genome file:
+**Recommended practice for this pipeline:** align reads to the **unmasked** assembly, then exclude repeats when computing population-genetics statistics—not by hard-masking the reference before BWA.
+
+| Assembly | Role in this repo |
+|----------|-------------------|
+| **Unmasked** (or soft-masked; BWA treats both the same) | `--reference` in `process_poolseq.sh`; same FASTA for `variant_call.sh` mpileup |
+| **RepeatMasker BED** (e.g. `*.out.bed`) | `--filter-mask-total-bed` in `calculate_pi_theta.sh` / `calculate_fst.sh`; `--exclude-regions-bed` in `variant_call.sh` |
+| **Unmasked + GFF** | `--reference` in `variant_csq.sh` (codon translation; must match GFF coordinates) |
+
+**Why not hard-mask before alignment?** Masking repeats as `N` before mapping can push reads to wrong loci (paralogs), adding false signal. It is better to map honestly, then drop low-confidence alignments and repeat intervals at the stats stage.
+
+**Post-alignment BAM filtering** (`process_poolseq.sh`, after merge):
+
+- `--bam-min-mapq 20` — keep reads with MAPQ ≥ 20 in the final BAM.
+- `--bam-primary-only` — remove secondary and supplementary alignments (`samtools view -F 2304`).
+
+Example (recommended flags on top of your usual run):
+
+```bash
+./process_poolseq.sh \
+  --reference /path/to/ref.unmasked.fa \
+  --bam-min-mapq 20 \
+  --bam-primary-only \
+  ... other options ...
+```
+
+First pass mapping in this project used:
+
 - `worm_q10.medaka.purged.fa`
 
-The script will automatically index the reference genome if not already indexed.
+The script will automatically index the reference genome with BWA and `samtools faidx` if not already indexed.
 
 ## Installation
 

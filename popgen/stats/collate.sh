@@ -6,8 +6,8 @@
 # Wrapper for collate.R: discovers diversity, FST, and PBE TSV/CSV (from
 # calculate_pi_theta.sh, calculate_fst.sh, and PBE outputs) and writes
 # combined HDF5 plus *_summary.tsv to OUTPUT_DIR. Optional: --seq-qual-dir
-# for mean_coverage/mean_mapping_quality, --variant-tsv-dir for n_snps or
-# variants.h5. Missing/empty FST or PBE dirs are skipped.
+# for mean_coverage/mean_mapping_quality, --variant-tsv-dir for variants.h5,
+# --variant-feature-dir for variant_features_wW_sS.tsv joins. Missing/empty FST or PBE dirs are skipped.
 # For full output file list and variable naming (HDF5 groups, TSV columns),
 # see the header of collate.R.
 # Usage: See below or --help
@@ -20,6 +20,7 @@ FST_DIR=""
 PBE_DIR=""
 SEQ_QUAL_DIR=""
 VARIANT_TSV_DIR=""
+VARIANT_FEATURE_DIR=""
 OUTPUT_DIR=""
 RSCRIPT=""
 DRY_RUN=false
@@ -45,6 +46,7 @@ Input (at least one required):
 Optional:
   --seq-qual-dir DIR     Directory with seq_qual_metrics TSV (from seq_qual_metrics.sh)
   --variant-tsv-dir DIR  Directory with variant/sites TSV (e.g. from bcftools query export of BCF)
+  --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh)
   --output-dir DIR       Output directory for HDF5 files [default: ./collated]
   --rscript PATH         Path to Rscript [default: Rscript]
   --single-position-merged  Merge per-locus FST, PBE, and variant TSV into single_position.h5
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --pbe-dir) PBE_DIR="$2"; shift 2 ;;
         --seq-qual-dir) SEQ_QUAL_DIR="$2"; shift 2 ;;
         --variant-tsv-dir) VARIANT_TSV_DIR="$2"; shift 2 ;;
+        --variant-feature-dir) VARIANT_FEATURE_DIR="$2"; shift 2 ;;
         --output-dir|-o) OUTPUT_DIR="$2"; shift 2 ;;
         --rscript) RSCRIPT="$2"; shift 2 ;;
         --single-position-merged) SINGLE_POSITION_MERGED=true; shift ;;
@@ -111,6 +114,7 @@ ARGS=()
 [[ -n "$PBE_DIR" ]] && ARGS+=(--pbe-dir "$PBE_DIR")
 [[ -n "$SEQ_QUAL_DIR" ]] && ARGS+=(--seq-qual-dir "$SEQ_QUAL_DIR")
 [[ -n "$VARIANT_TSV_DIR" ]] && ARGS+=(--variant-tsv-dir "$VARIANT_TSV_DIR")
+[[ -n "$VARIANT_FEATURE_DIR" ]] && ARGS+=(--variant-feature-dir "$VARIANT_FEATURE_DIR")
 ARGS+=(--output-dir "$OUTPUT_DIR")
 [[ "$SINGLE_POSITION_MERGED" == true ]] && ARGS+=(--single-position-merged)
 [[ "$NO_SUMMARY" == true ]] && ARGS+=(--no-summary)

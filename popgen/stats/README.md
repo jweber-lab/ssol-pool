@@ -33,8 +33,8 @@ The analysis scripts calculate:
 **Common Requirements:**
 - **awk** - Required for PBS/PBE calculations
 - **samtools** - Required for BAM file processing (if using grenedalf)
-- **bcftools** - Required for variant_call.sh (VCF/BCF generation)
-- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r** - Required for collate.R
+- **bcftools** - Required for `variant_call.sh` and **`variant_csq.sh`** (csq)
+- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `collate.R`, `variant_csq.R`, and `variant_csq_windows.R`
 
 ### Input Files
 
@@ -52,6 +52,45 @@ The analysis scripts calculate:
     ```
   - Where each population column contains allele counts in the format: `A:T:G:C:N:del`
 
+## Repeat masking and reference assemblies
+
+After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked FASTA files. This pipeline follows a single coherent policy:
+
+1. **Alignment** ([`process_poolseq.sh`](../alignment/process_poolseq.sh)): use the **unmasked** reference. Optionally apply **`--bam-min-mapq 20 --bam-primary-only`** so the BAMs passed to stats exclude low-MAPQ and non-primary alignments.
+2. **Diversity (π, θ, Tajima's D)** (`calculate_pi_theta.sh`): BAM input; exclude repeat **windows** with **`--filter-mask-total-bed`** (same BED as below).
+3. **FST** (`calculate_fst.sh`): same **`--filter-mask-total-bed`** (or `--filter-mask-total-fasta`) as diversity.
+4. **Variants** (`variant_call.sh`): mpileup on the **same unmasked** reference as alignment; drop repeat-overlapping sites with **`--exclude-regions-bed`**.
+5. **Functional annotation** (`variant_csq.sh`): **`--reference` must be the unmasked assembly that matches your GFF** (not hard-masked). Run csq on a BCF that still has the same `chr`/`pos` as that assembly.
+
+**PBE** (`calculate_pbe.sh`) uses FST outputs, so repeat handling follows step 3.
+
+### End-to-end example
+
+Assume `ref.unmasked.fa`, `repeats.out.bed` from RepeatMasker, and BAMs from alignment.
+
+```bash
+# 1–2. Alignment (in popgen/alignment/)
+./process_poolseq.sh --reference ref.unmasked.fa --bam-min-mapq 20 --bam-primary-only ...
+
+# 3. Diversity + FST (same repeat BED for comparable windows)
+./calculate_pi_theta.sh --sample-info ../../sample_info.csv \
+  --filter-mask-total-bed repeats.out.bed -o pi_out ...
+./calculate_fst.sh --sample-info ../../sample_info.csv \
+  --filter-mask-total-bed repeats.out.bed -o fst_out ...
+
+# 4. Variants (unmasked ref; exclude repeats after call)
+./variant_call.sh --reference ref.unmasked.fa --sample-info ../../sample_info.csv \
+  --exclude-regions-bed repeats.out.bed --also-tsv -o variants/calls.bcf
+
+# 5. CSQ (unmasked ref + GFF; BCF from step 4)
+./variant_csq.sh --bcf variants/calls.bcf --reference ref.unmasked.fa \
+  --gff annotation.gff3 --output-dir csq_out
+
+# Windowed variant features + collate (see variant_csq_windows / collate README sections)
+```
+
+**Traceability:** `region_category` / `coding_effect` in csq output are plotting summaries; **`bcsq`** and **`csq_consequences`** retain full bcftools csq detail. See [popgen/alignment/README.md](../alignment/README.md) for BAM-filter details.
+
 ## Scripts
 
 **Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [popgen/alignment/](popgen/alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`.
@@ -60,9 +99,9 @@ The analysis scripts calculate:
 
 Generates **BCF** (variant calls) from BAM(s) using **bcftools** mpileup and call. Pipeline: bcftools mpileup → bcftools call → BCF. Uses **bcftools call -m** (multiallelic caller) for pool-seq rare variants and sites with more than two alleles.
 
-- **Input**: BAM file(s), reference FASTA (indexed with samtools faidx).
+- **Input**: BAM file(s), **unmasked** reference FASTA (indexed with samtools faidx; same assembly as alignment).
 - **Output**: BCF file (e.g. `calls.bcf`), indexed.
-- **Options**: `--output` or `--output-dir`, `--ploidy` (e.g. 1 for haploid pools), `--min-mapq` (default 20), `--min-baseq` (default 20), `--max-depth` (default 1000; increase for very high-coverage pool-seq), `--skip-indels` (SNPs only), `--indels-only` (indels only).
+- **Options**: `--output` or `--output-dir`, `--ploidy` (e.g. 1 for haploid pools), `--min-mapq` (default 20), `--min-baseq` (default 20), `--max-depth` (default 1000; increase for very high-coverage pool-seq), `--skip-indels` (SNPs only), `--indels-only` (indels only), **`--exclude-regions-bed`** (RepeatMasker BED; removes variants overlapping repeats after calling).
 
 **Typical next step (post-call filtering):**
 ```bash
@@ -76,18 +115,46 @@ bcftools index -f calls_filtered.bcf
 - Exclude very low-frequency alleles (e.g. AF &lt; 0.01): `bcftools view -i 'QUAL>=20 && DP>10 && INFO/AF>0.01' calls.bcf -Ob -o calls_af01.bcf` (requires AF in INFO; add with bcftools +fill-tags or similar if needed).
 - For very high coverage, increase `--max-depth` (e.g. 2000) or set it based on average depth from `seq_qual_metrics.sh` (in popgen/alignment/) output.
 
+### variant_csq.sh / variant_csq.R
+
+Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suitable for csq (see [bcftools consequence calling](https://samtools.github.io/bcftools/howtos/csq-calling.html)). Produces an annotated BCF and a **site-level TSV** with:
+
+- **`bcsq`**: raw `INFO/BCSQ` from csq (full detail).
+- **`csq_consequences`**: semicolon-separated list of verbatim consequence tokens parsed from BCSQ.
+- **`region_category`**, **`coding_effect`**: derived columns for plotting, mapped from csq tokens via a built-in table (extend or override with `--map-tsv` in `variant_csq.R`). For variants with multiple transcript annotations, the single-row categories use the **highest-severity** consequence for these two columns only; the raw `bcsq` string is unchanged.
+- Optional **`--output-long-tsv`**: one row per BCSQ sub-record (`variant_csq.sh` passes through to R).
+
+**Reference:** use the **unmasked** FASTA that matches the GFF (see [Repeat masking](#repeat-masking-and-reference-assemblies) above). The BCF may be repeat-filtered; coordinates must still match that assembly.
+
+**Example:**
+```bash
+./variant_csq.sh --bcf calls_filtered.bcf --reference ref.unmasked.fa --gff genes.gff3 --output-dir csq_out
+# Annotated sites: csq_out/variants_csq.tsv ; CSQ BCF: csq_out/calls.csq.bcf
+```
+
+### variant_csq_windows.sh / variant_csq_windows.R
+
+Aggregates annotated sites into **per-window count tables** that match grenedalf tiling. Uses **`--template-dir`** (or **`--template-tsv`**) pointing at existing **windowed** FST or diversity TSVs whose names include `w{W}_s{S}` (e.g. `fst_w1000_s500.tsv`), so windows are identical to those in other stats. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns suitable for joining in collate.
+
+**Example:**
+```bash
+./variant_csq_windows.sh --sites-tsv csq_out/variants_csq.tsv --template-dir fst_out --output-dir variant_features
+```
+
 ### collate.sh / collate.R
 
 Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s). Computes integer rank (1..N) and 0–1 quantile per stat within (sample, window_size) for diversity, and within window for FST/PBE.
 
-- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`.
-- **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`.
+- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`).
+- **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_csq_*`, `n_region_*`, and `n_effect_*` counts alongside population-genetics stats.
 - **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE) is NA/NaN before ranking and collation.
 - **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out -o collated`
 
 ### calculate_pi_theta.sh
 
 Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D from BAM files (grenedalf) or sync files (popoolation2 fallback).
+
+**Repeat masking:** pass **`--filter-mask-total-bed`** (RepeatMasker BED) so grenedalf excludes repeat intervals from windowed diversity—the same option as `calculate_fst.sh`. BAMs should come from alignment to the unmasked reference (see [Repeat masking](#repeat-masking-and-reference-assemblies)).
 
 #### Usage
 
@@ -132,6 +199,8 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
 - `--max-coverage N`: Maximum coverage per site (default: 200)
 - `--min-count N`: Minimum allele count (default: 2, popoolation2 only)
 - `--pool-size N`: Pool size (haploid chromosomes) for Tajima's D calculation (default: 50)
+- `--filter-mask-total-bed FILE`: Exclude intervals in BED from windowed diversity (e.g. RepeatMasker `*.out.bed`)
+- `--filter-mask-total-fasta FILE`: Alternative grenedalf mask FASTA (use one of BED or FASTA)
 - `-t, --threads N`: Number of threads (default: 1)
 - `--dry-run`: Preview commands without executing (dry-run mode)
 

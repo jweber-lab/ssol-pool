@@ -41,6 +41,7 @@ PLOIDY=""
 SKIP_INDELS=false
 INDELS_ONLY=false
 ALSO_TSV=false
+EXCLUDE_REGIONS_BED=""
 DRY_RUN=false
 
 RED='\033[0;31m'
@@ -59,7 +60,8 @@ Input (choose one):
   -i, --sample-info FILE      CSV with columns: sample_name, bam_file
 
 Required (unless using --bcf-to-tsv):
-  -f, --reference FILE        Reference genome FASTA (must be indexed: .fai)
+  -f, --reference FILE        Reference FASTA for mpileup (must be indexed: .fai).
+                              Use the **same unmasked assembly** as alignment (see README: Repeat masking).
   -o, --output FILE           Output BCF path (e.g. calls.bcf)
   OR
   --output-dir DIR            Output directory; writes calls.bcf inside DIR
@@ -80,6 +82,8 @@ Optional:
   --indels-only               Output indels only (bcftools call -V snps)
   --also-tsv                  Also write TSV (for collate) alongside BCF
   --output-tsv FILE           TSV path when using --also-tsv (default: <bcf_base>.tsv)
+  --exclude-regions-bed FILE  After calling, drop variants overlapping this BED (e.g. RepeatMasker repeats;
+                              bcftools view -x -R). BAMs should be aligned to the same reference.
   --dry-run                   Preview commands without executing
   -h, --help                  Show this help
 
@@ -145,6 +149,7 @@ while [[ $# -gt 0 ]]; do
         --skip-indels) SKIP_INDELS=true; shift ;;
         --indels-only) INDELS_ONLY=true; shift ;;
         --also-tsv) ALSO_TSV=true; shift ;;
+        --exclude-regions-bed) EXCLUDE_REGIONS_BED="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
@@ -296,6 +301,22 @@ fi
 
 log "Indexing BCF..."
 dry_run_cmd "$BCFTOOLS" index -f "$OUTPUT_BCF" || true
+
+if [[ -n "$EXCLUDE_REGIONS_BED" ]]; then
+    if [[ ! -f "$EXCLUDE_REGIONS_BED" ]]; then
+        log_error "Exclude regions BED not found: $EXCLUDE_REGIONS_BED"
+        exit 1
+    fi
+    EXCL_BCF="${OUTPUT_BCF%.bcf}.norepeats.bcf"
+    log "Excluding variants in regions from $EXCLUDE_REGIONS_BED (-x -R) -> $EXCL_BCF"
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dry_run "$BCFTOOLS view -x -R $EXCLUDE_REGIONS_BED -Ob -o $EXCL_BCF $OUTPUT_BCF && mv"
+    else
+        "$BCFTOOLS" view -x -R "$EXCLUDE_REGIONS_BED" -Ob -o "$EXCL_BCF" "$OUTPUT_BCF"
+        mv "$EXCL_BCF" "$OUTPUT_BCF"
+        "$BCFTOOLS" index -f "$OUTPUT_BCF"
+    fi
+fi
 
 if [[ "$ALSO_TSV" == true ]] && [[ -n "$OUTPUT_TSV" ]]; then
     log "Writing TSV for collate (with per-sample AD for AF): $OUTPUT_TSV"
