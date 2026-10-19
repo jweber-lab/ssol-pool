@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-SITES_TSV=""
+SITES_TSVS=()
 TEMPLATE_DIR=""
 TEMPLATE_TSV=""
 OUTPUT_DIR="."
@@ -24,7 +24,7 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Required:
-  --sites-tsv FILE          Annotated TSV from variant_csq.R
+  --sites-tsv FILE          Annotated TSV from variant_csq.R; repeat to combine SNP and indel outputs
 
 One of:
   --template-dir DIR        Directory with *fst*w*_s*.tsv (or diversity window TSVs)
@@ -37,13 +37,14 @@ Optional:
   -h, --help
 
 Example:
-  $0 --sites-tsv variants_csq.tsv --template-dir fst_out --output-dir vf_out
+  $0 --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \\
+     --template-dir fst_out --output-dir vf_out
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --sites-tsv) SITES_TSV="$2"; shift 2 ;;
+        --sites-tsv) SITES_TSVS+=("$2"); shift 2 ;;
         --template-dir) TEMPLATE_DIR="$2"; shift 2 ;;
         --template-tsv) TEMPLATE_TSV="$2"; shift 2 ;;
         --output-dir|-o) OUTPUT_DIR="$2"; shift 2 ;;
@@ -61,11 +62,22 @@ if [[ ! -f "$WIN_R" ]]; then
     exit 1
 fi
 
-if [[ -z "$SITES_TSV" || ! -f "$SITES_TSV" ]]; then
-    log_error "Missing or invalid --sites-tsv"
+if [[ ${#SITES_TSVS[@]} -eq 0 ]]; then
+    log_error "Missing --sites-tsv"
     usage
     exit 1
 fi
+for f in "${SITES_TSVS[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        log_error "Sites TSV not found: $f"
+        exit 1
+    fi
+    if [[ "$f" == *,* ]]; then
+        log_error "Sites TSV path contains a comma (not supported): $f"
+        exit 1
+    fi
+done
+SITES_TSV=$(IFS=,; echo "${SITES_TSVS[*]}")
 if [[ -z "$TEMPLATE_DIR" && -z "$TEMPLATE_TSV" ]]; then
     log_error "Provide --template-dir or --template-tsv"
     usage

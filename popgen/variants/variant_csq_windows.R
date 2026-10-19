@@ -6,7 +6,8 @@
 # Aggregate annotated variant sites (variant_csq.R output) into per-window
 # counts using template grenedalf windows from FST or diversity TSV.
 #
-# Outputs variant_features_w{W}_s{S}.tsv with n_sites, n_csq_*, n_region_*, n_effect_*.
+# Outputs variant_features_w{W}_s{S}.tsv with n_sites, n_sites_<type> (snp/indel),
+# n_csq_*, n_region_*, n_effect_*, and genes / genes_protein_altering (semicolon-separated).
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -32,6 +33,13 @@ parse_window_step_name <- function(b) {
   }
 }
 
+# Union of semicolon-separated gene lists, sorted; NA when empty
+join_genes <- function(x) {
+  g <- unlist(strsplit(x[!is.na(x)], ";", fixed = TRUE))
+  g <- sort(unique(trimws(g[nzchar(trimws(g))])))
+  if (length(g) == 0L) NA_character_ else paste(g, collapse = ";")
+}
+
 sanitize_suffix <- function(x) {
   s <- gsub("[^A-Za-z0-9]+", "_", x)
   s <- gsub("^_+|_+$", "", s)
@@ -44,6 +52,15 @@ prepare_sites <- function(sites) {
   if (!all(c("chr", "pos") %in% names(d))) stop("sites TSV must have chr and pos")
   d$chr <- as.character(d$chr)
   d$pos <- as.numeric(d$pos)
+  if (!"variant_type" %in% names(d) && all(c("ref", "alt") %in% names(d))) {
+    ref <- as.character(d$ref)
+    alt <- sub(",.*", "", as.character(d$alt))
+    d$variant_type <- ifelse(nchar(ref) == 1L & nchar(alt) == 1L, "snp", ifelse(nchar(ref) != nchar(alt), "indel", "other"))
+  }
+  for (gc in c("genes", "genes_protein_altering")) {
+    if (!gc %in% names(d)) d[[gc]] <- NA_character_
+    d[[gc]] <- as.character(d[[gc]])
+  }
   if ("csq_consequences" %in% names(d)) {
     d$toks <- strsplit(ifelse(is.na(d$csq_consequences), "", d$csq_consequences), ";", fixed = TRUE)
     d$toks <- lapply(d$toks, function(z) unique(trimws(z[nzchar(trimws(z))])))
@@ -84,7 +101,7 @@ aggregate_hits <- function(sites, windows) {
 
   # Join sites to all windows on chr, then position overlap
   hits <- sites %>%
-    inner_join(windows, by = "chr", suffix = c("", ".w")) %>%
+    inner_join(windows, by = "chr", suffix = c("", ".w"), relationship = "many-to-many") %>%
     filter(.data$pos >= .data$start, .data$pos <= .data$end)
 
   by_win <- if (nrow(hits) > 0L) hits %>% group_by(.data$chr, .data$start, .data$end) else NULL
@@ -93,6 +110,22 @@ aggregate_hits <- function(sites, windows) {
     by_win %>% summarise(n_sites = dplyr::n(), .groups = "drop")
   } else {
     tibble(chr = character(0), start = numeric(0), end = numeric(0), n_sites = integer(0))
+  }
+
+  type_lev <- if ("variant_type" %in% names(sites)) sort(unique(na.omit(sites$variant_type))) else character(0)
+  genes_df <- NULL
+  if (nrow(hits) > 0L) {
+    for (vt in type_lev) {
+      cn <- paste0("n_sites_", sanitize_suffix(vt))
+      cnt <- by_win %>% summarise(!!cn := sum(.data$variant_type == vt, na.rm = TRUE), .groups = "drop")
+      first <- first %>% left_join(cnt, by = c("chr", "start", "end"))
+    }
+    genes_df <- by_win %>%
+      summarise(
+        genes = join_genes(.data$genes),
+        genes_protein_altering = join_genes(.data$genes_protein_altering),
+        .groups = "drop"
+      )
   }
 
   if (nrow(hits) > 0L) {
@@ -146,26 +179,37 @@ aggregate_hits <- function(sites, windows) {
     cn <- paste0("n_effect_", sanitize_suffix(ec))
     if (!cn %in% names(out)) out[[cn]] <- 0L
   }
+  for (vt in type_lev) {
+    cn <- paste0("n_sites_", sanitize_suffix(vt))
+    if (!cn %in% names(out)) out[[cn]] <- 0L
+  }
 
+  if (!is.null(genes_df)) {
+    out <- out %>% left_join(genes_df, by = c("chr", "start", "end"))
+  } else {
+    out$genes <- NA_character_
+    out$genes_protein_altering <- NA_character_
+  }
   out %>% arrange(.data$chr, .data$start, .data$end)
 }
 
 main <- function() {
   option_list <- list(
-    make_option(c("--sites-tsv"), type = "character", help = "Annotated variants TSV (variant_csq.R output)"),
+    make_option(c("--sites-tsv"), type = "character", help = "Annotated variants TSV(s) from variant_csq.R; comma-separate to combine (e.g. SNP and indel outputs)"),
     make_option(c("--output-dir"), type = "character", default = ".", help = "Directory for variant_features_wW_sS.tsv"),
     make_option(c("--template-dir"), type = "character", default = NULL, help = "Directory with *fst*w*_s*.tsv or similar window TSVs"),
     make_option(c("--template-tsv"), type = "character", default = NULL, help = "Single template TSV (if only one scale)")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
-  if (is.null(opt$`sites-tsv`) || !file.exists(opt$`sites-tsv`)) {
-    stop("--sites-tsv must exist")
+  sites_paths <- if (is.null(opt$`sites-tsv`)) character(0) else trimws(strsplit(opt$`sites-tsv`, ",", fixed = TRUE)[[1L]])
+  if (length(sites_paths) == 0L || !all(file.exists(sites_paths))) {
+    stop("--sites-tsv must exist: ", paste(sites_paths[!file.exists(sites_paths)], collapse = ", "))
   }
   if (is.null(opt$`template-dir`) && is.null(opt$`template-tsv`)) {
     stop("Provide --template-dir or --template-tsv")
   }
 
-  sites <- prepare_sites(read_tab(opt$`sites-tsv`))
+  sites <- prepare_sites(bind_rows(lapply(sites_paths, function(p) read_tab(p) %>% mutate(across(everything(), as.character)))) %>% readr::type_convert(col_types = readr::cols()))
 
   template_files <- if (!is.null(opt$`template-tsv`)) {
     c(opt$`template-tsv`)

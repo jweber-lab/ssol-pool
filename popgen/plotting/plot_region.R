@@ -338,7 +338,7 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
   }
 
   # --- FST HDF5 ---
-  fst_h5 <- list.files(hdir, pattern = "^fst_.*\\.h5$", full.names = TRUE)
+  fst_h5 <- prefer_window_h5(list.files(hdir, pattern = "^fst_.*\\.h5$", full.names = TRUE))
   if (length(fst_h5) > 0) {
     if (!is.null(window_size_use))
       fst_h5 <- fst_h5[grepl(paste0("_w", window_size_use), fst_h5, fixed = TRUE)]
@@ -361,7 +361,7 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
   }
 
   # --- PBE HDF5 ---
-  pbe_h5 <- list.files(hdir, pattern = "^pbe_.*\\.h5$", full.names = TRUE)
+  pbe_h5 <- prefer_window_h5(list.files(hdir, pattern = "^pbe_.*\\.h5$", full.names = TRUE))
   if (length(pbe_h5) > 0) {
     if (!is.null(window_size_use))
       pbe_h5 <- pbe_h5[grepl(paste0("_w", window_size_use), pbe_h5, fixed = TRUE)]
@@ -628,6 +628,7 @@ base_name <- paste0(opts$`file-prefix`, "region_plot", pos_suffix)
 format_parts <- trimws(tolower(strsplit(opts$`plot-format`, ",")[[1]]))
 if ("both" %in% format_parts) format_parts <- c(setdiff(format_parts, "both"), "png", "pdf")
 if ("all" %in% format_parts) format_parts <- c(setdiff(format_parts, "all"), "png", "pdf", "svg")
+dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
 for (fmt in unique(format_parts)) {
   out_path <- file.path(opts$`output-dir`, paste0(base_name, ".", fmt))
   if (fmt == "png") {

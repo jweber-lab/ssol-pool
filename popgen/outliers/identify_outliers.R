@@ -1579,6 +1579,7 @@ if (!is.null(diversity_data)) {
             "theta" = "theta",
             "tajima_d" = "tajima_d"
         )
+        if (is.null(stat_col)) next
         
         if (!stat_col %in% colnames(diversity_data)) {
             if (opts$verbose) cat("Warning: Column '", stat_col, "' not found in diversity data, skipping\n", sep="")

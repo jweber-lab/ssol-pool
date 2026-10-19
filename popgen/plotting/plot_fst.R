@@ -300,6 +300,13 @@ peek_column_names <- function(filepath) {
 # Find all FST files and read (TSV or HDF5)
 selected_window_size <- opts$`window-size`
 selected_pairs <- NULL
+selected_pairs_normalized <- NULL
+normalize_pair_name <- function(p) {
+    vapply(p, function(x) {
+        parts <- strsplit(x, ":")[[1]]
+        if (length(parts) == 2) paste(normalize_sample_name(parts[1]), normalize_sample_name(parts[2]), sep = ":") else x
+    }, character(1), USE.NAMES = FALSE)
+}
 if (opts$`sample-pairs` != "") {
     selected_pairs <- strsplit(opts$`sample-pairs`, ",")[[1]]
     selected_pairs <- trimws(selected_pairs)
@@ -316,7 +323,7 @@ if (opts$`sample-pairs` != "") {
 
 combined_data_long_format <- FALSE
 if (input_format_used == "hdf5") {
-    all_h5 <- list.files(input_dir, pattern = "^fst_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    all_h5 <- prefer_window_h5(list.files(input_dir, pattern = "^fst_.*\\.h5$", full.names = TRUE, recursive = FALSE))
     if (length(all_h5) == 0) stop("No FST HDF5 files found in: ", input_dir)
     if (!is.null(selected_window_size)) {
         file_win_sizes <- vapply(all_h5, function(f) { ps <- parse_window_step_from_filename(basename(f)); ps$window_size }, numeric(1))
@@ -344,7 +351,7 @@ if (input_format_used == "hdf5") {
     combined_data_long_format <- TRUE
     if (length(summary_list) > 0) summary_tsv <- bind_rows(summary_list)
     if (!is.null(selected_pairs_normalized)) {
-        combined_data <- combined_data %>% filter(.data$sample_pair %in% selected_pairs_normalized)
+        combined_data <- combined_data %>% filter(normalize_pair_name(.data$sample_pair) %in% selected_pairs_normalized)
         if (nrow(combined_data) == 0) stop("None of the specified sample pairs found in HDF5 data")
     }
     if (opts$verbose) cat("Read", length(all_h5), "HDF5 file(s); combined", nrow(combined_data), "rows (long format)\n")
@@ -597,7 +604,7 @@ if (combined_data_long_format) {
     if (!y_col %in% colnames(combined_data)) stop("--y-value ", opts$`y-value`, " requested but column '", y_col, "' not found in HDF5.")
     pair_names <- unique(combined_data$sample_pair[!is.na(combined_data$sample_pair)])
     fst_pairs <- setNames(rep(y_col, length(pair_names)), pair_names)
-    if (!is.null(selected_pairs_normalized)) fst_pairs <- fst_pairs[names(fst_pairs) %in% selected_pairs_normalized]
+    if (!is.null(selected_pairs_normalized)) fst_pairs <- fst_pairs[normalize_pair_name(names(fst_pairs)) %in% selected_pairs_normalized]
     if (length(fst_pairs) == 0) stop("None of the specified sample pairs found in data")
 } else {
 fst_cols <- colnames(combined_data)[grepl("\\.fst$", colnames(combined_data), ignore.case=TRUE)]

@@ -6,8 +6,8 @@
 # Wrapper for collate.R: discovers diversity, FST, and PBE TSV/CSV (from
 # calculate_pi_theta.sh, calculate_fst.sh, and PBE outputs) and writes
 # combined HDF5 plus *_summary.tsv to OUTPUT_DIR. Optional: --seq-qual-dir
-# for mean_coverage/mean_mapping_quality, --variant-tsv-dir for variants.h5,
-# --variant-feature-dir for variant_features_wW_sS.tsv joins. Missing/empty FST or PBE dirs are skipped.
+# for mean_coverage/mean_mapping_quality, --variant-tsv-dir (+ --variant-csq) for
+# variants.h5, --variant-feature-dir for variant_features_wW_sS.tsv joins. Missing/empty FST or PBE dirs are skipped.
 # For full output file list and variable naming (HDF5 groups, TSV columns),
 # see the header of collate.R.
 # Usage: See below or --help
@@ -20,6 +20,7 @@ FST_DIR=""
 PBE_DIR=""
 SEQ_QUAL_DIR=""
 VARIANT_TSV_DIR=""
+VARIANT_CSQ=()
 VARIANT_FEATURE_DIR=""
 OUTPUT_DIR=""
 RSCRIPT=""
@@ -45,7 +46,9 @@ Input (at least one required):
 
 Optional:
   --seq-qual-dir DIR     Directory with seq_qual_metrics TSV (from seq_qual_metrics.sh)
-  --variant-tsv-dir DIR  Directory with variant/sites TSV (e.g. from bcftools query export of BCF)
+  --variant-tsv-dir DIR  Directory with site TSVs (snp_sites.tsv, indel_sites.tsv from snp_call.sh / indel_call.sh)
+  --variant-csq PATH     variants_csq.tsv file or directory from variant_csq.sh (repeatable); consequence and
+                         gene columns are joined onto the sites by chr, pos, ref, alt
   --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh)
   --output-dir DIR       Output directory for HDF5 files [default: ./collated]
   --rscript PATH         Path to Rscript [default: Rscript]
@@ -57,13 +60,16 @@ Optional:
   -h, --help             Show this help
 
 Output naming: diversity_w{W}_s{S}.h5, fst_w{W}_s{S}.h5, fst_single.h5, pbe_w{W}_s{S}.h5, pbe_single.h5,
-  optional variants.h5. With --single-position-merged: single_position.h5 with /fst, /pbe_trio_*, /variants.
+  optional variants.h5. With --single-position-merged, fst_single/pbe_single/variants are replaced by
+  single_position.h5 (/sites: one row per SNP or indel, with FST/PBE columns on SNP rows).
   Companion *_summary.tsv (unless --no-summary): mean, median, variance, skew, q01, q05, q95, q99, n.
 
 Example:
   $0 --diversity-dir pi_theta_out --fst-dir fst_out --pbe-dir pbe_out -o collated
   $0 --diversity-dir stats_out --fst-dir stats_out --pbe-dir stats_out --seq-qual-dir stats_out --output-dir collated
-  $0 --fst-dir fst_out --pbe-dir pbe_out --variant-tsv-dir variants_tsv --single-position-merged -o collated
+  $0 --fst-dir fst_out --pbe-dir pbe_out --variant-tsv-dir sites \\
+     --variant-csq csq_snps --variant-csq csq_indels --variant-feature-dir variant_features \\
+     --single-position-merged -o collated
 EOF
 }
 
@@ -79,6 +85,7 @@ while [[ $# -gt 0 ]]; do
         --pbe-dir) PBE_DIR="$2"; shift 2 ;;
         --seq-qual-dir) SEQ_QUAL_DIR="$2"; shift 2 ;;
         --variant-tsv-dir) VARIANT_TSV_DIR="$2"; shift 2 ;;
+        --variant-csq) VARIANT_CSQ+=("$2"); shift 2 ;;
         --variant-feature-dir) VARIANT_FEATURE_DIR="$2"; shift 2 ;;
         --output-dir|-o) OUTPUT_DIR="$2"; shift 2 ;;
         --rscript) RSCRIPT="$2"; shift 2 ;;
@@ -114,6 +121,9 @@ ARGS=()
 [[ -n "$PBE_DIR" ]] && ARGS+=(--pbe-dir "$PBE_DIR")
 [[ -n "$SEQ_QUAL_DIR" ]] && ARGS+=(--seq-qual-dir "$SEQ_QUAL_DIR")
 [[ -n "$VARIANT_TSV_DIR" ]] && ARGS+=(--variant-tsv-dir "$VARIANT_TSV_DIR")
+if [[ ${#VARIANT_CSQ[@]} -gt 0 ]]; then
+    ARGS+=(--variant-csq "$(IFS=,; echo "${VARIANT_CSQ[*]}")")
+fi
 [[ -n "$VARIANT_FEATURE_DIR" ]] && ARGS+=(--variant-feature-dir "$VARIANT_FEATURE_DIR")
 ARGS+=(--output-dir "$OUTPUT_DIR")
 [[ "$SINGLE_POSITION_MERGED" == true ]] && ARGS+=(--single-position-merged)

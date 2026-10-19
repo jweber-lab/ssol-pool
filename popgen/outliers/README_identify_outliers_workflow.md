@@ -92,6 +92,29 @@ Each result is standardized (same columns: chr, start, end, value, quantile, sam
 
 ---
 
+## Outlier annotation (outlier_annotation.sh)
+
+Annotates `outlier_regions_*.csv` in two independent ways; give either or both.
+
+**Consequence calls and assembly GFF** (`--variant-csq`, `--gff`). These are on the same assembly as the regions, so no BLAST is needed.
+- `--variant-csq` (repeatable) takes `variants_csq.tsv` files or directories from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr) (for example the SNP and indel csq directories), or collate `variants.h5` / `single_position.h5`. HDF5 input also carries per-pool allele frequencies and per-site FST/PBE into the site table.
+- `--gff` is the GFF given to `variant_csq.sh`. It lists genes overlapping each region (even with no variant in them) and adds `gene_name`, `product` and `go_terms` to the genes named by csq.
+- Outputs (suffix from the regions file name):
+  - `outlier_csq_sites_*.csv`: one row per (region, site), with `outlier_stat`, `variant_type`, `coding_effect`, `region_category`, `genes`, `genes_protein_altering`, `bcsq` and the per-pool columns.
+  - `outlier_csq_genes_*.csv`: one row per (region, gene), with `n_sites`, `n_protein_altering`, `coding_effects` (for example `missense:3;synonymous:2`), `overlaps_region` and the GFF fields.
+  - `outlier_csq_summary_*.csv`: one row per region, with `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_protein_altering`, `n_effect_*`, `n_region_*`, the region columns, then `genes_csq`, `genes_protein_altering`, `genes_gff_overlap` and `products_gff`.
+  - `outlier_csq_background_*.csv`: genome-wide counts by consequence for all sites and for non-outlier sites. [`plot_outlier_csq.sh`](../plotting/README.md#7-plot_outlier_csqr--plot_outlier_csqsh) uses it for the per-statistic composition and enrichment plots.
+
+**BLAST** (`--blast-config`, `--reference`): region sequences are BLASTed against each configured DB and hits are mapped to that DB's GFF. Outputs: `outlier_genes_*.csv` and `outlier_genes_summary_*.csv`. Use this to find homologs in other annotated assemblies.
+
+```bash
+./outlier_annotation.sh --regions out/outlier_regions_w1000_..._merge_only.csv \
+  --variant-csq ../variants/csq_snps --variant-csq ../variants/csq_indels --gff annotation.gff3 \
+  --blast-config blast_config.yml --reference ref.fa --output-dir outlier_annotation
+```
+
+---
+
 ## Recent changes (summary)
 
 1. **Fill from unfiltered data**  

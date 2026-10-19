@@ -11,6 +11,11 @@ Plotting workflows available:
 3. **Region Stack** (`plot_region.R` / `plot_region.sh`): One stacked figure per region (coverage, π, FST, PBE)
 4. **FST Statistics** (`plot_fst.R` / `plot_fst.sh`): FST plots with paneling and overlay options
 5. **PBE Statistics** (`plot_pbe.R` / `plot_pbe.sh`): PBE plots with paneling and overlay options
+6. **Distributions** (`plot_hist.R` / `plot_hist.sh`): Histogram / density / ECDF of one statistic (coverage, mapq, n_snps, pi, theta, tajima_d, fst, pbe)
+7. **Outlier consequences** (`plot_outlier_csq.R` / `plot_outlier_csq.sh`): Consequence composition and enrichment of sites in outlier regions, per outlier statistic
+8. **Per-site FST vs consequence** (`plot_fst_csq.R` / `plot_fst_csq.sh`): Per-site FST by consequence class, optionally inside vs outside outlier regions, plus a genome-wide view
+
+**Collate HDF5 input:** the window plots (2–6) read `diversity_w*.h5`, `fst_w*.h5`, `pbe_w*.h5`. Per-site `fst_single.h5` / `pbe_single.h5` are skipped when windowed files exist; per-site FST is plotted by `plot_fst_csq` (from `single_position.h5` or `variants.h5` + `fst_single.h5`). String columns from collate (`genes`, `genes_protein_altering`, `ref`, `alt`, `coding_effect`, `<sample>_AD`) are read as text and column names such as `Echo:Kjer.fst` keep their form.
 
 ## Scripts
 
@@ -292,6 +297,47 @@ Rscript plot_fst.R \
 
 ---
 
+### 6. plot_hist.R / plot_hist.sh
+
+Genome-wide (or `--chromosome` / `--region` subset) distribution of one statistic from the same inputs as `plot_region` (TSV dirs or `--hdf5-dir`). Panels: `--panels histogram,density,ecdf`; `--overlay` colours groups in one panel; `--compare A,B` adds a bin-proportion difference panel. Run `./plot_hist.sh --help` for all options.
+
+```bash
+./plot_hist.sh --hdf5-dir ../stats/collated --stat fst --panels histogram,ecdf --overlay -o ./hist_plots
+```
+
+---
+
+### 7. plot_outlier_csq.R / plot_outlier_csq.sh
+
+Which kinds of variants sit in the outlier regions of each statistic, compared with the rest of the genome. Reads `outlier_csq_sites_*.csv` and `outlier_csq_background_*.csv` written by [`outlier_annotation.sh --variant-csq`](../outliers/README_identify_outliers_workflow.md#outlier-annotation-outlier_annotationsh).
+
+- A region's `outlier_stat` can list several statistics (`fst:pbe:pi` when regions are merged across statistics); its sites count toward each. Each site is counted once per statistic.
+- **Composition** (`outlier_csq_composition_<cat>.png`): stacked share of sites per consequence class for each statistic, next to *all sites* and *non-outlier sites*, with SNPs and indels in separate panels (`--variant-type split`; or `all`, `snp`, `indel`).
+- **Enrichment** (`outlier_csq_enrichment_<cat>.png` / `.csv`): per statistic and class, log2 odds ratio of the class among that statistic's outlier sites vs non-outlier sites (Haldane-corrected, 95% CI), Fisher exact p and BH q (per variant type). Filled points have q < `--alpha`.
+- `--category coding_effect` (default: nonsense, frameshift, missense, inframe_indel, other_coding, synonymous, not_coding, none) or `region_category` (cds, splice, UTRs, intron, ...). `none` = no csq record (intergenic); `--drop-none` removes it.
+
+```bash
+./plot_outlier_csq.sh --annotation-dir ../outliers/outlier_annotation -o csq_plots
+./plot_outlier_csq.sh --annotation-dir ../outliers/outlier_annotation --category region_category --variant-type all -o csq_plots
+```
+
+---
+
+### 8. plot_fst_csq.R / plot_fst_csq.sh
+
+Per-site FST (SNPs) by consequence class, one panel per pair, from collate output: `single_position.h5` (`--single-position-merged`) or `variants.h5` + `fst_single.h5`. Collate needs `--fst-dir` with `fst_single.tsv` and `--variant-tsv-dir` / `--variant-csq` so sites carry `coding_effect` / `region_category`.
+
+- **Violin + box** (`fst_csq_<cat>.png`): FST (or `--y-value quantile`) per class, site counts under each. With `--regions outlier_regions_*.csv`, each class is split into sites inside vs outside outlier regions (regions whose `outlier_stat` includes `--region-stat`, default `fst`; `any` for all).
+- **Table** (`fst_csq_<cat>.csv`): n, mean, median, q95 per pair x class (x inside/outside); Wilcoxon p and BH q vs `--reference-category` (default `synonymous`) and, with `--regions`, inside vs outside.
+- **Genome view** (`--manhattan`, `fst_csq_manhattan_<cat>.png`): per-site FST along the genome; sites with a coding consequence coloured by class, the rest grey; outlier regions shaded.
+
+```bash
+./plot_fst_csq.sh --hdf5-dir ../stats/collated \
+  --regions ../outliers/out/outlier_regions_w1000_..._merge_only.csv --manhattan -o fst_csq
+```
+
+---
+
 ## Input File Formats
 
 ### Diversity TSV Files (for plot_diversity.R)
@@ -328,12 +374,13 @@ The R scripts require the following packages (install with `install.packages()` 
 - `dplyr`: For data manipulation
 - `readr`: For reading TSV files
 - `optparse`: For command-line argument parsing
-- `tidyr`: For data reshaping (plot_fst.R, plot_region.R)
-- `patchwork`: For combining panels in plot_region.R
+- `tidyr`: For data reshaping (plot_fst.R, plot_region.R, plot_outlier_csq.R, plot_fst_csq.R)
+- `tibble`: For HDF5 reading (plot_common.R)
+- `patchwork`: For combining panels in plot_region.R and plot_hist.R
 
 Install all required packages:
 ```r
-install.packages(c("ggplot2", "dplyr", "readr", "optparse", "tidyr", "patchwork"))
+install.packages(c("ggplot2", "dplyr", "readr", "optparse", "tidyr", "tibble", "patchwork"))
 ```
 
 When using HDF5 input (e.g. collate output or `--input-format hdf5` / `--hdf5-dir`), install `hdf5r`:
@@ -443,12 +490,12 @@ install.packages("hdf5r")
 
 ## Figure standards
 
-All plotting scripts (plot_diversity, plot_fst, plot_pbe, plot_region) use:
+All plotting scripts (plot_diversity, plot_fst, plot_pbe, plot_region, plot_hist, plot_outlier_csq, plot_fst_csq) use:
 
 - **Theme**: `theme_bw(base_size = 11, base_family = "sans")` for consistent typography
 - **DPI**: PNG output uses 300 DPI by default (override with `--dpi N` in wrappers)
 - **Panel labels**: `plot_region` adds (a), (b), (c) to stacked panels
-- **Color**: A colorblind-friendly qualitative palette is used for sample/pair/trio in overlay and plot_region
+- **Color**: A colorblind-friendly qualitative palette is used for sample/pair/trio in overlay and plot_region; consequence classes have fixed colours and severity order (`CSQ_EFFECT_LEVELS`, `CSQ_EFFECT_COLORS` in `plot_common.R`)
 - **Dimensions**: `--width` and `--height` are in inches; vector (PDF/SVG) preferred for submission
 
 ---

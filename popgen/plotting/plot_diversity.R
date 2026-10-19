@@ -825,6 +825,10 @@ for (stat in statistics) {
             if ("q01" %in% names(stats_summary)) stats_summary <- stats_summary %>% rename(q1 = q01)
             if (!"q5" %in% names(stats_summary)) stats_summary$q5 <- NA_real_
             if (!"q1" %in% names(stats_summary)) stats_summary$q1 <- NA_real_
+            if (!"sd" %in% names(stats_summary))
+                stats_summary$sd <- if ("variance" %in% names(stats_summary)) sqrt(stats_summary$variance) else NA_real_
+            if (!"q95" %in% names(stats_summary)) stats_summary$q95 <- NA_real_
+            if (!"q99" %in% names(stats_summary)) stats_summary$q99 <- NA_real_
             stats_summary <- stats_summary %>% mutate(q0.2 = NA_real_, q99.8 = NA_real_)
             stats_summary$statistic <- stat
         } else {

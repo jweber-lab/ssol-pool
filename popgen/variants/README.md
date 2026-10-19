@@ -38,14 +38,22 @@ These scripts follow the repository-wide repeat-masking policy described in [pop
 
 # CSQ (unmasked ref + GFF; BCFs from the steps above)
 ./variant_csq.sh --bcf snps_out/snp_sites.bcf --reference ref.unmasked.fa \
-  --gff annotation.gff3 --output-dir csq_out
+  --gff annotation.gff3 --output-dir csq_snps
 ./variant_csq.sh --bcf indels_out/indel_sites.bcf --reference ref.unmasked.fa \
-  --gff annotation.gff3 --output-dir csq_indels_out
+  --gff annotation.gff3 --output-dir csq_indels
 
-# Windowed variant features, on the same windows as FST output (for collate)
-./variant_csq_windows.sh --sites-tsv csq_out/variants_csq.tsv \
+# Windowed variant features from both tables, on the same windows as FST output (for collate)
+./variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv \
+  --sites-tsv csq_indels/variants_csq.tsv \
   --template-dir ../stats/fst_out --output-dir variant_features
 ```
+
+### Into collate and outliers
+
+- **Single-site HDF5**: [`collate.sh`](../stats/README.md#collatesh--collater) `--variant-tsv-dir` (a directory holding `snp_sites.tsv` and `indel_sites.tsv`) with `--variant-csq csq_snps --variant-csq csq_indels` writes `variants.h5`, or `single_position.h5` with `--single-position-merged`. That file has one row per site, with `variant_type`, the per-pool `_AD` / `_alt_freq` columns, and the csq columns, including `genes` and `genes_protein_altering`. Single-position FST and PBE are added to SNP rows only.
+- **Window HDF5**: `--variant-feature-dir variant_features` adds the `n_sites*` and `n_csq_*` / `n_region_*` / `n_effect_*` counts and the `genes` / `genes_protein_altering` lists to `diversity_w*.h5`, `fst_w*.h5` and `pbe_w*.h5`.
+- **Outliers**: `identify_outliers.R` ranks windows only on the diversity, FST and PBE quantiles, so variant counts and gene lists are not carried into `outlier_windows_*.csv` / `outlier_regions_*.csv`. [`outlier_annotation.sh`](../outliers/README_identify_outliers_workflow.md#outlier-annotation-outlier_annotationsh) `--variant-csq csq_snps --variant-csq csq_indels --gff annotation.gff3` adds the sites, consequences and genes inside each outlier region.
+- **Plots**: [`plot_outlier_csq.sh`](../plotting/README.md#7-plot_outlier_csqr--plot_outlier_csqsh) shows the consequence composition and enrichment of each outlier statistic's sites. [`plot_fst_csq.sh`](../plotting/README.md#8-plot_fst_csqr--plot_fst_csqsh) shows per-site FST by consequence class from the collated HDF5.
 
 **Traceability:** `region_category` / `coding_effect` in csq output are plotting summaries; **`bcsq`** and **`csq_consequences`** retain full bcftools csq detail.
 
@@ -113,7 +121,9 @@ Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suit
 - **`bcsq`**: raw `INFO/BCSQ` from csq (full detail).
 - **`csq_consequences`**: semicolon-separated list of verbatim consequence tokens parsed from BCSQ.
 - **`region_category`**, **`coding_effect`**: derived columns for plotting, mapped from csq tokens via a built-in table (extend or override with `--map-tsv` in `variant_csq.R`). For variants with multiple transcript annotations, the single-row categories use the **highest-severity** consequence for these two columns only; the raw `bcsq` string is unchanged.
-- Optional **`--output-long-tsv`**: one row per BCSQ sub-record (`variant_csq.sh` passes through to R).
+- **`genes`**: semicolon-separated gene names from all BCSQ records at the site; **`genes_protein_altering`**: only the genes whose record changes the protein (missense, frameshift, stop gained/lost, start lost, splice, inframe indels).
+- **`variant_type`**: `snp` or `indel`, from the REF/ALT lengths.
+- Optional **`--output-long-tsv`**: one row per BCSQ sub-record (`variant_csq.sh` passes through to R). Pointer records (`@pos`, which refer to a compound change annotated at another site) are skipped, and multi-term consequences such as `missense&inframe_altering` are split before mapping.
 
 **Reference:** use the **unmasked** FASTA that matches the GFF (see [Reference assemblies and repeat masking](#reference-assemblies-and-repeat-masking) above). The BCF may be repeat-filtered; coordinates must still match that assembly.
 
@@ -127,11 +137,12 @@ Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suit
 
 ### variant_csq_windows.sh / variant_csq_windows.R
 
-Aggregates annotated sites into **per-window count tables** that match grenedalf tiling. Uses **`--template-dir`** (or **`--template-tsv`**) pointing at existing **windowed** FST or diversity TSVs whose names include `w{W}_s{S}` (e.g. `fst_w1000_s500.tsv`), so windows are identical to those in other stats. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns suitable for joining in collate.
+Aggregates annotated sites into **per-window count tables** that match grenedalf tiling. Uses **`--template-dir`** (or **`--template-tsv`**) pointing at existing **windowed** FST or diversity TSVs whose names include `w{W}_s{S}` (e.g. `fst_w1000_s500.tsv`), so windows are identical to those in other stats. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, **`n_sites_snp`** / **`n_sites_indel`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns, plus **`genes`** / **`genes_protein_altering`** (sorted, semicolon-separated union over the window's sites), suitable for joining in collate. `--sites-tsv` can be repeated to combine the SNP and indel csq tables.
 
 **Example:**
 ```bash
-./variant_csq_windows.sh --sites-tsv csq_out/variants_csq.tsv --template-dir fst_out --output-dir variant_features
+./variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \
+  --template-dir fst_out --output-dir variant_features
 ```
 
-The output directory can be passed to `collate.sh --variant-feature-dir` in [popgen/stats/](../stats/README.md#collatesh--collater), which left-joins these counts onto the diversity/FST windows.
+The output directory can be passed to `collate.sh --variant-feature-dir` in [popgen/stats/](../stats/README.md#collatesh--collater), which left-joins these columns onto the diversity, FST and PBE windows.

@@ -263,7 +263,7 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
     }
   }
 
-  fst_h5 <- list.files(hdir, pattern = "^fst_.*\\.h5$", full.names = TRUE)
+  fst_h5 <- prefer_window_h5(list.files(hdir, pattern = "^fst_.*\\.h5$", full.names = TRUE))
   if (length(fst_h5) > 0) {
     if (!is.null(window_size_use) && !is.na(window_size_use)) fst_h5 <- fst_h5[grepl(paste0("_w", window_size_use), fst_h5, fixed = TRUE)]
     if (length(fst_h5) > 0) {
@@ -282,7 +282,7 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
     }
   }
 
-  pbe_h5 <- list.files(hdir, pattern = "^pbe_.*\\.h5$", full.names = TRUE)
+  pbe_h5 <- prefer_window_h5(list.files(hdir, pattern = "^pbe_.*\\.h5$", full.names = TRUE))
   if (length(pbe_h5) > 0) {
     if (!is.null(window_size_use) && !is.na(window_size_use)) pbe_h5 <- pbe_h5[grepl(paste0("_w", window_size_use), pbe_h5, fixed = TRUE)]
     if (length(pbe_h5) > 0) {

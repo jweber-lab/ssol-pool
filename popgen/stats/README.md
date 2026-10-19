@@ -77,15 +77,25 @@ Assume `ref.unmasked.fa`, `genome.out.bed` from `repeatmasker_bed.sh`, and BAMs 
 ./calculate_fst.sh --sample-info ../../sample_info.csv \
   --filter-mask-total-bed genome.out.bed -o fst_out ...
 
-# 4. Pooled SNP sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
+# 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
   --filter-mask-total-bed genome.out.bed --output-dir snps_out
+../variants/indel_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
+  --filter-mask-total-bed genome.out.bed --output-dir indels_out
 
-# 5. CSQ (unmasked ref + GFF; BCF from step 4)
+# 5. CSQ (unmasked ref + GFF; BCFs from step 4)
 ../variants/variant_csq.sh --bcf snps_out/snp_sites.bcf --reference ref.unmasked.fa \
-  --gff annotation.gff3 --output-dir csq_out
+  --gff annotation.gff3 --output-dir csq_snps
+../variants/variant_csq.sh --bcf indels_out/indel_sites.bcf --reference ref.unmasked.fa \
+  --gff annotation.gff3 --output-dir csq_indels
 
-# Windowed variant features (popgen/variants/README.md) + collate (below)
+# 6. Windowed variant features on the FST windows, then collate
+../variants/variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv \
+  --sites-tsv csq_indels/variants_csq.tsv --template-dir fst_out --output-dir variant_features
+mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
+./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out \
+  --variant-tsv-dir sites --variant-csq csq_snps --variant-csq csq_indels \
+  --variant-feature-dir variant_features -o collated
 ```
 
 **Traceability:** `region_category` / `coding_effect` in csq output are plotting summaries; **`bcsq`** and **`csq_consequences`** retain full bcftools csq detail. See [popgen/alignment/README.md](../alignment/README.md) for BAM-filter details.
@@ -94,15 +104,18 @@ Assume `ref.unmasked.fa`, `genome.out.bed` from `repeatmasker_bed.sh`, and BAMs 
 
 **Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [popgen/alignment/](popgen/alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`.
 
-**Variant sites and annotation** (`snp_call.sh`, `indel_call.sh`, `variant_csq.sh`, `variant_csq_windows.sh`) live in [popgen/variants/](../variants/README.md); their per-window feature tables can be joined here via `collate.sh --variant-feature-dir`.
+**Variant sites and annotation** (`snp_call.sh`, `indel_call.sh`, `variant_csq.sh`, `variant_csq_windows.sh`) live in [popgen/variants/](../variants/README.md); their site tables and consequence annotations are collated with `--variant-tsv-dir` / `--variant-csq`, and their per-window feature tables with `--variant-feature-dir`.
 
 ### collate.sh / collate.R
 
 Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s). Computes integer rank (1..N) and 0–1 quantile per stat within (sample, window_size) for diversity, and within window for FST/PBE.
 
-- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`).
-- **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_csq_*`, `n_region_*`, and `n_effect_*` counts alongside population-genetics stats.
+- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, `--variant-csq`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`).
+- **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*` counts and `genes` / `genes_protein_altering` (semicolon-separated gene names with a site in the window) alongside population-genetics stats.
+- **Variant sites** (`variants.h5`, group `/sites`): `--variant-tsv-dir` points at a directory with `snp_sites.tsv` and/or `indel_sites.tsv` ([`snp_call.sh`](../variants/README.md#snp_callsh) / [`indel_call.sh`](../variants/README.md#indel_callsh)). Their rows are stacked, one per site and ALT allele, with `variant_type` (`snp` or `indel`), `ref`, `alt`, `dp`, `alt_freq`, `indel_len` (indels) and per-pool `<sample>_AD` (`ref,alt`) and `<sample>_alt_freq`. `--variant-csq` (repeatable in `collate.sh`; comma-separated in `collate.R`) takes `variants_csq.tsv` files or their directories from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr); their `bcsq`, `csq_consequences`, `region_category`, `coding_effect`, `genes` and `genes_protein_altering` columns are joined onto the sites by `chr`, `pos`, `ref`, `alt`. A `variants_csq.tsv` inside `--variant-tsv-dir` is treated the same way, and with no site TSVs the csq tables become the sites. `*_long.tsv` files are ignored.
+- **`--single-position-merged`**: replaces `fst_single.h5`, `pbe_single.h5` and `variants.h5` with one `single_position.h5` (`/sites`): the variant table above with single-position FST and PBE added as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, with `_rank` / `_quantile`). FST and PBE are joined only onto SNP rows, so an indel at the same position as a SNP does not inherit the SNP's values; positions with FST but no called site are not included. Without variant TSVs, the rows are the FST (or PBE) positions.
 - **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE) is NA/NaN before ranking and collation.
+- **Sample names** keep their case from the input (FST pairs such as `Echo:Kjer`, `<sample>_AD` columns); standard column names (`chr`, `pos`, `ref`, ...) are lowercased.
 - **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out -o collated`
 
 ### calculate_pi_theta.sh

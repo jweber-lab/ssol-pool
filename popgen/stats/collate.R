@@ -8,14 +8,17 @@
 # sample/pop1,pop2/pop1,pop2,pop3 as columns. Missing or empty FST/PBE input
 # dirs are skipped without failing.
 # Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR]
-#        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [--variant-feature-dir DIR] [options]
+#        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [--variant-csq PATHS]
+#        [--variant-feature-dir DIR] [options]
 # Options: --drop-all-na  Drop rows/sites where every statistic value is NA before ranking/collation.
 #
 # Output files:
 #   diversity_w{W}_s{S}.h5  (windowed only; single is not supported)
 #     Group /windows: chr, start, end, sample, pi, theta, tajima_d,
 #     *_rank, *_quantile, mean_coverage, mean_mapping_quality, n_snps (total.passed), n_total (total.passed + total.invariant),
-#     optional n_sites / n_csq_* / n_region_* / n_effect_* when --variant-feature-dir is set
+#     optional n_sites / n_sites_snp / n_sites_indel / n_csq_* / n_region_* / n_effect_* counts and
+#     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set
+#     (the same window columns are joined into fst_w*.h5 and pbe_w*.h5)
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
 #   fst_w{W}_s{S}.h5  (or fst_single.h5)
@@ -28,12 +31,16 @@
 #     pbe_rank, pbe_quantile (optional)
 #   pbe_*_summary.tsv  Companion summary by pop1, pop2, pop3
 #
-#   variants.h5  Group /sites: chr, pos, start, end (from variant TSV)
-#   single_position.h5  (when --single-position-merged) One group /sites: variant-centric
-#     table with chr, pos, start, end, variant cols, plus FST/PBE in wide form:
+#   variants.h5  Group /sites: one row per site from --variant-tsv-dir (snp_sites.tsv and
+#     indel_sites.tsv): chr, pos, start, end, ref, alt, variant_type (snp/indel), dp, alt_freq,
+#     indel_len, <sample>_AD, <sample>_alt_freq, plus bcsq, csq_consequences, region_category,
+#     coding_effect, genes, genes_protein_altering from variants_csq.tsv (--variant-csq or the
+#     same directory), joined on chr, pos, ref, alt
+#   single_position.h5  (when --single-position-merged; replaces fst_single, pbe_single and
+#     variants.h5) One group /sites: the variants.h5 table plus FST/PBE in wide form on SNP rows:
 #     Sample1:Sample2.fst, Sample1:Sample2.fst_rank, Sample1:Sample2.fst_quantile;
-#     Sample1:Sample2:Sample3.pbe, .pbe_rank, .pbe_quantile. single_position_summary.tsv
-#     summarizes all numeric columns.
+#     Sample1:Sample2:Sample3.pbe, .pbe_rank, .pbe_quantile. Indel rows have no FST/PBE.
+#     single_position_summary.tsv summarizes all numeric columns.
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -55,10 +62,24 @@ detect_delim <- function(path) {
   "\t"
 }
 
-read_tab <- function(path, delim = NULL, na = c("", "NA", "nan", "NaN", "NAN")) {
+read_tab <- function(path, delim = NULL, na = c("", "NA", "nan", "NaN", "NAN"), col_types = NULL) {
   if (is.null(delim)) delim <- detect_delim(path)
-  if (delim == "\t") read_tsv(path, na = na, show_col_types = FALSE)
-  else read_csv(path, na = na, show_col_types = FALSE)
+  if (delim == "\t") read_tsv(path, na = na, col_types = col_types, show_col_types = FALSE)
+  else read_csv(path, na = na, col_types = col_types, show_col_types = FALSE)
+}
+
+# Lowercase only these column names; sample-derived names (Echo_AD, Echo:Kjer.fst) keep their case
+STD_COLS <- c(
+  "chr", "chrom", "chromosome", "contig", "pos", "position", "start", "end", "begin", "stop",
+  "ref", "alt", "dp", "qual", "filter", "alt_freq", "indel_len", "variant_type",
+  "bcsq", "csq_consequences", "region_category", "coding_effect", "genes", "genes_protein_altering",
+  "total.passed", "total_passed", "total.invariant", "total_invariant", "sample", "pbe", "n_snps"
+)
+lower_std_names <- function(d) {
+  lo <- tolower(names(d))
+  std <- lo %in% STD_COLS
+  names(d)[std] <- lo[std]
+  d
 }
 
 # Rank and quantile within groups (0-1 quantile: (rank - 0.5) / n to avoid 0/1)
@@ -427,7 +448,6 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
         n_before_join <- nrow(d)
         vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
         if (length(vf_cols) > 0L) {
-          vf <- vf %>% mutate(across(any_of(vf_cols), as.numeric))
           d <- d %>% left_join(vf, by = c("chr", "start", "end"))
         }
         if (verbose) message("[verbose] diversity ", key, " after variant features join: n_row ", n_before_join, " -> ", nrow(d))
@@ -459,6 +479,7 @@ write_diversity_h5 <- function(d, path) {
   vf_num <- vf_num[vapply(vf_num, function(nm) is.numeric(d[[nm]]) || is.integer(d[[nm]]), logical(1L))]
   num_cols <- unique(c(core_num, vf_num))
   for (col in num_cols) grp[[col]] <- as.numeric(d[[col]])
+  for (col in intersect(VF_GENE_COLS, names(d))) grp[[col]] <- as.character(d[[col]])
   invisible()
 }
 
@@ -489,7 +510,7 @@ find_fst_files <- function(fst_dir) {
 
 process_one_fst <- function(path, window_size = NULL, step_size = NULL, drop_all_na = FALSE) {
   d <- read_tab(path)
-  d <- d %>% rename_all(tolower)
+  d <- lower_std_names(d)
   chr_col <- intersect(c("chr", "chromosome", "chrom"), names(d))[1L]
   pos_col <- intersect(c("position", "pos", "start", "end"), names(d))[1L]
   if (is.na(chr_col) || is.na(pos_col)) return(NULL)
@@ -584,7 +605,6 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
       if (!is.null(vf)) {
         vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
         if (length(vf_cols) > 0L) {
-          vf <- vf %>% mutate(across(any_of(vf_cols), as.numeric))
           d_long <- d_long %>% left_join(vf, by = c("chr", "start", "end"))
         }
         if (verbose) message("[verbose] FST ", scale, " joined variant feature columns (first 5): ", paste(head(vf_cols, 5), collapse = ", "))
@@ -702,7 +722,7 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   if ("pbe_rank" %in% names(all_d)) keep_cols <- c(keep_cols, "pbe_rank")
   if ("pbe_quantile" %in% names(all_d)) keep_cols <- c(keep_cols, "pbe_quantile")
   vf_extra <- grep("^n_(csq|region|effect|sites)", names(all_d), value = TRUE, ignore.case = TRUE)
-  keep_cols <- unique(c(keep_cols, vf_extra))
+  keep_cols <- unique(c(keep_cols, vf_extra, intersect(VF_GENE_COLS, names(all_d))))
   keep_cols <- intersect(keep_cols, names(all_d))
   all_d <- all_d[, keep_cols]
   h5 <- hdf5r::H5File$new(out_path, mode = "w")
@@ -733,7 +753,6 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
       if (!is.null(vf)) {
         vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
         if (length(vf_cols) > 0L) {
-          vf <- vf %>% mutate(across(any_of(vf_cols), as.numeric))
           tbl_list <- lapply(tbl_list, function(x) {
             x$data <- x$data %>% left_join(vf, by = c("chr", "start", "end"))
             x
@@ -762,9 +781,104 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
   invisible(NULL)
 }
 
-# ---- Variant TSV (single-position from BCF export) ----
+# ---- Variant sites (snp_call.sh / indel_call.sh) and csq annotation (variant_csq.sh) ----
+CSQ_COLS <- c("bcsq", "csq_consequences", "region_category", "coding_effect", "genes", "genes_protein_altering")
+VF_GENE_COLS <- c("genes", "genes_protein_altering")
+
+# *_long.tsv (variant_csq.sh --output-long-tsv) has one row per BCSQ record, not per site
 find_variant_tsv <- function(variant_dir) {
-  list.files(variant_dir, pattern = ".*(variant|sites|calls).*\\.(tsv|csv)$", full.names = TRUE, ignore.case = TRUE)
+  f <- list.files(variant_dir, pattern = ".*(variant|sites|calls).*\\.(tsv|csv)$", full.names = TRUE, ignore.case = TRUE)
+  f[!grepl("_long\\.(tsv|csv)$", basename(f), ignore.case = TRUE)]
+}
+
+# Comma-separated files and/or directories -> files
+expand_variant_paths <- function(x) {
+  if (is.null(x) || !nzchar(x)) return(character(0))
+  parts <- trimws(strsplit(x, ",", fixed = TRUE)[[1L]])
+  parts <- parts[nzchar(parts)]
+  out <- character(0)
+  for (p in parts) {
+    if (dir.exists(p)) out <- c(out, find_variant_tsv(p))
+    else if (file.exists(p)) out <- c(out, p)
+    else message("Variant input not found, skipping: ", p)
+  }
+  out
+}
+
+# <sample>_AD holds "ref,alt"; readr would otherwise parse it as one number with a thousands separator
+read_variant_table <- function(path) {
+  d <- read_tab(path, col_types = readr::cols(.default = readr::col_character()))
+  conv <- !grepl("_ad$", names(d), ignore.case = TRUE)
+  d[conv] <- readr::type_convert(d[conv], col_types = readr::cols())
+  d <- lower_std_names(d)
+  chr_col <- intersect(c("chr", "chromosome", "chrom", "contig"), names(d))[1L]
+  pos_col <- intersect(c("pos", "position", "start"), names(d))[1L]
+  if (is.na(chr_col) || is.na(pos_col)) {
+    message("Variant TSV: no chr/pos columns, skipping: ", path)
+    return(NULL)
+  }
+  d <- d %>% rename(chr = !!chr_col, pos = !!pos_col)
+  d$chr <- as.character(d$chr)
+  d$pos <- as.numeric(d$pos)
+  for (col in intersect(c("ref", "alt", CSQ_COLS), names(d))) d[[col]] <- as.character(d[[col]])
+  d
+}
+
+is_csq_table <- function(d) any(c("bcsq", "csq_consequences") %in% names(d))
+
+variant_type_of <- function(ref, alt) {
+  alt1 <- sub(",.*", "", alt)
+  case_when(
+    is.na(ref) | is.na(alt1) ~ NA_character_,
+    nchar(ref) == 1L & nchar(alt1) == 1L ~ "snp",
+    nchar(ref) != nchar(alt1) ~ "indel",
+    TRUE ~ "other"
+  )
+}
+
+# Gene names (2nd BCSQ field) for csq tables written before variant_csq.R added a genes column
+bcsq_genes <- function(bcsq) {
+  vapply(bcsq, function(s) {
+    if (is.na(s) || !nzchar(s) || s == ".") return(NA_character_)
+    recs <- strsplit(strsplit(s, ",", fixed = TRUE)[[1L]], "|", fixed = TRUE)
+    g <- vapply(recs, function(f) if (length(f) >= 2L && !startsWith(f[[1L]], "@")) f[[2L]] else NA_character_, character(1L))
+    g <- unique(g[!is.na(g) & nzchar(g)])
+    if (length(g) == 0L) NA_character_ else paste(g, collapse = ";")
+  }, character(1L), USE.NAMES = FALSE)
+}
+
+# Site rows from snp_call.sh / indel_call.sh TSVs, with csq columns joined on (chr, pos, ref, alt).
+# With only csq tables, those become the site rows.
+load_variant_sites <- function(variant_tsv_dir, variant_csq = NULL) {
+  paths <- character(0)
+  if (!is.null(variant_tsv_dir) && nzchar(variant_tsv_dir) && dir.exists(variant_tsv_dir)) paths <- find_variant_tsv(variant_tsv_dir)
+  paths <- unique(c(paths, expand_variant_paths(variant_csq)))
+  if (length(paths) == 0) return(NULL)
+  tbls <- lapply(paths, read_variant_table)
+  keep <- !vapply(tbls, is.null, logical(1L))
+  tbls <- tbls[keep]
+  paths <- paths[keep]
+  if (length(tbls) == 0) return(NULL)
+  csq <- vapply(tbls, is_csq_table, logical(1L))
+  if (any(!csq)) message("Variant sites: ", paste(paths[!csq], collapse = ", "))
+  if (any(csq)) message("Variant csq annotation", if (all(csq)) " (used as the sites)" else "", ": ", paste(paths[csq], collapse = ", "))
+  if (any(!csq)) {
+    d <- bind_rows(tbls[!csq])
+    if (any(csq)) {
+      ann <- bind_rows(tbls[csq])
+      key <- if (all(c("ref", "alt") %in% names(d)) && all(c("ref", "alt") %in% names(ann))) c("chr", "pos", "ref", "alt") else c("chr", "pos")
+      if (!"genes" %in% names(ann) && "bcsq" %in% names(ann)) ann$genes <- bcsq_genes(ann$bcsq)
+      ann <- ann %>% select(all_of(key), any_of(CSQ_COLS)) %>% distinct(across(all_of(key)), .keep_all = TRUE)
+      d <- d %>% select(-any_of(CSQ_COLS)) %>% left_join(ann, by = key)
+      n_ann <- sum(!is.na(d[[intersect(c("bcsq", "csq_consequences"), names(d))[1L]]]))
+      message("Variant sites: ", nrow(d), " rows, ", n_ann, " with a csq annotation (joined on ", paste(key, collapse = ", "), ")")
+    }
+  } else {
+    d <- bind_rows(tbls)
+    if (!"genes" %in% names(d) && "bcsq" %in% names(d)) d$genes <- bcsq_genes(d$bcsq)
+  }
+  if (!"variant_type" %in% names(d) && all(c("ref", "alt") %in% names(d))) d$variant_type <- variant_type_of(d$ref, d$alt)
+  d %>% filter(!is.na(.data$chr), !is.na(.data$pos)) %>% arrange(.data$chr, .data$pos)
 }
 
 # Load variant positions (chr, pos) from variant TSV directory for per-window SNP count fallback
@@ -817,27 +931,15 @@ load_variant_features_tsv <- function(variant_feature_dir, window_size, step_siz
     message("Variant features file missing chr/start/end: ", f)
     return(NULL)
   }
+  d$chr <- as.character(d$chr)
+  for (col in setdiff(names(d), c("chr", VF_GENE_COLS))) d[[col]] <- as.numeric(d[[col]])
+  for (col in intersect(VF_GENE_COLS, names(d))) d[[col]] <- as.character(d[[col]])
   d
 }
 
-collate_variant_tsv <- function(variant_tsv_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL) {
-  files <- find_variant_tsv(variant_tsv_dir)
-  if (length(files) == 0) return(invisible(NULL))
-  tbls <- lapply(files, function(f) {
-    d <- read_tab(f)
-    d %>% rename_all(tolower)
-  })
-  d <- bind_rows(tbls)
-  if (nrow(d) == 0) return(invisible(NULL))
-  chr_col <- intersect(c("chr", "chromosome", "chrom", "contig"), names(d))[1L]
-  pos_col <- intersect(c("pos", "position", "start"), names(d))[1L]
-  if (is.na(chr_col) || is.na(pos_col)) {
-    message("Variant TSV: no chr/pos columns found, skipping")
-    return(invisible(NULL))
-  }
-  d <- d %>% rename(chr = !!chr_col, pos = !!pos_col)
-  d$chr <- as.character(d$chr)
-  d$pos <- as.numeric(d$pos)
+collate_variant_tsv <- function(variant_tsv_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_csq = NULL) {
+  d <- load_variant_sites(variant_tsv_dir, variant_csq)
+  if (is.null(d) || nrow(d) == 0) return(invisible(NULL))
   if (!"start" %in% names(d)) d$start <- d$pos
   if (!"end" %in% names(d)) d$end <- d$pos
   depth_cols <- grep("depth|coverage|^dp$", names(d), ignore.case = TRUE, value = TRUE)
@@ -885,15 +987,22 @@ write_single_position_merged <- function(single_position_data, output_dir, write
   if (is.null(base)) return(invisible(NULL))
   if (!"pos" %in% names(base)) base$pos <- base$start
   merged <- base
+  # FST/PBE are per SNP position; indel rows sharing a position with a SNP do not get them
+  is_snp_row <- if ("variant_type" %in% names(merged)) merged$variant_type %in% "snp" else rep(TRUE, nrow(merged))
+  merged$.row <- seq_len(nrow(merged))
+  join_stats <- function(m, wide) {
+    bind_rows(m[is_snp_row, , drop = FALSE] %>% left_join(wide, by = c("chr", "pos")), m[!is_snp_row, , drop = FALSE]) %>%
+      arrange(.data$.row)
+  }
   if (!is.null(single_position_data$fst) && nrow(single_position_data$fst) > 0) {
     fst <- single_position_data$fst
     if (!"pos" %in% names(fst)) fst$pos <- fst$start
     fst <- fst %>% mutate(pair = paste0(.data$pop1, ":", .data$pop2))
     fst_wide <- fst %>%
-      select(.data$chr, .data$pos, .data$pair, .data$fst, .data$fst_rank, .data$fst_quantile) %>%
-      pivot_wider(names_from = .data$pair, values_from = c(.data$fst, .data$fst_rank, .data$fst_quantile),
+      select(all_of(c("chr", "pos", "pair", "fst", "fst_rank", "fst_quantile"))) %>%
+      pivot_wider(names_from = "pair", values_from = c("fst", "fst_rank", "fst_quantile"),
                   names_glue = "{pair}.{.value}")
-    merged <- merged %>% left_join(fst_wide, by = c("chr", "pos"))
+    merged <- join_stats(merged, fst_wide)
   }
   if (!is.null(single_position_data$pbe) && length(single_position_data$pbe) > 0) {
     for (x in single_position_data$pbe) {
@@ -901,13 +1010,14 @@ write_single_position_merged <- function(single_position_data, output_dir, write
       if (!"pos" %in% names(pbe_d)) pbe_d$pos <- pbe_d$start
       trio_id <- paste0(pbe_d$pop1[1L], ":", pbe_d$pop2[1L], ":", pbe_d$pop3[1L])
       pbe_wide <- pbe_d %>%
-        select(.data$chr, .data$pos, .data$pbe, .data$pbe_rank, .data$pbe_quantile) %>%
+        select(all_of(c("chr", "pos", "pbe", "pbe_rank", "pbe_quantile"))) %>%
         mutate(trio = trio_id) %>%
-        pivot_wider(names_from = .data$trio, values_from = c(.data$pbe, .data$pbe_rank, .data$pbe_quantile),
+        pivot_wider(names_from = "trio", values_from = c("pbe", "pbe_rank", "pbe_quantile"),
                     names_glue = "{trio}.{.value}")
-      merged <- merged %>% left_join(pbe_wide, by = c("chr", "pos"))
+      merged <- join_stats(merged, pbe_wide)
     }
   }
+  merged$.row <- NULL
   h5_path <- file.path(output_dir, "single_position.h5")
   h5 <- hdf5r::H5File$new(h5_path, mode = "w")
   on.exit(h5$close_all(), add = TRUE)
@@ -933,7 +1043,8 @@ option_list <- list(
   make_option(c("--fst-dir"), type = "character", default = NULL, help = "Directory containing FST TSV/CSV"),
   make_option(c("--pbe-dir"), type = "character", default = NULL, help = "Directory containing PBE TSV/CSV"),
   make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV"),
-  make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with variant/sites TSV (e.g. from bcftools query export)"),
+  make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with site TSVs (snp_sites.tsv / indel_sites.tsv from snp_call.sh / indel_call.sh); variants_csq.tsv files here are joined as annotation"),
+  make_option(c("--variant-csq"), type = "character", default = NULL, help = "Optional: comma-separated variants_csq.tsv files or directories (variant_csq.sh output) to join onto the sites by chr, pos, ref, alt"),
   make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv from variant_csq_windows.R"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
   make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Merge per-locus FST, PBE, and variant TSV into single_position.h5"),
@@ -952,7 +1063,8 @@ dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
 write_summary <- !opts$`no-summary`
 single_position_merged <- opts$`single-position-merged`
 drop_all_na <- opts$`drop-all-na`
-single_position_data <- if (single_position_merged) list(fst = NULL, pbe = NULL, variants = NULL) else NULL
+# Environment, not list: the collate_* functions fill it in place
+single_position_data <- if (single_position_merged) new.env() else NULL
 
 if (!is.null(opts$`diversity-dir`) && dir.exists(opts$`diversity-dir`)) {
   collate_diversity(opts$`diversity-dir`, opts$`output-dir`, opts$`seq-qual-dir`, opts$`variant-tsv-dir`, opts$`variant-feature-dir`, write_summary = write_summary, verbose = opts$verbose)
@@ -963,8 +1075,8 @@ if (!is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`)) {
 if (!is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
   collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
 }
-if (!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) {
-  collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data)
+if ((!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) || !is.null(opts$`variant-csq`)) {
+  collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_csq = opts$`variant-csq`)
 }
 if (single_position_merged && !is.null(single_position_data) &&
     (!is.null(single_position_data$fst) || (!is.null(single_position_data$pbe) && length(single_position_data$pbe) > 0) || !is.null(single_position_data$variants))) {

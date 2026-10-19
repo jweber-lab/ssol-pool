@@ -312,7 +312,7 @@ if (opts$`sample-trios` != "") {
 }
 combined_data_long_format <- FALSE
 if (input_format_used == "hdf5") {
-    all_h5 <- list.files(input_dir, pattern = "^pbe_.*\\.h5$", full.names = TRUE, recursive = FALSE)
+    all_h5 <- prefer_window_h5(list.files(input_dir, pattern = "^pbe_.*\\.h5$", full.names = TRUE, recursive = FALSE))
     if (length(all_h5) == 0) stop("No PBE HDF5 files found in: ", input_dir)
     if (!is.null(selected_window_size)) {
         file_win_sizes <- vapply(all_h5, function(f) { ps <- parse_window_step_from_filename(basename(f)); ps$window_size }, numeric(1))

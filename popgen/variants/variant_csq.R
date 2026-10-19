@@ -4,8 +4,9 @@
 # variant_csq.R
 #
 # Parse bcftools csq BCSQ INFO, keep raw string, add csq_consequences (verbatim
-# tokens), region_category + coding_effect (mapped for plotting), optional long
-# table (one row per BCSQ sub-record).
+# tokens), region_category + coding_effect (mapped for plotting), genes and
+# genes_protein_altering (gene names from BCSQ), variant_type (snp/indel/other),
+# optional long table (one row per BCSQ sub-record).
 #
 # Sibling: variant_csq.sh (runs bcftools csq + query, then this script).
 ###############################################################################
@@ -17,17 +18,17 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
-#' Split BCSQ into records (comma between ALTs; comma can also separate
-#' consequences — bcftools uses comma to separate consequence entries).
-#' Each entry: consequence|gene|strand-aware fields...
+#' Split BCSQ into records (comma-separated; one per transcript/ALT).
+#' Each record: consequence|gene|transcript|biotype|strand|...; the consequence
+#' field can join several terms with "&" (e.g. stop_gained&frameshift).
+#' Records starting with "@" point to a compound record at another position.
 parse_bcsq_string <- function(bcsq) {
   if (length(bcsq) != 1L) return(list())
   s <- bcsq[[1L]]
   if (is.na(s) || !nzchar(s) || s %in% c(".", "NA")) return(list())
-  # Multiple consequences: comma-separated; each part has pipes
   parts <- strsplit(s, ",", fixed = TRUE)[[1L]]
   parts <- trimws(parts)
-  parts <- parts[nzchar(parts)]
+  parts <- parts[nzchar(parts) & !startsWith(parts, "@")]
   out <- list()
   for (p in parts) {
     fld <- strsplit(p, "|", fixed = TRUE)[[1L]]
@@ -35,13 +36,34 @@ parse_bcsq_string <- function(bcsq) {
     cons <- sub("^[[:space:]]*\\*", "", fld[[1L]]) # leading * = downstream of stop
     cons <- trimws(cons)
     if (!nzchar(cons)) next
+    terms <- trimws(strsplit(cons, "&", fixed = TRUE)[[1L]])
     out[[length(out) + 1L]] <- list(
       consequence = cons,
+      terms = terms[nzchar(terms)],
+      gene = if (length(fld) >= 2L && nzchar(fld[[2L]])) fld[[2L]] else NA_character_,
       raw_piece = p,
       fields = fld
     )
   }
   out
+}
+
+# coding_effect values that change the protein (genes_protein_altering)
+PROTEIN_ALTERING <- c("missense", "nonsense", "frameshift", "inframe_indel", "other_coding")
+
+variant_type_of <- function(ref, alt) {
+  alt1 <- sub(",.*", "", alt)
+  case_when(
+    is.na(ref) | is.na(alt1) ~ NA_character_,
+    nchar(ref) == 1L & nchar(alt1) == 1L ~ "snp",
+    nchar(ref) != nchar(alt1) ~ "indel",
+    TRUE ~ "other"
+  )
+}
+
+join_unique <- function(x) {
+  x <- unique(x[!is.na(x) & nzchar(x)])
+  if (length(x) == 0L) NA_character_ else paste(x, collapse = ";")
 }
 
 # Default mapping: bcftools csq consequence token -> region_category, coding_effect, severity (higher = more severe for wide-row pick)
@@ -59,6 +81,11 @@ default_csq_map <- tribble(
   "frameshift_variant", "cds", "frameshift", 95L,
   "inframe_insertion", "cds", "inframe_indel", 70L,
   "inframe_deletion", "cds", "inframe_indel", 70L,
+  "inframe_altering", "cds", "inframe_indel", 70L,
+  "feature_elongation", "cds", "other_coding", 75L,
+  "coding_sequence", "cds", "other_coding", 60L,
+  "start_retained", "cds", "synonymous", 52L,
+  "non_coding", "ncRNA", "not_coding", 33L,
   "splice_acceptor", "splice", "not_coding", 62L,
   "splice_donor", "splice", "not_coding", 62L,
   "splice_region", "splice", "not_coding", 58L,
@@ -114,23 +141,14 @@ bcsq_to_long <- function(chr, pos, ref, alt, qual, filter_val, dp, bcsq_raw, rec
   }
   parse_one <- function(rec) {
     fld <- rec$fields
-    gene <- if (length(fld) >= 2L) fld[[2L]] else NA_character_
     # transcript id often 3rd; biotype 4th; strand 5th — layout from bcftools csq
     transcript <- if (length(fld) >= 3L) fld[[3L]] else NA_character_
     strand <- if (length(fld) >= 5L) fld[[5L]] else NA_character_
-    tok <- rec$consequence
-    m <- cq_map %>% filter(.data$consequence == tok)
-    if (nrow(m) == 0L) {
-      rc <- "other"
-      ce <- "unknown"
-    } else {
-      rc <- m$region_category[1L]
-      ce <- m$coding_effect[1L]
-    }
+    picked <- map_consequence(rec$terms, cq_map)
     tibble(
       chr = chr, pos = pos, ref = ref, alt = alt, qual = qual, filter = filter_val, dp = dp,
-      bcsq = bcsq_raw, consequence = tok, gene = gene, transcript = transcript, strand = strand,
-      region_category = rc, coding_effect = ce
+      bcsq = bcsq_raw, consequence = rec$consequence, gene = rec$gene, transcript = transcript, strand = strand,
+      region_category = picked[["region_category"]], coding_effect = picked[["coding_effect"]]
     )
   }
   bind_rows(lapply(records, parse_one))
@@ -176,27 +194,30 @@ main <- function() {
 
   for (i in seq_len(nrow(d))) {
     recs <- parse_bcsq_string(d$bcsq[i])
-    toks <- vapply(recs, function(z) z$consequence, character(1L))
-    toks <- unique(toks[nzchar(toks)])
+    toks <- unique(unlist(lapply(recs, function(z) z$terms)))
     picked <- map_consequence(toks, cq_map)
     csq_consequences <- if (length(toks) == 0L) NA_character_ else paste(toks, collapse = ";")
+    altering <- vapply(recs, function(z) map_consequence(z$terms, cq_map)[["coding_effect"]] %in% PROTEIN_ALTERING, logical(1L))
     wide_rows[[i]] <- tibble(
       region_category = picked[["region_category"]],
       coding_effect = picked[["coding_effect"]],
-      csq_consequences = csq_consequences
+      csq_consequences = csq_consequences,
+      genes = join_unique(vapply(recs, function(z) z$gene, character(1L))),
+      genes_protein_altering = join_unique(vapply(recs[altering], function(z) z$gene, character(1L)))
     )
     chr_i <- if ("chr" %in% names(d)) as.character(d$chr[i]) else NA_character_
     pos_i <- if ("pos" %in% names(d)) as.numeric(d$pos[i]) else NA_real_
     ref_i <- if ("ref" %in% names(d)) as.character(d$ref[i]) else NA_character_
     alt_i <- if ("alt" %in% names(d)) as.character(d$alt[i]) else NA_character_
-    qual_i <- if ("qual" %in% names(d)) as.numeric(d$qual[i]) else NA_real_
+    qual_i <- if ("qual" %in% names(d)) suppressWarnings(as.numeric(d$qual[i])) else NA_real_
     filt_i <- if ("filter" %in% names(d)) as.character(d$filter[i]) else if ("filt" %in% names(d)) as.character(d$filt[i]) else NA_character_
-    dp_i <- if ("dp" %in% names(d)) as.numeric(d$dp[i]) else NA_real_
+    dp_i <- if ("dp" %in% names(d)) suppressWarnings(as.numeric(d$dp[i])) else NA_real_
     long_parts[[i]] <- bcsq_to_long(chr_i, pos_i, ref_i, alt_i, qual_i, filt_i, dp_i, d$bcsq[i], recs, cq_map)
   }
 
   wide_add <- bind_rows(wide_rows)
   out <- bind_cols(d, wide_add)
+  if (all(c("ref", "alt") %in% names(out))) out$variant_type <- variant_type_of(as.character(out$ref), as.character(out$alt))
   readr::write_tsv(out, opts$`output-tsv`, na = "")
   message("Wrote ", opts$`output-tsv`)
 
