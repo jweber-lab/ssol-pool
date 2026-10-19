@@ -215,8 +215,13 @@ if [[ "$DRY_RUN" == false ]]; then
         bam="${BAM_FILES[$i]}"
         [[ -f "$bam" ]] || { log_error "BAM not found: $bam"; exit 1; }
         if [[ ! -f "${bam}.bai" && ! -f "${bam%.bam}.bai" && ! -f "${bam}.csi" ]]; then
-            log_error "BAM index not found for $bam (run samtools index)"
-            exit 1
+            log "BAM index not found for $bam; running samtools index"
+            if ! samtools index -@ "$THREADS" "$bam"; then
+                log_error "samtools index failed for $bam (BAM must be coordinate-sorted and its directory writable)"
+                exit 1
+            fi
+        elif [[ -f "${bam}.bai" && "${bam}.bai" -ot "$bam" ]] || [[ -f "${bam}.csi" && "${bam}.csi" -ot "$bam" ]]; then
+            log_warn "BAM index for $bam is older than the BAM; re-run samtools index if the BAM was rewritten"
         fi
         mapfile -t sms < <(samtools view -H "$bam" | awk -F'\t' '/^@RG/ {for (i = 2; i <= NF; i++) if ($i ~ /^SM:/) print substr($i, 4)}' | sort -u)
         if [[ ${#sms[@]} -ne 1 ]]; then
