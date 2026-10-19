@@ -38,7 +38,8 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Required:
-  -b, --bcf FILE              Input BCF/VCF (indexed recommended)
+  -b, --bcf FILE              Input BCF/VCF (indexed recommended). Without FORMAT/GT (e.g. from
+                              snp_call.sh), csq runs with -s - -l (per-site, samples ignored)
   -f, --reference FILE        Reference FASTA for codon translation (faidx indexed).
                               Use the **unmasked** assembly that matches your GFF coordinates
                               (not the hard-masked genome used only for alignment).
@@ -134,6 +135,13 @@ mkdir -p "$(dirname "$OUTPUT_BCF")"
 mkdir -p "$(dirname "$OUTPUT_TSV")"
 
 QUERY_TMP="$(dirname "$OUTPUT_TSV")/.query_csq_$$.tsv"
+
+# csq skips records without genotypes; pool-seq sites (snp_call.sh) have AD but no GT, so
+# ignore samples and annotate each record on its own (allele phase across sites is unknown).
+if command -v "$BCFTOOLS" &>/dev/null && ! "$BCFTOOLS" view -h "$BCF_FILE" | grep -q '^##FORMAT=<ID=GT,'; then
+    log "No FORMAT/GT in $BCF_FILE: annotating sites without genotypes (bcftools csq -s - -l)"
+    CSQ_EXTRA=(-s - -l "${CSQ_EXTRA[@]}")
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "Would run: $BCFTOOLS csq -f $REFERENCE -g $GFF ${CSQ_EXTRA[*]} --threads $THREADS -Ob -o $OUTPUT_BCF $BCF_FILE"

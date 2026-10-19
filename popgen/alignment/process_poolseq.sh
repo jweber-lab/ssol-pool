@@ -10,7 +10,7 @@
 # read merging (for overlapping reads), mapping, deduplication, and variant
 # calling preparation. BAM @RG SM (sample) is set from --sample-name (or
 # sample_name in sample_info.csv when using --sample-info) so downstream
-# tools (e.g. variant_call.sh, bcftools) see matching sample names.
+# tools (e.g. indel_call.sh, which groups reads into pools by SM) see matching sample names.
 #
 # Author: Based on workflow by JW
 # Usage: See README.md or run with --help
@@ -97,7 +97,7 @@ Optional:
   --sample-info FILE          CSV file with sample information (see sample-info.csv)
                               Columns: sample_name, read1_file, read2_file, pool_size
                               BAM @RG SM (sample) is set from sample_name so downstream
-                              tools (e.g. variant_call.sh, bcftools) see matching names.
+                              tools (e.g. indel_call.sh, bcftools) see matching names.
   --parallel-max-jobs N       Maximum concurrent jobs (default: number of CPU cores)
   --use-tmux                  Force use of tmux for parallel jobs
   --use-screen                Force use of screen for parallel jobs
@@ -1640,7 +1640,7 @@ fi
 # Step 6: Merge BAM files
 # Read group @RG SM (sample) is set from SAMPLE_NAME so that BAM sample names match
 # sample_info.csv (parallel mode) or --sample-name (single mode). Downstream tools
-# (e.g. variant_call.sh, bcftools) then see the same sample names.
+# (e.g. indel_call.sh, bcftools) then see the same sample names.
 log "Step 6/7: Merging BAM files..."
 if [[ ! -f "$FINAL_BAM" ]]; then
     # Create read group header: ID and SM = SAMPLE_NAME for downstream sample naming

@@ -20,14 +20,15 @@ See [SAMPLES.md](SAMPLES.md) for a brief description of the populations (Vancouv
 
 ## Popgen pipelines (overview)
 
-The pipeline flow is: **alignment** → **stats** (diversity, FST, PBE, variant calling, collation) → **plotting**, with **outliers** (identification and annotation) as a side branch. Conventions: Bash wrapper scripts (`.sh`) call R scripts (`.R`) in the same directory; inputs are driven by `sample_info.csv` and, where relevant, `pbe_comparisons.csv`.
+The pipeline flow is: **alignment** → **stats** (diversity, FST, PBE, collation) and **variants** (calling, consequence annotation) → **plotting**, with **outliers** (identification and annotation) as a side branch. Conventions: Bash wrapper scripts (`.sh`) call R scripts (`.R`) in the same directory; inputs are driven by `sample_info.csv` and, where relevant, `pbe_comparisons.csv`.
 
 ### Directory layout
 
 | Directory | Description | Details |
 |-----------|-------------|---------|
 | [popgen/alignment/](popgen/alignment/) | Alignment and pool-seq processing | Adapter trimming (BBtools), merging, BWA mapping, deduplication, BAM merging, mpileup/sync. Main scripts: `process_poolseq.sh`, `mapq_threshold_counts.sh`, `seq_qual_metrics.sh`. Full details: [popgen/alignment/README.md](popgen/alignment/README.md). |
-| [popgen/stats/](popgen/stats/) | Diversity, FST, PBE, variant calling, collation | π, θ, Tajima's D (grenedalf/popoolation2), FST, PBS/PBE, bcftools variant calling, **bcftools csq** annotation (`variant_csq`), windowed variant-feature counts (`variant_csq_windows`), and collation of TSV/CSV into HDF5. Scripts: `calculate_pi_theta.sh`, `calculate_fst.sh`, `calculate_pbe.sh`, `variant_call.sh`, `variant_csq.sh`, `variant_csq_windows.sh`, `collate.sh` / `collate.R`. Full details: [popgen/stats/README.md](popgen/stats/README.md). |
+| [popgen/stats/](popgen/stats/) | Diversity, FST, PBE, collation | π, θ, Tajima's D (grenedalf/popoolation2), FST, PBS/PBE, and collation of TSV/CSV into HDF5. Scripts: `calculate_pi_theta.sh`, `calculate_fst.sh`, `calculate_pbe.sh`, `collate.sh` / `collate.R`. Full details: [popgen/stats/README.md](popgen/stats/README.md). |
+| [popgen/variants/](popgen/variants/) | Variant calling and annotation | SNP calling from grenedalf read counts (`snp_call`, same filters as FST), indel calling with freebayes `--pooled-continuous` (`indel_call`), **bcftools csq** annotation (`variant_csq`), and windowed variant-feature counts (`variant_csq_windows`) for collate. Scripts: `snp_call.sh`, `indel_call.sh`, `variant_csq.sh` / `variant_csq.R`, `variant_csq_windows.sh` / `variant_csq_windows.R`. Full details: [popgen/variants/README.md](popgen/variants/README.md). |
 | [popgen/plotting/](popgen/plotting/) | R/ggplot2 plots | Diversity, FST, and PBE visualizations. Scripts: `plot_fst_cathedral.sh`, `plot_diversity.sh` / `plot_diversity.R`, `plot_fst.sh` / `plot_fst.R`, `plot_pbe.sh` / `plot_pbe.R`. Full details: [popgen/plotting/README.md](popgen/plotting/README.md). |
 | [popgen/outliers/](popgen/outliers/) | Outlier identification and annotation | Identify outlier windows and annotate with BLAST. Scripts: `identify_outliers.sh` / `identify_outliers.R`, `outlier_annotation.sh` / `outlier_annotation.R`; `blast_config.example.yml` for BLAST configuration. |
 

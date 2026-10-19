@@ -5,7 +5,7 @@ set -euo pipefail
 # repeatmasker_bed.sh
 #
 # Convert RepeatMasker .out (whitespace-delimited, not .align) to 3-column BED
-# for grenedalf --filter-mask-total-bed and variant_call --exclude-regions-bed.
+# for --filter-mask-total-bed (grenedalf stats, snp_call.sh, indel_call.sh).
 ###############################################################################
 
 MERGE=1                  # 1 = merge overlapping intervals (requires bedtools)
@@ -20,7 +20,7 @@ usage() {
 Usage: $0 -i repeatmasker.out -o repeats.bed [options]
 
 Convert RepeatMasker .out to BED (0-based, half-open). Merged output is suitable
-for --filter-mask-total-bed and --exclude-regions-bed in popgen/stats/.
+for --filter-mask-total-bed in popgen/stats/ and popgen/variants/.
 
 Options:
   -i FILE               RepeatMasker .out input (required)

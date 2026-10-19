@@ -46,8 +46,8 @@ If you use this pipeline in your research, please cite this repository and the o
 
 | Assembly | Role in this repo |
 |----------|-------------------|
-| **Unmasked** (or soft-masked; BWA treats both the same) | `--reference` in `process_poolseq.sh`; same FASTA for `variant_call.sh` mpileup |
-| **RepeatMasker BED** (e.g. `*.out.bed`) | `--filter-mask-total-bed` in `calculate_pi_theta.sh` / `calculate_fst.sh`; `--exclude-regions-bed` in `variant_call.sh` |
+| **Unmasked** (or soft-masked; BWA treats both the same) | `--reference` in `process_poolseq.sh`; same FASTA for `snp_call.sh` / `indel_call.sh` |
+| **RepeatMasker BED** (e.g. `*.out.bed`) | `--filter-mask-total-bed` in `calculate_pi_theta.sh` / `calculate_fst.sh` / `snp_call.sh` / `indel_call.sh` |
 
 **`.out` → BED:** convert RepeatMasker output with [`repeatmasker_bed.sh`](repeatmasker_bed.sh) (merges overlaps with bedtools by default):
 

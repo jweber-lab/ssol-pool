@@ -95,6 +95,7 @@ scratch.md
 help/
 *bak/
 *backup/
+*backups/
 reads/*
 primers/*
 */ptg*
