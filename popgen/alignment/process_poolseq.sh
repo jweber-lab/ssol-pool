@@ -1642,36 +1642,36 @@ fi
 # sample_info.csv (parallel mode) or --sample-name (single mode). Downstream tools
 # (e.g. indel_call.sh, bcftools) then see the same sample names.
 log "Step 6/7: Merging BAM files..."
+# Read group: ID and SM = SAMPLE_NAME. addreplacerg -w (overwrite_all) tags every read with
+# RG:Z:SAMPLE_NAME and replaces any existing @RG line; freebayes rejects reads without RG:Z.
+RG_HEADER="@RG\tID:${SAMPLE_NAME}\tSM:${SAMPLE_NAME}\tLB:${SAMPLE_NAME}\tPL:ILLUMINA"
+
+# True when the first 10000 reads of BAM $1 all carry an RG:Z tag
+bam_reads_have_rg() {
+    local n_missing
+    n_missing=$(samtools view "$1" 2>/dev/null | head -n 10000 | awk '!/\tRG:Z:/ { c++ } END { print c + 0 }' || true)
+    [[ "$n_missing" == 0 ]]
+}
+
 if [[ ! -f "$FINAL_BAM" ]]; then
-    # Create read group header: ID and SM = SAMPLE_NAME for downstream sample naming
-    RG_HEADER="@RG\tID:${SAMPLE_NAME}\tSM:${SAMPLE_NAME}\tLB:${SAMPLE_NAME}\tPL:ILLUMINA"
-    RG_FILE="${WORK_DIR}/${SAMPLE_NAME}_rg.txt"
-    if [[ "$DRY_RUN" == true ]]; then
-        log_dry_run "Would create read group file: $RG_FILE"
-    else
-        echo -e "$RG_HEADER" > "$RG_FILE"
-    fi
-    
-    # Merge BAMs (use -h to set header; then addreplacerg so all reads get RG:Z:SAMPLE_NAME)
+    # Intermediate files are written beside FINAL_BAM and renamed only once complete, so an
+    # interrupted run never leaves a FINAL_BAM that later runs would skip.
     if [[ -f "$MERGED_BAM" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
-            log_dry_run "Would execute: samtools merge -@ $THREADS -h $RG_FILE $FINAL_BAM $MERGED_BAM $UNMERGED_BAM"
-            log_dry_run "Would execute: samtools addreplacerg -r '<RG_HEADER>' -o ${FINAL_BAM}.tmp $FINAL_BAM (assign SM to all reads)"
+            log_dry_run "Would execute: samtools merge -@ $THREADS ${FINAL_BAM%.bam}.merge.tmp.bam $MERGED_BAM $UNMERGED_BAM"
+            log_dry_run "Would execute: samtools addreplacerg -w -r '<RG_HEADER>' -o ${FINAL_BAM%.bam}.rg.tmp.bam <merged> (assign SM to all reads)"
         else
-            samtools merge -@ "$THREADS" -h "$RG_FILE" "$FINAL_BAM" "$MERGED_BAM" "$UNMERGED_BAM"
-            samtools addreplacerg -r "$RG_HEADER" -o "${FINAL_BAM}.tmp" "$FINAL_BAM"
-            mv "${FINAL_BAM}.tmp" "$FINAL_BAM"
+            samtools merge -f -@ "$THREADS" -o "${FINAL_BAM%.bam}.merge.tmp.bam" "$MERGED_BAM" "$UNMERGED_BAM"
+            samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${FINAL_BAM%.bam}.rg.tmp.bam" "${FINAL_BAM%.bam}.merge.tmp.bam"
+            rm -f "${FINAL_BAM%.bam}.merge.tmp.bam"
+            mv "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
         fi
     else
-        # If no merged BAM, just use unmerged (and set read group)
         if [[ "$DRY_RUN" == true ]]; then
-            log_dry_run "Would copy: $UNMERGED_BAM to $FINAL_BAM"
-            log_dry_run "Would execute: samtools addreplacerg -r '<RG_HEADER>' -o ${FINAL_BAM}.tmp $FINAL_BAM"
-            log_dry_run "Would move: ${FINAL_BAM}.tmp to $FINAL_BAM"
+            log_dry_run "Would execute: samtools addreplacerg -w -r '<RG_HEADER>' -o ${FINAL_BAM%.bam}.rg.tmp.bam $UNMERGED_BAM"
         else
-            cp "$UNMERGED_BAM" "$FINAL_BAM"
-            samtools addreplacerg -r "$RG_HEADER" -o "${FINAL_BAM}.tmp" "$FINAL_BAM"
-            mv "${FINAL_BAM}.tmp" "$FINAL_BAM"
+            samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${FINAL_BAM%.bam}.rg.tmp.bam" "$UNMERGED_BAM"
+            mv "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
         fi
     fi
     
@@ -1692,6 +1692,11 @@ if [[ ! -f "$FINAL_BAM" ]]; then
         # (harmless overhead in single-sample mode, critical for parallel mode)
         update_csv_with_bam "$SAMPLE_INFO_CSV" "$SAMPLE_NAME" "$FINAL_BAM" true
     fi
+elif [[ "$DRY_RUN" != true ]] && ! bam_reads_have_rg "$FINAL_BAM"; then
+    log_warn "Reads in existing $FINAL_BAM lack RG:Z tags; re-tagging with SM:${SAMPLE_NAME}"
+    samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
+    mv "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
+    samtools index -@ "$THREADS" "$FINAL_BAM"
 else
     log "BAM files already merged, skipping..."
 fi

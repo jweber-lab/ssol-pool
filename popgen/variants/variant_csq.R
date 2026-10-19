@@ -18,34 +18,33 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
-#' Split BCSQ into records (comma-separated; one per transcript/ALT).
+#' Split all BCSQ strings into one table of records (comma-separated; one per transcript/ALT).
 #' Each record: consequence|gene|transcript|biotype|strand|...; the consequence
 #' field can join several terms with "&" (e.g. stop_gained&frameshift).
 #' Records starting with "@" point to a compound record at another position.
-parse_bcsq_string <- function(bcsq) {
-  if (length(bcsq) != 1L) return(list())
-  s <- bcsq[[1L]]
-  if (is.na(s) || !nzchar(s) || s %in% c(".", "NA")) return(list())
-  parts <- strsplit(s, ",", fixed = TRUE)[[1L]]
-  parts <- trimws(parts)
-  parts <- parts[nzchar(parts) & !startsWith(parts, "@")]
-  out <- list()
-  for (p in parts) {
-    fld <- strsplit(p, "|", fixed = TRUE)[[1L]]
-    if (length(fld) < 1L) next
-    cons <- sub("^[[:space:]]*\\*", "", fld[[1L]]) # leading * = downstream of stop
-    cons <- trimws(cons)
-    if (!nzchar(cons)) next
-    terms <- trimws(strsplit(cons, "&", fixed = TRUE)[[1L]])
-    out[[length(out) + 1L]] <- list(
-      consequence = cons,
-      terms = terms[nzchar(terms)],
-      gene = if (length(fld) >= 2L && nzchar(fld[[2L]])) fld[[2L]] else NA_character_,
-      raw_piece = p,
-      fields = fld
-    )
-  }
-  out
+#' Returns list(rec = records with .row index, term = terms with .rec index).
+parse_bcsq <- function(bcsq) {
+  b <- as.character(bcsq)
+  has <- which(!is.na(b) & nzchar(b) & !b %in% c(".", "NA"))
+  parts <- strsplit(b[has], ",", fixed = TRUE)
+  row <- rep(has, lengths(parts))
+  piece <- trimws(unlist(parts, use.names = FALSE))
+  keep <- nzchar(piece) & !startsWith(piece, "@")
+  row <- row[keep]; piece <- piece[keep]
+  fld <- strsplit(piece, "|", fixed = TRUE)
+  field <- function(k) vapply(fld, `[`, character(1L), k)
+  cons <- trimws(sub("^[[:space:]]*\\*", "", field(1L))) # leading * = downstream of stop
+  gene <- field(2L)
+  ok <- !is.na(cons) & nzchar(cons)
+  rec <- tibble(
+    .row = row[ok], consequence = cons[ok],
+    gene = ifelse(!is.na(gene[ok]) & nzchar(gene[ok]), gene[ok], NA_character_),
+    transcript = field(3L)[ok], strand = field(5L)[ok]
+  )
+  tl <- strsplit(rec$consequence, "&", fixed = TRUE)
+  term <- tibble(.rec = rep(seq_len(nrow(rec)), lengths(tl)), term = trimws(unlist(tl, use.names = FALSE)))
+  term <- term[nzchar(term$term), ]
+  list(rec = rec, term = term)
 }
 
 # coding_effect values that change the protein (genes_protein_altering)
@@ -61,9 +60,26 @@ variant_type_of <- function(ref, alt) {
   )
 }
 
-join_unique <- function(x) {
-  x <- unique(x[!is.na(x) & nzchar(x)])
-  if (length(x) == 0L) NA_character_ else paste(x, collapse = ";")
+#' Per group (integer id in 1..n): unique non-empty values in first-seen order, joined by ";"
+join_unique_by <- function(group, x, n) {
+  out <- rep(NA_character_, n)
+  ok <- !is.na(x) & nzchar(x)
+  group <- group[ok]; x <- x[ok]
+  u <- !duplicated(paste(group, x, sep = "\r"))
+  if (!any(u)) return(out)
+  s <- split(x[u], group[u])
+  out[as.integer(names(s))] <- vapply(s, paste, character(1L), collapse = ";")
+  out
+}
+
+#' Per group (integer id in 1..n): mapped categories of the most severe term (first on ties)
+pick_by <- function(group, region, effect, severity, n) {
+  out_region <- rep("none", n); out_effect <- rep("none", n)
+  o <- order(group, -severity, seq_along(group))
+  first <- o[!duplicated(group[o])]
+  out_region[group[first]] <- region[first]
+  out_effect[group[first]] <- effect[first]
+  list(region_category = out_region, coding_effect = out_effect)
 }
 
 # Default mapping: bcftools csq consequence token -> region_category, coding_effect, severity (higher = more severe for wide-row pick)
@@ -105,53 +121,14 @@ default_csq_map <- tribble(
   "NMD_transcript_variant", "cds", "other_coding", 60L
 )
 
-map_consequence <- function(tokens, cq_map) {
-  if (length(tokens) == 0L) {
-    return(c(region_category = "none", coding_effect = "none", severity = 0L))
-  }
-  rows <- lapply(tokens, function(tok) {
-    m <- cq_map %>% filter(.data$consequence == tok)
-    if (nrow(m) >= 1L) {
-      m[1L, ]
-    } else {
-      tibble(
-        consequence = tok, region_category = "other", coding_effect = "unknown",
-        severity = 5L
-      )
-    }
-  })
-  rows <- bind_rows(rows)
-  win <- rows %>% slice_max(.data$severity, n = 1L, with_ties = FALSE)
-  c(
-    region_category = as.character(win$region_category[1L]),
-    coding_effect = as.character(win$coding_effect[1L]),
-    severity = as.integer(win$severity[1L])
+#' Map terms to region_category / coding_effect / severity (unknown tokens -> other / unknown / 5)
+map_terms <- function(term, cq_map) {
+  m <- match(term, cq_map$consequence)
+  list(
+    region = ifelse(is.na(m), "other", as.character(cq_map$region_category[m])),
+    effect = ifelse(is.na(m), "unknown", as.character(cq_map$coding_effect[m])),
+    severity = ifelse(is.na(m), 5L, as.integer(cq_map$severity[m]))
   )
-}
-
-#' Build long table from parsed rows + original variant context
-bcsq_to_long <- function(chr, pos, ref, alt, qual, filter_val, dp, bcsq_raw, records, cq_map) {
-  if (length(records) == 0L) {
-    return(tibble(
-      chr = chr, pos = pos, ref = ref, alt = alt, qual = qual, filter = filter_val, dp = dp,
-      bcsq = NA_character_, consequence = NA_character_, gene = NA_character_,
-      transcript = NA_character_, strand = NA_character_,
-      region_category = "none", coding_effect = "none"
-    ))
-  }
-  parse_one <- function(rec) {
-    fld <- rec$fields
-    # transcript id often 3rd; biotype 4th; strand 5th — layout from bcftools csq
-    transcript <- if (length(fld) >= 3L) fld[[3L]] else NA_character_
-    strand <- if (length(fld) >= 5L) fld[[5L]] else NA_character_
-    picked <- map_consequence(rec$terms, cq_map)
-    tibble(
-      chr = chr, pos = pos, ref = ref, alt = alt, qual = qual, filter = filter_val, dp = dp,
-      bcsq = bcsq_raw, consequence = rec$consequence, gene = rec$gene, transcript = transcript, strand = strand,
-      region_category = picked[["region_category"]], coding_effect = picked[["coding_effect"]]
-    )
-  }
-  bind_rows(lapply(records, parse_one))
 }
 
 sanitize_colname <- function(s) {
@@ -189,40 +166,47 @@ main <- function() {
       group_by(.data$consequence) %>% slice_max(.data$severity, n = 1L, with_ties = FALSE) %>% ungroup()
   }
 
-  wide_rows <- vector("list", nrow(d))
-  long_parts <- vector("list", nrow(d))
+  n <- nrow(d)
+  p <- parse_bcsq(d$bcsq)
+  rec <- p$rec; term <- p$term
+  mt <- map_terms(term$term, cq_map)
+  term_row <- rec$.row[term$.rec]
 
-  for (i in seq_len(nrow(d))) {
-    recs <- parse_bcsq_string(d$bcsq[i])
-    toks <- unique(unlist(lapply(recs, function(z) z$terms)))
-    picked <- map_consequence(toks, cq_map)
-    csq_consequences <- if (length(toks) == 0L) NA_character_ else paste(toks, collapse = ";")
-    altering <- vapply(recs, function(z) map_consequence(z$terms, cq_map)[["coding_effect"]] %in% PROTEIN_ALTERING, logical(1L))
-    wide_rows[[i]] <- tibble(
-      region_category = picked[["region_category"]],
-      coding_effect = picked[["coding_effect"]],
-      csq_consequences = csq_consequences,
-      genes = join_unique(vapply(recs, function(z) z$gene, character(1L))),
-      genes_protein_altering = join_unique(vapply(recs[altering], function(z) z$gene, character(1L)))
-    )
-    chr_i <- if ("chr" %in% names(d)) as.character(d$chr[i]) else NA_character_
-    pos_i <- if ("pos" %in% names(d)) as.numeric(d$pos[i]) else NA_real_
-    ref_i <- if ("ref" %in% names(d)) as.character(d$ref[i]) else NA_character_
-    alt_i <- if ("alt" %in% names(d)) as.character(d$alt[i]) else NA_character_
-    qual_i <- if ("qual" %in% names(d)) suppressWarnings(as.numeric(d$qual[i])) else NA_real_
-    filt_i <- if ("filter" %in% names(d)) as.character(d$filter[i]) else if ("filt" %in% names(d)) as.character(d$filt[i]) else NA_character_
-    dp_i <- if ("dp" %in% names(d)) suppressWarnings(as.numeric(d$dp[i])) else NA_real_
-    long_parts[[i]] <- bcsq_to_long(chr_i, pos_i, ref_i, alt_i, qual_i, filt_i, dp_i, d$bcsq[i], recs, cq_map)
-  }
+  # Site: most severe term over all records; record: most severe of its own terms
+  site_pick <- pick_by(term_row, mt$region, mt$effect, mt$severity, n)
+  rec_pick <- pick_by(term$.rec, mt$region, mt$effect, mt$severity, nrow(rec))
+  altering <- rec_pick$coding_effect %in% PROTEIN_ALTERING
 
-  wide_add <- bind_rows(wide_rows)
-  out <- bind_cols(d, wide_add)
+  out <- bind_cols(d, tibble(
+    region_category = site_pick$region_category,
+    coding_effect = site_pick$coding_effect,
+    csq_consequences = join_unique_by(term_row, term$term, n),
+    genes = join_unique_by(rec$.row, rec$gene, n),
+    genes_protein_altering = join_unique_by(rec$.row[altering], rec$gene[altering], n)
+  ))
   if (all(c("ref", "alt") %in% names(out))) out$variant_type <- variant_type_of(as.character(out$ref), as.character(out$alt))
   readr::write_tsv(out, opts$`output-tsv`, na = "")
   message("Wrote ", opts$`output-tsv`)
 
   if (!is.null(opts$`output-long-tsv`)) {
-    long_all <- bind_rows(long_parts)
+    col <- function(nm, f = as.character, na = NA_character_) if (nm %in% names(d)) suppressWarnings(f(d[[nm]])) else rep(na, n)
+    site <- tibble(
+      chr = col("chr"), pos = col("pos", as.numeric, NA_real_), ref = col("ref"), alt = col("alt"),
+      qual = col("qual", as.numeric, NA_real_),
+      filter = if ("filter" %in% names(d)) col("filter") else col("filt"),
+      dp = col("dp", as.numeric, NA_real_)
+    )
+    # one row per BCSQ record; sites without records get a single "none" row
+    none <- setdiff(seq_len(n), rec$.row)
+    long_all <- bind_rows(
+      tibble(.row = rec$.row, bcsq = as.character(d$bcsq[rec$.row]), consequence = rec$consequence, gene = rec$gene,
+             transcript = rec$transcript, strand = rec$strand,
+             region_category = rec_pick$region_category, coding_effect = rec_pick$coding_effect),
+      tibble(.row = none, bcsq = NA_character_, consequence = NA_character_, gene = NA_character_,
+             transcript = NA_character_, strand = NA_character_, region_category = "none", coding_effect = "none")
+    )
+    long_all <- long_all[order(long_all$.row), ]
+    long_all <- bind_cols(site[long_all$.row, ], long_all %>% select(-".row"))
     readr::write_tsv(long_all, opts$`output-long-tsv`, na = "")
     message("Wrote ", opts$`output-long-tsv`)
   }

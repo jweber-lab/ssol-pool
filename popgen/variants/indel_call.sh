@@ -210,6 +210,7 @@ check_command samtools
 # RENAME maps SM -> output name (CSV sample_name, else SM).
 declare -A RENAME=()
 declare -A SEEN_SM=()
+NO_RG_BAMS=()
 if [[ "$DRY_RUN" == false ]]; then
     for i in "${!BAM_FILES[@]}"; do
         bam="${BAM_FILES[$i]}"
@@ -235,7 +236,14 @@ if [[ "$DRY_RUN" == false ]]; then
         fi
         SEEN_SM[$sm]="$bam"
         RENAME[$sm]="${SAMPLE_NAMES[$i]:-$sm}"
+        n_untagged=$(samtools view "$bam" 2>/dev/null | head -n 10000 | awk '!/\tRG:Z:/ { c++ } END { print c + 0 }' || true)
+        if [[ "$n_untagged" != 0 ]]; then
+            NO_RG_BAMS+=("$bam")
+            log_error "$bam: ${n_untagged} of the first 10000 reads have no RG:Z tag (freebayes requires one per read). Fix with:"
+            log_error "  samtools addreplacerg -w -@ $THREADS -r 'ID:${sm}' -r 'SM:${sm}' -r 'LB:${sm}' -r 'PL:ILLUMINA' -o ${bam%.bam}.rg.bam $bam && mv ${bam%.bam}.rg.bam $bam && samtools index -@ $THREADS $bam"
+        fi
     done
+    [[ ${#NO_RG_BAMS[@]} -eq 0 ]] || exit 1
 fi
 
 if [[ ! -f "${REFERENCE_FASTA}.fai" ]]; then
