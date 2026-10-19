@@ -3,13 +3,20 @@
 ###############################################################################
 # seq_qual_metrics.sh
 #
-# Compute per-window averages for coverage and mapping quality using samtools.
-# Output TSV compatible with collate: chr, start, end, sample, mean_coverage,
-# mean_mapping_quality. Coordinates are 1-based inclusive (genome convention).
+# Per-window read-depth and mapping-quality metrics per pooled sample, on the same
+# window grid as grenedalf interval windows (start = 1 + k*step; the last window per
+# chromosome is the first whose end reaches the chromosome end; end is not clipped),
+# so collate can join them onto diversity/FST windows by (chr, start, end, sample).
+# Coordinates are 1-based inclusive.
 #
-# Uses:
-#   - samtools depth: per-base depth, aggregated to windowed mean coverage
-#   - samtools view: aligned reads with MAPQ, aggregated to windowed mean MAPQ
+# One pass per sample, split into genome chunks that run in parallel (--threads):
+#   - samtools view   -> aligned bases (CIGAR M/=/X) per bin: all, MAPQ >= --min-mapq,
+#                        MAPQ 0, MAPQ-weighted; primary reads, pairs, proper pairs,
+#                        mates on another chromosome
+#   - samtools depth  -> per-base depth at MAPQ >= --min-mapq: bases with depth >= --min-depth
+# Bins are gcd(all window and step sizes) wide, so every --window-size/--step-size scale
+# is built from the same pass. Reads flagged unmapped, secondary, QC-fail or duplicate are
+# ignored (samtools depth defaults); supplementary alignments add bases but not read counts.
 #
 # Author: ssol-poolseq
 # Usage: See below or run with --help
@@ -25,6 +32,8 @@ WINDOW_SIZES=()
 STEP_SIZES=()
 THREADS=1
 MAX_JOBS=1
+MIN_MAPQ=20
+MIN_DEPTH=1
 DRY_RUN=false
 VERBOSE=false
 SAMPLE_NAMES=()
@@ -51,24 +60,37 @@ Required:
   -o, --output-dir DIR        Output directory for TSV files
 
 Optional:
-  --reference-genome FILE     Reference genome FASTA (optional; use .fai for chromosome order in output)
+  --reference-genome FILE     Reference FASTA; its .fai sets chromosome order in output (default: BAM header order)
   -w, --window-size N         Window size in bp (can be specified multiple times; default: 10000)
-  --step-size N               Step size in bp (can be specified multiple times; default: 5000 or window/2)
-  -t, --threads N             Threads for samtools (default: 1)
-  -j, --max-jobs N            Run up to N samples in parallel (default: 1)
+  --step-size N               Step size in bp (can be specified multiple times; default: window/2)
+  --min-mapq N                MAPQ threshold for mean_coverage_hq and breadth (default: $MIN_MAPQ)
+  --min-depth N               Depth (at MAPQ >= --min-mapq) for a base to count toward breadth (default: $MIN_DEPTH)
+  -t, --threads N             Genome chunks processed in parallel per sample (default: 1);
+                              each chunk runs samtools view + samtools depth (~2 cores)
+  -j, --max-jobs N            Run up to N samples in parallel (default: 1); total cores ~ 2 x threads x max-jobs
   --dry-run                   Preview commands without executing
-  --verbose                   Verbose diagnostics (temp file preview, column counts)
+  --verbose                   Verbose diagnostics
   -h, --help                  Show this help
 
 Output (per sample, per window/step combination):
-  {output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv  (one file per --window-size)
-  Columns: chr, start, end, sample, mean_coverage, mean_mapping_quality
-  (start/end are 1-based inclusive)
+  {output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv
+  Columns:
+    chr, start, end, sample      window (1-based inclusive; grenedalf grid)
+    mean_coverage                mean read depth over window bases in the chromosome (all MAPQ)
+    mean_mapping_quality         mean MAPQ weighted by aligned bases
+    mean_coverage_hq             mean depth from reads with MAPQ >= --min-mapq
+    frac_mapq0                   share of aligned bases from MAPQ 0 reads (multi-mapping / repeats)
+    breadth                      fraction of window bases with depth >= --min-depth at MAPQ >= --min-mapq
+    rel_coverage                 mean_coverage / sample median mean_coverage (windows with coverage > 0):
+                                 ~1 single copy, ~2 collapsed duplication, << 1 deletion / poor mappability
+    n_reads                      primary mapped reads starting in the window
+    frac_proper_pair             proper pairs / paired reads starting in the window
+    frac_mate_other_chr          paired reads whose mate maps to another chromosome
   Logs: {output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log
 
 Example:
-  $0 --bam sample1.bam --bam sample2.bam -o out --window-size 10000 --step-size 5000
-  $0 --sample-info sample_info.csv -o out --window-size 10000 --reference-genome /path/to/ref.fa
+  $0 --bam sample1.bam --bam sample2.bam -o out --window-size 10000 --step-size 5000 -t 6
+  $0 --sample-info sample_info.csv -o out --window-size 10000 --reference-genome /path/to/ref.fa -t 4 -j 2
   $0 --bam s.bam -o out --window-size 1000 --window-size 10000 --step-size 500 --step-size 5000
 EOF
 }
@@ -80,15 +102,15 @@ log() {
     fi
 }
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+    echo -e "${RED}[ERROR]${NC} ${LOG_PREFIX:-}$1" >&2
     if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
-        echo "[ERROR] $1" >> "$LOG_FILE"
+        echo "[ERROR] ${LOG_PREFIX:-}$1" >> "$LOG_FILE"
     fi
 }
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo -e "${YELLOW}[WARN]${NC} ${LOG_PREFIX:-}$1"
     if [[ -n "$LOG_FILE" && -n "$1" && "$LOG_REDIRECT_ACTIVE" == false ]]; then
-        echo "[WARN] $1" >> "$LOG_FILE"
+        echo "[WARN] ${LOG_PREFIX:-}$1" >> "$LOG_FILE"
     fi
 }
 log_dry_run() {
@@ -98,18 +120,15 @@ log_dry_run() {
     fi
 }
 
-dry_run_cmd() {
-    if [[ "$DRY_RUN" == true ]]; then
-        log_dry_run "Would execute: $*"
-        return 0
-    fi
-    "$@"
-}
-
 check_command() {
     command -v "$1" &>/dev/null || { log_error "$1 not found"; exit 1; }
 }
 
+gcd() {
+    local a=$1 b=$2 t
+    while (( b > 0 )); do t=$((a % b)); a=$b; b=$t; done
+    echo "$a"
+}
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -120,6 +139,8 @@ while [[ $# -gt 0 ]]; do
         --reference-genome) REFERENCE_GENOME="$2"; shift 2 ;;
         -w|--window-size) WINDOW_SIZES+=("$2"); shift 2 ;;
         --step-size) STEP_SIZES+=("$2"); shift 2 ;;
+        --min-mapq) MIN_MAPQ="$2"; shift 2 ;;
+        --min-depth) MIN_DEPTH="$2"; shift 2 ;;
         -t|--threads) THREADS="$2"; shift 2 ;;
         -j|--max-jobs) MAX_JOBS="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
@@ -134,9 +155,14 @@ if [[ -z "$OUTPUT_DIR" ]]; then
     usage
     exit 1
 fi
-if ! [[ "$MAX_JOBS" =~ ^[0-9]+$ ]] || [[ "$MAX_JOBS" -lt 1 ]]; then
-    log_error "Invalid --max-jobs (must be a positive integer): $MAX_JOBS"
-    usage
+for pair in "max-jobs:$MAX_JOBS" "threads:$THREADS"; do
+    if ! [[ "${pair#*:}" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "Invalid --${pair%%:*} (must be a positive integer): ${pair#*:}"
+        exit 1
+    fi
+done
+if ! [[ "$MIN_MAPQ" =~ ^[0-9]+$ && "$MIN_DEPTH" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "--min-mapq must be >= 0 and --min-depth >= 1 (integers)"
     exit 1
 fi
 
@@ -181,8 +207,10 @@ if [[ -n "$SAMPLE_INFO_CSV" ]]; then
         if [[ -f "$bam" ]]; then
             SAMPLE_NAMES+=("$name")
             BAM_FILES+=("$bam")
+        else
+            log_warn "BAM not found for sample $name: $bam (skipped)"
         fi
-    done < <(grep -v '^#' "$SAMPLE_INFO_CSV" | tr -d '"')
+    done < <(grep -v '^#' "$SAMPLE_INFO_CSV" | tr -d '"\r')
 fi
 
 if [[ ${#BAM_FILES[@]} -eq 0 ]]; then
@@ -200,188 +228,247 @@ if [[ ${#WINDOW_SIZES[@]} -eq 0 ]]; then
     WINDOW_SIZE_ARRAY=(10000)
     STEP_SIZE_ARRAY=(5000)
     log "Using default window=10000, step=5000 (step = window/2)"
-elif [[ ${#WINDOW_SIZES[@]} -gt 0 ]]; then
+else
     WINDOW_SIZE_ARRAY=("${WINDOW_SIZES[@]}")
     STEP_SIZE_ARRAY=()
     for i in "${!WINDOW_SIZE_ARRAY[@]}"; do
         if [[ ${#STEP_SIZES[@]} -gt i && -n "${STEP_SIZES[$i]:-}" ]]; then
             STEP_SIZE_ARRAY[$i]="${STEP_SIZES[$i]}"
-            log "Window/step scale $((i+1)): window=${WINDOW_SIZE_ARRAY[$i]}, step=${STEP_SIZES[$i]} (from --step-size)"
         else
             STEP_SIZE_ARRAY[$i]=$((${WINDOW_SIZE_ARRAY[$i]} / 2))
-            log "Window/step scale $((i+1)): window=${WINDOW_SIZE_ARRAY[$i]}, step=${STEP_SIZE_ARRAY[$i]} (default: step = window/2)"
         fi
+        log "Window/step scale $((i+1)): window=${WINDOW_SIZE_ARRAY[$i]}, step=${STEP_SIZE_ARRAY[$i]}"
     done
 fi
-if [[ ${#WINDOW_SIZE_ARRAY[@]} -gt 1 ]]; then
-    log "Multi-scale mode: ${#WINDOW_SIZE_ARRAY[@]} window/step combinations"
-fi
-if [[ "$MAX_JOBS" -gt 1 ]]; then
-    log "Parallel mode: up to $MAX_JOBS samples at a time"
+BIN=0
+for i in "${!WINDOW_SIZE_ARRAY[@]}"; do
+    for v in "${WINDOW_SIZE_ARRAY[$i]}" "${STEP_SIZE_ARRAY[$i]}"; do
+        if ! [[ "$v" =~ ^[1-9][0-9]*$ ]]; then
+            log_error "Window and step sizes must be positive integers (got: $v)"
+            exit 1
+        fi
+        BIN=$(gcd "$v" "$BIN")
+    done
+done
+WINDOWS_CSV=$(IFS=,; echo "${WINDOW_SIZE_ARRAY[*]}")
+STEPS_CSV=$(IFS=,; echo "${STEP_SIZE_ARRAY[*]}")
+log "Bin size: ${BIN} bp (gcd of window and step sizes); MAPQ threshold: ${MIN_MAPQ}; breadth depth: ${MIN_DEPTH}"
+log "Parallelism: ${THREADS} chunk(s) per sample, ${MAX_JOBS} sample(s) at a time"
+if (( BIN < 50 )); then
+    log_warn "Bin size ${BIN} bp is small (window/step sizes share few factors); binning will use more memory and time"
 fi
 
-# Process one sample: index BAM (if needed), then run all window/step scales for that sample.
+# --- awk programs ----------------------------------------------------------------------
+
+# samtools view lines -> per-bin sums. Regions file (idx, chr, start, end) is read first; aligned
+# bases are clipped to the chunk's region so reads spanning chunk edges are counted once.
+read -r -d '' AWK_VIEW << 'EOF' || true
+BEGIN { OFS = "\t" }
+FNR == NR { RI[$2] = $1; RBEG[$2] = $3; REND[$2] = $4; next }
+function addseg(p, n,    b, room, k) {
+    if (p < rs) { n -= rs - p; p = rs }
+    if (p + n - 1 > re) n = re - p + 1
+    while (n > 0) {
+        b = int((p - 1) / g); room = (b + 1) * g - p + 1; k = (n < room) ? n : room
+        key = ci SUBSEP b; seen[key] = 1
+        A[key] += k; MW[key] += k * mq
+        if (mq >= q) H[key] += k
+        if (mq == 0) Z[key] += k
+        p += k; n -= k
+    }
+}
+{
+    chr = $3; if (!(chr in RI)) next
+    ci = RI[chr]; rs = RBEG[chr]; re = REND[chr]
+    flag = $2 + 0; pos = $4 + 0; mq = $5 + 0; cig = $6
+    if (cig == "*") next
+    p = pos
+    while (match(cig, /^[0-9]+[MIDNSHP=X]/)) {
+        n = substr(cig, 1, RLENGTH - 1) + 0; op = substr(cig, RLENGTH, 1); cig = substr(cig, RLENGTH + 1)
+        if (op == "M" || op == "=" || op == "X") { addseg(p, n); p += n }
+        else if (op == "D" || op == "N") p += n
+    }
+    if (pos >= rs && pos <= re && int(flag / 2048) % 2 == 0) {
+        key = ci SUBSEP int((pos - 1) / g); seen[key] = 1
+        R[key]++
+        if (flag % 2 == 1) {
+            P[key]++
+            if (int(flag / 2) % 2 == 1) PP[key]++
+            if (int(flag / 8) % 2 == 0 && $7 != "=" && $7 != chr) MO[key]++
+        }
+    }
+}
+END {
+    for (key in seen) {
+        split(key, kk, SUBSEP)
+        print kk[1], kk[2], "V", A[key] + 0, H[key] + 0, Z[key] + 0, MW[key] + 0, R[key] + 0, P[key] + 0, PP[key] + 0, MO[key] + 0
+    }
+}
+EOF
+
+# samtools depth -a lines -> per-bin counts of bases with depth >= md
+read -r -d '' AWK_DEPTH << 'EOF' || true
+BEGIN { OFS = "\t" }
+FNR == NR { RI[$2] = $1; next }
+{
+    key = RI[$1] SUBSEP int(($2 - 1) / g)
+    if ($3 >= md) C[key]++
+    else if (!(key in C)) C[key] = 0
+}
+END { for (key in C) { split(key, kk, SUBSEP); print kk[1], kk[2], "D", C[key] } }
+EOF
+
+# Sorted bin lines (idx, bin, type, values) -> one window table per scale, per chromosome via
+# prefix sums. Chromosome table (idx, chr, length) is read first.
+read -r -d '' AWK_WINDOWS << 'EOF' || true
+BEGIN {
+    OFS = "\t"
+    ns = split(wins, W, ","); split(steps, S, ",")
+    for (j = 1; j <= ns; j++) out[j] = prefix "_" j ".tsv"
+    cur = ""
+}
+FNR == NR { NAME[$1] = $2; LEN[$1] = $3; next }
+function fmt(x) { return (x == "NA") ? "NA" : sprintf("%.4g", x) }
+function flush(ci,    L, nb, b, f, j, w, s, start, end, e, b0, b1, nbases, a, h, z, mw, r, pp, pr, mo, c) {
+    if (ci == "") return
+    L = LEN[ci]; nb = int((L + g - 1) / g)
+    for (f = 1; f <= 9; f++) cum[f, -1] = 0
+    for (b = 0; b < nb; b++)
+        for (f = 1; f <= 9; f++) cum[f, b] = cum[f, b - 1] + V[f, b]
+    for (j = 1; j <= ns; j++) {
+        w = W[j]; s = S[j]
+        for (start = 1; ; start += s) {
+            end = start + w - 1; e = (end < L) ? end : L
+            b0 = int((start - 1) / g); b1 = int((e + g - 1) / g) - 1
+            nbases = e - start + 1
+            a = cum[1, b1] - cum[1, b0 - 1]; h = cum[2, b1] - cum[2, b0 - 1]; z = cum[3, b1] - cum[3, b0 - 1]
+            mw = cum[4, b1] - cum[4, b0 - 1]; r = cum[5, b1] - cum[5, b0 - 1]; pr = cum[6, b1] - cum[6, b0 - 1]
+            pp = cum[7, b1] - cum[7, b0 - 1]; mo = cum[8, b1] - cum[8, b0 - 1]; c = cum[9, b1] - cum[9, b0 - 1]
+            print ci, NAME[ci], start, end, fmt(a / nbases), fmt(a > 0 ? mw / a : "NA"), fmt(h / nbases), \
+                  fmt(a > 0 ? z / a : "NA"), fmt(c / nbases), r, fmt(pr > 0 ? pp / pr : "NA"), fmt(pr > 0 ? mo / pr : "NA") > out[j]
+            if (end >= L) break
+        }
+    }
+    delete V; delete cum
+}
+{
+    if ($1 != cur) { flush(cur); cur = $1 }
+    if ($3 == "V") { for (f = 1; f <= 8; f++) V[f, $2] += $(f + 3) }
+    else V[9, $2] += $4
+}
+END { flush(cur) }
+EOF
+
+# --- per-sample processing ---------------------------------------------------------------
+
+# Process one sample: index BAM if needed, compute bins over parallel chunks, build all scales.
 process_one_sample() {
     local bam="$1" sample_name="$2"
-    local sample_out out_tsv depth_tsv mapq_tsv scale_idx WINDOW_SIZE STEP_SIZE
+    local sample_out tmp chroms total target n_chunks i j w s out_tsv median
     sample_out="${OUTPUT_DIR}/${sample_name}"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dry_run "Sample $sample_name: $bam"
+        log_dry_run "  per chunk (${THREADS} in parallel): samtools view -F 0x704 <bam> <regions> | awk (bins of ${BIN} bp)"
+        log_dry_run "  per chunk: samtools depth -a -Q ${MIN_MAPQ} -r <region> <bam> | awk (bases with depth >= ${MIN_DEPTH})"
+        for i in "${!WINDOW_SIZE_ARRAY[@]}"; do
+            log_dry_run "  -> ${sample_out}/seq_qual_metrics_w${WINDOW_SIZE_ARRAY[$i]}_s${STEP_SIZE_ARRAY[$i]}.tsv"
+        done
+        return 0
+    fi
+
     mkdir -p "$sample_out"
+    tmp=$(mktemp -d "${sample_out}/.tmp_seq_qual.XXXXXX")
+    trap 'kill $(jobs -rp) 2>/dev/null || true; rm -rf "'"$tmp"'"' EXIT
 
-    if [[ ! -f "${bam}.bai" && ! -f "${bam%.bam}.bai" ]]; then
-        log "Sample: $sample_name — indexing BAM..."
-        dry_run_cmd samtools index -@ "$THREADS" "$bam" || true
+    if [[ ! -f "${bam}.bai" && ! -f "${bam%.bam}.bai" && ! -f "${bam}.csi" ]]; then
+        log "Indexing BAM: $bam"
+        samtools index -@ "$THREADS" "$bam" || { log_error "samtools index failed for $bam"; return 1; }
     fi
 
-    for scale_idx in "${!WINDOW_SIZE_ARRAY[@]}"; do
-        WINDOW_SIZE="${WINDOW_SIZE_ARRAY[$scale_idx]}"
-        STEP_SIZE="${STEP_SIZE_ARRAY[$scale_idx]}"
-        out_tsv="${sample_out}/seq_qual_metrics_w${WINDOW_SIZE}_s${STEP_SIZE}.tsv"
-
-        # Coordinates: 1-based inclusive (genome convention). Window start = int((pos-1)/step)*step + 1; end = start + window_size - 1.
-        log "Processing sample: $sample_name (window=$WINDOW_SIZE, step=$STEP_SIZE)"
-        log "  BAM: $bam"
-        log "  Window size: $WINDOW_SIZE bp"
-        log "  Step size: $STEP_SIZE bp"
-
-        # 1) Coverage: samtools depth (1-based pos) -> windowed mean. Windows 1-based inclusive.
-        log "  Computing per-window mean coverage..."
-        depth_tsv=$(mktemp -t depth.XXXXXX.tsv)
-        if [[ "$DRY_RUN" != true ]]; then
-            # Window start 1-based: int((pos-1)/s)*s + 1; end inclusive: start + w - 1
-            samtools depth -aa -@ "$THREADS" "$bam" | awk -v w="$WINDOW_SIZE" -v s="$STEP_SIZE" '
-        BEGIN { OFS="\t" }
-        {
-            chr=$1; pos=$2+0; depth=$3+0
-            win = int((pos-1)/s)*s + 1
-            key = chr "\t" win
-            sum[key] += depth
-            cnt[key] += 1
-        }
-        END {
-            for (k in sum) {
-                split(k, a, "\t")
-                print a[1], a[2], a[2]+w-1, sum[k]/cnt[k]
-            }
-        }
-        ' | sort -k1,1 -k2,2n > "$depth_tsv"
-            if [[ "$VERBOSE" == true ]]; then
-                log "  [verbose] depth_tsv first 3 lines:"
-                head -n 3 "$depth_tsv" | while IFS= read -r line; do log "    $line"; done
-                log "  [verbose] depth_tsv columns: $(head -n 1 "$depth_tsv" | awk '{print NF}')"
-            fi
+    # Chromosome table: idx, name, length (reference .fai order when given, else BAM header order)
+    samtools view -H "$bam" | awk -F'\t' '$1 == "@SQ" { for (i = 2; i <= NF; i++) { if ($i ~ /^SN:/) n = substr($i, 4); if ($i ~ /^LN:/) l = substr($i, 4) } print n "\t" l }' > "${tmp}/header.tsv"
+    if [[ -n "$REFERENCE_GENOME" && -f "${REFERENCE_GENOME}.fai" ]]; then
+        awk -F'\t' -v OFS='\t' 'NR == FNR { ord[$1] = NR; next } { print ($1 in ord) ? ord[$1] : 1000000 + FNR, $1, $2 }' \
+            "${REFERENCE_GENOME}.fai" "${tmp}/header.tsv" | sort -k1,1n > "${tmp}/chroms.tsv"
     else
-        log_dry_run "samtools depth -aa $bam | awk ... | sort > depth_tsv"
+        awk -F'\t' -v OFS='\t' '{ print NR, $1, $2 }' "${tmp}/header.tsv" > "${tmp}/chroms.tsv"
+    fi
+    chroms=$(wc -l < "${tmp}/chroms.tsv")
+    [[ "$chroms" -gt 0 ]] || { log_error "No @SQ lines in $bam"; return 1; }
+    total=$(awk '{ s += $3 } END { print s }' "${tmp}/chroms.tsv")
+
+    # Chunks: chromosomes split at bin boundaries into pieces of ~total/(4*threads) (>= 1 Mb);
+    # small chromosomes are packed together. Each chunk lists each chromosome at most once.
+    target=$(( total / (4 * THREADS) ))
+    (( target < 1000000 )) && target=1000000
+    target=$(( (target + BIN - 1) / BIN * BIN ))
+    awk -F'\t' -v OFS='\t' -v t="$target" -v dir="$tmp" '
+        { idx = $1; chr = $2; L = $3
+          for (s = 1; s <= L; s += t) {
+              e = s + t - 1; if (e > L) e = L
+              if (acc + (e - s + 1) > t && acc > 0) { n++; acc = 0 }
+              print idx, chr, s, e > (dir "/chunk_" n ".regions")
+              acc += e - s + 1
+              if (acc >= t) { n++; acc = 0 }
+          } }
+        END { }' "${tmp}/chroms.tsv"
+    n_chunks=$(ls "${tmp}"/chunk_*.regions | wc -l)
+    log "Sample $sample_name: ${chroms} chromosome(s), ${total} bp, ${n_chunks} chunk(s)"
+
+    run_chunk() {
+        local reg="$1" base="${1%.regions}"
+        while IFS=$'\t' read -r _ c s e; do
+            samtools view -F 0x704 "$bam" "{${c}}:${s}-${e}"
+        done < "$reg" | awk -v g="$BIN" -v q="$MIN_MAPQ" "$AWK_VIEW" "$reg" - > "${base}.bins" || return 1
+        while IFS=$'\t' read -r _ c s e; do
+            samtools depth -a -Q "$MIN_MAPQ" -r "{${c}}:${s}-${e}" "$bam"
+        done < "$reg" | awk -v g="$BIN" -v md="$MIN_DEPTH" "$AWK_DEPTH" "$reg" - >> "${base}.bins" || return 1
+    }
+
+    local reg
+    for reg in "${tmp}"/chunk_*.regions; do
+        while (( $(jobs -rp | wc -l) >= THREADS )); do
+            wait -n || true
+        done
+        { run_chunk "$reg" || touch "${reg%.regions}.failed"; } &
+    done
+    wait
+    if compgen -G "${tmp}/chunk_*.failed" > /dev/null; then
+        log_error "$(ls "${tmp}"/chunk_*.failed | wc -l) chunk(s) failed for $sample_name ($bam)"
+        return 1
     fi
 
-    # 2) MAPQ: samtools view -> chr, start, end, mapq -> windowed mean
-    log "  Computing per-window mean mapping quality..."
-    mapq_tsv=$(mktemp -t mapq.XXXXXX.tsv)
-    if [[ "$DRY_RUN" != true ]]; then
-        # BAM pos is 1-based; window start = int((pos-1)/s)*s+1; overlap when win <= end && (win+w-1) >= pos
-        samtools view -F 4 -@ "$THREADS" "$bam" | awk -v w="$WINDOW_SIZE" -v s="$STEP_SIZE" '
-        function ref_len(cig) {
-            r = 0
-            n = length(cig)
-            num = ""
-            for (i = 1; i <= n; i++) {
-                c = substr(cig, i, 1)
-                if (c ~ /[0-9]/) num = num c
-                else if (c ~ /[MDN=X]/) { r += num+0; num = "" }
-                else num = ""
-            }
-            return r
-        }
+    cat "${tmp}"/chunk_*.bins | sort -t$'\t' -k1,1n -k2,2n -S 1G > "${tmp}/bins.sorted"
+    awk -F'\t' -v g="$BIN" -v wins="$WINDOWS_CSV" -v steps="$STEPS_CSV" -v prefix="${tmp}/scale" \
+        "$AWK_WINDOWS" "${tmp}/chroms.tsv" "${tmp}/bins.sorted"
+
+    for i in "${!WINDOW_SIZE_ARRAY[@]}"; do
+        j=$((i + 1)); w="${WINDOW_SIZE_ARRAY[$i]}"; s="${STEP_SIZE_ARRAY[$i]}"
+        out_tsv="${sample_out}/seq_qual_metrics_w${w}_s${s}.tsv"
+        median=$(awk -F'\t' '$5 > 0 { print $5 }' "${tmp}/scale_${j}.tsv" | sort -g | awk '{ v[NR] = $1 } END { if (NR == 0) print "NA"; else if (NR % 2) print v[(NR + 1) / 2]; else print (v[NR / 2] + v[NR / 2 + 1]) / 2 }')
         {
-            chr = $3
-            pos = $4+0
-            cig = $6
-            mapq = $5+0
-            len = ref_len(cig)
-            end = pos + len - 1
-            win = int((pos-1)/s)*s + 1
-            while (win <= end) {
-                if ((win + w - 1) >= pos) {
-                    key = chr "\t" win
-                    sum[key] += mapq
-                    cnt[key] += 1
-                }
-                win += s
-            }
-        }
-        END {
-            for (k in sum) {
-                split(k, a, "\t")
-                print a[1], a[2], a[2]+w-1, sum[k]/cnt[k]
-            }
-        }
-        ' | sort -k1,1 -k2,2n > "$mapq_tsv"
-            if [[ "$VERBOSE" == true ]]; then
-                log "  [verbose] mapq_tsv first 3 lines:"
-                head -n 3 "$mapq_tsv" | while IFS= read -r line; do log "    $line"; done
-                log "  [verbose] mapq_tsv columns: $(head -n 1 "$mapq_tsv" | awk '{print NF}')"
-            fi
-    else
-        log_dry_run "samtools view -F 4 $bam | awk ... | sort > mapq_tsv"
-    fi
-
-    # 3) Merge coverage and MAPQ by (chr, start); add sample column. Drive from depth so chr is always present. Output: chr, start, end (1-based inclusive), sample, mean_coverage, mean_mapping_quality.
-    if [[ "$DRY_RUN" != true ]]; then
-        (
-            printf '%s\n' 'chr	start	end	sample	mean_coverage	mean_mapping_quality'
-            awk -v sn="$sample_name" '
-                BEGIN { OFS="\t" }
-                NR==FNR {
-                    mapq[$1"\t"$2]=$4
-                    next
-                }
-                {
-                    key=$1"\t"$2
-                    mapq_val = (key in mapq) ? mapq[key] : ""
-                    print $1, $2, $3, sn, $4, mapq_val
-                }
-            ' "$mapq_tsv" "$depth_tsv" | sort -k1,1 -k2,2n
-        ) > "$out_tsv"
+            printf 'chr\tstart\tend\tsample\tmean_coverage\tmean_mapping_quality\tmean_coverage_hq\tfrac_mapq0\tbreadth\trel_coverage\tn_reads\tfrac_proper_pair\tfrac_mate_other_chr\n'
+            awk -F'\t' -v OFS='\t' -v sn="$sample_name" -v med="$median" '{
+                rel = (med == "NA" || med == 0) ? "NA" : sprintf("%.4g", $5 / med)
+                print $2, $3, $4, sn, $5, $6, $7, $8, $9, rel, $10, $11, $12 }' "${tmp}/scale_${j}.tsv"
+        } > "$out_tsv"
+        log "  Wrote $out_tsv ($(( $(wc -l < "$out_tsv") - 1 )) windows; median coverage ${median})"
         if [[ "$VERBOSE" == true ]]; then
-            log "  [verbose] Merged output (before ref-order sort) first 3 lines:"
             head -n 3 "$out_tsv" | while IFS= read -r line; do log "    $line"; done
-            log "  [verbose] Merged columns: $(head -n 1 "$out_tsv" | awk '{print NF}'), first data col1: $(sed -n '2p' "$out_tsv" | cut -f1)"
         fi
-        rm -f "$depth_tsv" "$mapq_tsv"
-        # Optional: sort by reference chromosome order (from .fai)
-        # Prepend order to header too so cut -f2- does not drop chr from the header
-        if [[ -n "$REFERENCE_GENOME" ]] && [[ -f "${REFERENCE_GENOME}.fai" ]]; then
-            log "  Sorting by reference chromosome order"
-            if [[ "$VERBOSE" == true ]]; then
-                log "  [verbose] Before ref-order sort: first data col1 = $(sed -n '2p' "$out_tsv" | cut -f1)"
-            fi
-            awk -v OFS="\t" 'NR==FNR{ord[$1]=NR; next} FNR==1{print 0, $0; next} {print (ord[$1]?ord[$1]:999999), $0}' \
-                "${REFERENCE_GENOME}.fai" "$out_tsv" | sort -k1,1n -k3,3n -k4,4n | cut -f2- > "${out_tsv}.tmp" && mv "${out_tsv}.tmp" "$out_tsv"
-            if [[ "$VERBOSE" == true ]]; then
-                log "  [verbose] After ref-order sort: first 3 lines:"
-                head -n 3 "$out_tsv" | while IFS= read -r line; do log "    $line"; done
-                log "  [verbose] After ref-order columns: $(head -n 1 "$out_tsv" | awk '{print NF}'), first data col1: $(sed -n '2p' "$out_tsv" | cut -f1)"
-            fi
-        fi
-        log "  Wrote $out_tsv"
-    else
-        log_dry_run "Merge depth and MAPQ -> $out_tsv"
-    fi
     done
 }
 
 # Start processing
 if [[ "$DRY_RUN" == true ]]; then
     log_dry_run "DRY-RUN MODE: Commands will be previewed but not executed"
-    log_dry_run ""
-    log_dry_run "Samples to process: ${#BAM_FILES[@]}"
-    for i in "${!BAM_FILES[@]}"; do
-        log_dry_run "  Sample $((i+1)): ${BAM_FILES[$i]}"
-    done
-    log_dry_run "Window/step combinations: ${#WINDOW_SIZE_ARRAY[@]}"
-    log_dry_run ""
+    log_dry_run "Samples to process: ${#BAM_FILES[@]}; window/step combinations: ${#WINDOW_SIZE_ARRAY[@]}"
 fi
 
-declare -a PIDS=()
+STATUS_DIR="${LOG_DIR}/.status_${TIMESTAMP}"
+mkdir -p "$STATUS_DIR"
+declare -a RUN_SAMPLES=()
 for i in "${!BAM_FILES[@]}"; do
     bam="${BAM_FILES[$i]}"
     if [[ ${#SAMPLE_NAMES[@]} -gt i && -n "${SAMPLE_NAMES[$i]:-}" ]]; then
@@ -394,35 +481,27 @@ for i in "${!BAM_FILES[@]}"; do
 
     if [[ "$DRY_RUN" == true ]]; then
         process_one_sample "$bam" "$sample_name"
-    elif [[ "$MAX_JOBS" -gt 1 ]]; then
-        while (( ${#PIDS[@]} >= MAX_JOBS )); do
-            for pid_idx in "${!PIDS[@]}"; do
-                if ! kill -0 "${PIDS[$pid_idx]}" 2>/dev/null; then
-                    wait "${PIDS[$pid_idx]}" 2>/dev/null || true
-                    unset 'PIDS[$pid_idx]'
-                fi
-            done
-            PIDS=("${PIDS[@]}")
-            if (( ${#PIDS[@]} >= MAX_JOBS )); then
-                sleep 0.1
-            fi
-        done
-        ( export LOG_PREFIX="[$sample_name] "; process_one_sample "$bam" "$sample_name" ) &
-        PIDS+=($!)
-    else
-        process_one_sample "$bam" "$sample_name"
+        continue
     fi
-done
-if [[ "$MAX_JOBS" -gt 1 && "$DRY_RUN" != true ]]; then
-    for pid in "${PIDS[@]}"; do
-        wait "$pid" 2>/dev/null || true
+    while (( $(jobs -rp | wc -l) >= MAX_JOBS )); do
+        wait -n || true
     done
-fi
+    # errexit stays active in the subshell; the status file is written only when the sample completes
+    ( export LOG_PREFIX="[$sample_name] "; process_one_sample "$bam" "$sample_name"; touch "${STATUS_DIR}/${i}.ok" ) &
+    RUN_SAMPLES[$i]="$sample_name"
+done
+wait
+FAILED_SAMPLES=()
+for i in "${!RUN_SAMPLES[@]}"; do
+    [[ -f "${STATUS_DIR}/${i}.ok" ]] || FAILED_SAMPLES+=("${RUN_SAMPLES[$i]}")
+done
+rm -rf "$STATUS_DIR"
 
 if [[ "$DRY_RUN" == true ]]; then
-    log_dry_run ""
-    log_dry_run "DRY-RUN complete. All checks passed."
-    log_dry_run "Run without --dry-run to execute the analysis."
+    log_dry_run "DRY-RUN complete. Run without --dry-run to execute the analysis."
+elif [[ ${#FAILED_SAMPLES[@]} -gt 0 ]]; then
+    log_error "Failed samples: ${FAILED_SAMPLES[*]} (see $LOG_FILE)"
+    exit 1
 else
     log "Done. Output under $OUTPUT_DIR"
 fi

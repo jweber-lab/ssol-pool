@@ -15,7 +15,9 @@
 # Output files:
 #   diversity_w{W}_s{S}.h5  (windowed only; single is not supported)
 #     Group /windows: chr, start, end, sample, pi, theta, tajima_d,
-#     *_rank, *_quantile, mean_coverage, mean_mapping_quality, n_snps (total.passed), n_total (total.passed + total.invariant),
+#     *_rank, *_quantile, n_snps (total.passed), n_total (total.passed + total.invariant),
+#     seq_qual columns when --seq-qual-dir is set (mean_coverage, mean_mapping_quality, mean_coverage_hq,
+#     frac_mapq0, breadth, rel_coverage, n_reads, frac_proper_pair, frac_mate_other_chr),
 #     optional n_sites / n_sites_snp / n_sites_indel / n_csq_* / n_region_* / n_effect_* counts and
 #     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set
 #     (the same window columns are joined into fst_w*.h5 and pbe_w*.h5)
@@ -384,6 +386,9 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   d %>% select(any_of(c("chr", "pos", "start", "end", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
 }
 
+SEQ_QUAL_COLS <- c("mean_coverage", "mean_mapping_quality", "mean_coverage_hq", "frac_mapq0", "breadth",
+                   "rel_coverage", "n_reads", "frac_proper_pair", "frac_mate_other_chr")
+
 collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, variant_tsv_dir = NULL, variant_feature_dir = NULL, write_summary = TRUE, verbose = FALSE) {
   infos <- find_diversity_files(diversity_dir)
   if (length(infos) == 0) return(invisible(NULL))
@@ -428,17 +433,16 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     }
     if (!is.null(seq_qual_dir) && dir.exists(seq_qual_dir)) {
       n_before_join <- nrow(d)
-      sq_files <- list.files(seq_qual_dir, pattern = "seq_qual_metrics.*\\.tsv$", full.names = TRUE, recursive = TRUE)
+      sq_files <- list.files(seq_qual_dir, pattern = paste0("^seq_qual_metrics_", key, "\\.tsv$"), full.names = TRUE, recursive = TRUE)
       sq_list <- lapply(sq_files, function(f) {
         x <- read_tab(f)
         if (!all(c("chr", "start", "end", "sample", "mean_coverage", "mean_mapping_quality") %in% names(x))) return(NULL)
-        x
+        x %>% select(any_of(c("chr", "start", "end", "sample", SEQ_QUAL_COLS)))
       })
       sq_list <- sq_list[!vapply(sq_list, is.null, logical(1L))]
       if (length(sq_list) > 0) {
-        sq <- bind_rows(sq_list)
-        d <- d %>% left_join(sq %>% select(all_of(c("chr", "start", "end", "sample", "mean_coverage", "mean_mapping_quality"))),
-                             by = c("chr", "start", "end", "sample"))
+        sq <- bind_rows(sq_list) %>% distinct(chr, start, end, sample, .keep_all = TRUE)
+        d <- d %>% left_join(sq, by = c("chr", "start", "end", "sample"))
         if (verbose) message("[verbose] diversity ", key, " after seq_qual join: n_row ", n_before_join, " -> ", nrow(d), " (duplicates if >before)")
       }
     }
@@ -472,7 +476,7 @@ write_diversity_h5 <- function(d, path) {
   grp[["sample"]] <- as.character(d$sample)
   core_num <- intersect(
     c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile",
-      "tajima_d_rank", "tajima_d_quantile", "mean_coverage", "mean_mapping_quality", "n_snps", "n_total"),
+      "tajima_d_rank", "tajima_d_quantile", SEQ_QUAL_COLS, "n_snps", "n_total"),
     names(d)
   )
   vf_num <- grep("^n_(csq|region|effect|sites)", names(d), value = TRUE, ignore.case = TRUE)

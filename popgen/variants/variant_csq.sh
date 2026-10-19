@@ -43,7 +43,8 @@ Required:
   -f, --reference FILE        Reference FASTA for codon translation (faidx indexed).
                               Use the **unmasked** assembly that matches your GFF coordinates
                               (not the hard-masked genome used only for alignment).
-  -g, --gff FILE              GFF3 for bcftools csq (see bcftools howto)
+  -g, --gff FILE              GFF3 for bcftools csq (see bcftools howto). Sites on chromosomes
+                              without GFF features (gene-free scaffolds) are kept without BCSQ
   -o, --output-bcf FILE       Output BCF path with BCSQ annotations
   OR --output-dir DIR         Output directory; writes calls.csq.bcf and annotated TSV
 
@@ -153,8 +154,42 @@ fi
 
 command -v "$BCFTOOLS" &>/dev/null || { log_error "bcftools not found: $BCFTOOLS"; exit 1; }
 
-log "Running bcftools csq -> $OUTPUT_BCF"
-"$BCFTOOLS" csq -f "$REFERENCE" -g "$GFF" "${CSQ_EXTRA[@]}" --threads "$THREADS" -Ob -o "$OUTPUT_BCF" "$BCF_FILE"
+# csq aborts on records whose chromosome has no GFF features (e.g. gene-free scaffolds). --force
+# would also hide REF/fasta mismatches, so instead csq runs only on chromosomes present in the GFF
+# and its BCSQ is transferred back onto the full input; other sites are kept without BCSQ.
+CONTIG_TMP="$(dirname "$OUTPUT_BCF")/.csq_contigs_$$"
+mkdir -p "$CONTIG_TMP"
+trap 'rm -rf "$CONTIG_TMP"' EXIT
+awk -F'\t' '!/^#/ && NF >= 9 { print $1 }' "$GFF" | sort -u > "${CONTIG_TMP}/gff"
+CSQ_INPUT="$BCF_FILE"
+if ! "$BCFTOOLS" index -s "$CSQ_INPUT" > "${CONTIG_TMP}/vcf.stats" 2>/dev/null; then
+    log "No index for $BCF_FILE: writing an indexed temporary BCF"
+    CSQ_INPUT="${CONTIG_TMP}/input.bcf"
+    "$BCFTOOLS" view -Ob --threads "$THREADS" -o "$CSQ_INPUT" "$BCF_FILE"
+    "$BCFTOOLS" index -f "$CSQ_INPUT"
+    "$BCFTOOLS" index -s "$CSQ_INPUT" > "${CONTIG_TMP}/vcf.stats"
+fi
+cut -f1 "${CONTIG_TMP}/vcf.stats" | sort -u > "${CONTIG_TMP}/vcf"
+n_vcf=$(wc -l < "${CONTIG_TMP}/vcf")
+n_missing=$(comm -23 "${CONTIG_TMP}/vcf" "${CONTIG_TMP}/gff" | wc -l)
+n_shared=$(comm -12 "${CONTIG_TMP}/vcf" "${CONTIG_TMP}/gff" | wc -l)
+
+if [[ "$n_shared" -eq 0 ]]; then
+    log_error "No chromosome names shared between $BCF_FILE and $GFF (e.g. VCF: $(head -1 "${CONTIG_TMP}/vcf"), GFF: $(head -1 "${CONTIG_TMP}/gff")); check naming or use --csq-arg --unify-chr-names"
+    exit 1
+elif [[ "$n_missing" -eq 0 ]]; then
+    log "Running bcftools csq -> $OUTPUT_BCF"
+    "$BCFTOOLS" csq -f "$REFERENCE" -g "$GFF" "${CSQ_EXTRA[@]}" --threads "$THREADS" -Ob -o "$OUTPUT_BCF" "$CSQ_INPUT"
+else
+    log "${n_missing} of ${n_vcf} chromosome(s) in $BCF_FILE have no GFF features (e.g. $(comm -23 "${CONTIG_TMP}/vcf" "${CONTIG_TMP}/gff" | head -3 | paste -sd, -)); their sites are kept without BCSQ"
+    comm -12 "${CONTIG_TMP}/vcf" "${CONTIG_TMP}/gff" | awk -v OFS='\t' '{ print $1, 1, 2147483647 }' > "${CONTIG_TMP}/targets.tsv"
+    log "Running bcftools csq on ${n_shared} chromosome(s) with GFF features"
+    "$BCFTOOLS" view -R "${CONTIG_TMP}/targets.tsv" -Ou "$CSQ_INPUT" \
+        | "$BCFTOOLS" csq -f "$REFERENCE" -g "$GFF" "${CSQ_EXTRA[@]}" --threads "$THREADS" -Ob -o "${CONTIG_TMP}/genic.bcf" -
+    "$BCFTOOLS" index -f "${CONTIG_TMP}/genic.bcf"
+    log "Transferring BCSQ onto all sites -> $OUTPUT_BCF"
+    "$BCFTOOLS" annotate -a "${CONTIG_TMP}/genic.bcf" -c INFO/BCSQ --threads "$THREADS" -Ob -o "$OUTPUT_BCF" "$CSQ_INPUT"
+fi
 "$BCFTOOLS" index -f "$OUTPUT_BCF"
 
 log "bcftools query -> $QUERY_TMP"

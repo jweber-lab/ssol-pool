@@ -270,11 +270,26 @@ Optional: `--reference ref.fa` (with `ref.fa.fai`) adds an `estimated_mean_depth
 
 ### Per-window coverage and mapping quality (seq_qual_metrics.sh)
 
-**`seq_qual_metrics.sh`** computes per-window averages for **coverage** and **mapping quality** using samtools. Output TSV is compatible with collate (in popgen/stats/) for merging into diversity HDF5 via `--seq-qual-dir`.
+**`seq_qual_metrics.sh`** computes per-window alignment-quality metrics with samtools + awk. Output TSV is compatible with collate (in popgen/stats/) for merging into diversity HDF5 via `--seq-qual-dir`.
 
-- **Input**: BAM file(s) via `--bam` or `--sample-info` CSV (columns: sample_name, bam_file).
-- **Output**: `{output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv` (chr, start, end, sample, mean_coverage, mean_mapping_quality).
-- **Options**: `--reference-genome` (optional; use .fai for chromosome order), `--window-size`, `--step-size` (default: window/2), `--threads`. Logs: `{output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log`.
+- **Input**: BAM file(s) via `--bam` or `--sample-info` CSV (columns: sample_name, bam_file). Missing BAM indexes are created.
+- **Output**: `{output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv`, one per window/step pair. Reads with flags 0x704 (unmapped, secondary, QC-fail, duplicate) are ignored; supplementary alignments add coverage but are not counted as reads.
+
+| Column | Meaning |
+|--------|---------|
+| `mean_coverage` | Aligned bases (CIGAR M/=/X) per window bp, all MAPQ — comparable to grenedalf's default (MAPQ ≥ 0) |
+| `mean_mapping_quality` | Base-weighted mean MAPQ |
+| `mean_coverage_hq` | Same as `mean_coverage`, restricted to MAPQ ≥ `--min-mapq` (default 20) |
+| `frac_mapq0` | Fraction of aligned bases with MAPQ 0 (multi-mapping / repeats / paralogs) |
+| `breadth` | Fraction of window bp with MAPQ ≥ `--min-mapq` depth ≥ `--min-depth` (default 1) |
+| `rel_coverage` | `mean_coverage` / sample median window coverage (≈2 suggests collapsed duplication, ≈0 deletion/absence) |
+| `n_reads` | Primary reads starting in the window |
+| `frac_proper_pair` | Proper-pair fraction among paired primary reads starting in the window |
+| `frac_mate_other_chr` | Fraction of those whose mate maps to another chromosome (SV / misassembly signal) |
+
+- **Windows** follow grenedalf's interval grid (start = 1 + k·step, last window is the first reaching the chromosome end; coverage at the end is averaged over the bp inside the chromosome), so collate's exact (chr, start, end) join matches. Windows overlap correctly when step < window.
+- **Parallelism**: the genome is cut into ~4×`--threads` chunks (≥ 1 Mb; small contigs packed together). `--threads` chunks per sample run concurrently, each a `samtools view` + `samtools depth` pass into bins of gcd(all window/step sizes) bp. All scales are then built from one sorted bin table, so additional `-w/--step-size` pairs cost almost nothing. `--max-jobs` runs samples in parallel; total processes ≈ 2 × threads × max-jobs.
+- **Options**: `--reference-genome` (optional; .fai for chromosome order), `--window-size`/`--step-size` (repeatable, paired; default step = window/2), `--min-mapq`, `--min-depth`, `--threads`, `--max-jobs`, `--dry-run`. Logs: `{output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log`. A failure in any chunk or sample makes the script exit non-zero.
 
 Use the same window/step as your diversity runs (e.g. `--window-size 1000 --step-size 500`) so collate can join qual data to diversity windows.
 

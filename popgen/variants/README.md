@@ -127,6 +127,8 @@ Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suit
 
 **Reference:** use the **unmasked** FASTA that matches the GFF (see [Reference assemblies and repeat masking](#reference-assemblies-and-repeat-masking) above). The BCF may be repeat-filtered; coordinates must still match that assembly.
 
+**Scaffolds without genes:** bcftools csq aborts on sites whose chromosome has no GFF features. `variant_csq.sh` runs csq only on chromosomes present in the GFF and transfers BCSQ back onto the full BCF, so sites on gene-free scaffolds are kept (empty `bcsq`) while the REF/fasta consistency check stays active (`--force` is not used). If no chromosome names are shared between the BCF and GFF, the script stops (naming mismatch; see `--csq-arg --unify-chr-names`).
+
 **Input without genotypes:** csq normally builds haplotypes from `GT` and skips records without one. If the input has no FORMAT/GT (as from `snp_call.sh` and `indel_call.sh`), `variant_csq.sh` adds `-s - -l`: samples are ignored and each site is annotated on its own, since which pooled alleles share a chromosome is unknown. Two SNPs in one codon are then annotated separately rather than as a combined change.
 
 **Example:**
