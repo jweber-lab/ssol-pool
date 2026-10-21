@@ -4,12 +4,16 @@
 # variant_csq_windows.sh
 #
 # Wrapper for variant_csq_windows.R: aggregate annotated sites into
-# variant_features_wW_sS.tsv using FST/diversity template windows.
+# variant_features_wW_sS.tsv on grenedalf's interval window grid (built from the reference
+# .fai), or on windows listed in FST/diversity template files.
 ###############################################################################
 
 set -euo pipefail
 
 SITES_TSVS=()
+REFERENCE=""
+WINDOW_SIZES=()
+STEP_SIZES=()
 TEMPLATE_DIR=""
 TEMPLATE_TSV=""
 OUTPUT_DIR="."
@@ -26,8 +30,15 @@ Usage: $0 [OPTIONS]
 Required:
   --sites-tsv FILE          Annotated TSV from variant_csq.R; repeat to combine SNP and indel outputs
 
-One of:
-  --template-dir DIR        Directory with *fst*w*_s*.tsv (or diversity window TSVs)
+Windows (recommended: reference grid, identical to diversity / FST / PBE / seq_qual windows):
+  --reference FILE          Reference FASTA (with .fai) or .fai; windows from chromosome lengths
+  -w, --window-size N       Window size (repeatable; paired with --step-size)
+  --step-size N             Step size (repeatable; default: window/2)
+
+Or / additionally:
+  --template-dir DIR        Directory with *fst*w*_s*.tsv (or diversity window TSVs); scales come
+                            from file names. Without --reference, only the windows in these files
+                            are used (chromosomes grenedalf skipped are missing).
   --template-tsv FILE       Single template TSV
 
 Optional:
@@ -38,13 +49,16 @@ Optional:
 
 Example:
   $0 --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \\
-     --template-dir fst_out --output-dir vf_out
+     --reference ref.unmasked.fa -w 1000 --step-size 500 -w 10000 --step-size 5000 --output-dir vf_out
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sites-tsv) SITES_TSVS+=("$2"); shift 2 ;;
+        --reference) REFERENCE="$2"; shift 2 ;;
+        -w|--window-size) WINDOW_SIZES+=("$2"); shift 2 ;;
+        --step-size) STEP_SIZES+=("$2"); shift 2 ;;
         --template-dir) TEMPLATE_DIR="$2"; shift 2 ;;
         --template-tsv) TEMPLATE_TSV="$2"; shift 2 ;;
         --output-dir|-o) OUTPUT_DIR="$2"; shift 2 ;;
@@ -78,13 +92,20 @@ for f in "${SITES_TSVS[@]}"; do
     fi
 done
 SITES_TSV=$(IFS=,; echo "${SITES_TSVS[*]}")
-if [[ -z "$TEMPLATE_DIR" && -z "$TEMPLATE_TSV" ]]; then
-    log_error "Provide --template-dir or --template-tsv"
+if [[ -z "$TEMPLATE_DIR" && -z "$TEMPLATE_TSV" && ( -z "$REFERENCE" || ${#WINDOW_SIZES[@]} -eq 0 ) ]]; then
+    log_error "Provide --reference with --window-size (recommended), or --template-dir / --template-tsv"
     usage
+    exit 1
+fi
+if [[ ${#STEP_SIZES[@]} -gt 0 && ${#STEP_SIZES[@]} -ne ${#WINDOW_SIZES[@]} ]]; then
+    log_error "--step-size must be given once per --window-size (or omitted for window/2)"
     exit 1
 fi
 
 ARGS=(--sites-tsv "$SITES_TSV" --output-dir "$OUTPUT_DIR")
+[[ -n "$REFERENCE" ]] && ARGS+=(--reference "$REFERENCE")
+[[ ${#WINDOW_SIZES[@]} -gt 0 ]] && ARGS+=(--window-size "$(IFS=,; echo "${WINDOW_SIZES[*]}")")
+[[ ${#STEP_SIZES[@]} -gt 0 ]] && ARGS+=(--step-size "$(IFS=,; echo "${STEP_SIZES[*]}")")
 [[ -n "$TEMPLATE_DIR" ]] && ARGS+=(--template-dir "$TEMPLATE_DIR")
 [[ -n "$TEMPLATE_TSV" ]] && ARGS+=(--template-tsv "$TEMPLATE_TSV")
 

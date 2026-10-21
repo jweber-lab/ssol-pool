@@ -37,6 +37,7 @@ MIN_DEPTH=1
 DRY_RUN=false
 VERBOSE=false
 SAMPLE_NAMES=()
+USE_UNFILTERED=true
 
 # Log file (set after output-dir is known)
 SCRIPT_NAME=$(basename "$0")
@@ -68,6 +69,9 @@ Optional:
   -t, --threads N             Genome chunks processed in parallel per sample (default: 1);
                               each chunk runs samtools view + samtools depth (~2 cores)
   -j, --max-jobs N            Run up to N samples in parallel (default: 1); total cores ~ 2 x threads x max-jobs
+  --no-unfiltered             Use the listed BAMs as given. By default, X.unfiltered.bam is used in place
+                              of X.bam when it exists (kept by process_poolseq.sh --bam-min-mapq /
+                              --bam-primary-only), since a MAPQ-filtered BAM has no MAPQ-0 reads to measure.
   --dry-run                   Preview commands without executing
   --verbose                   Verbose diagnostics
   -h, --help                  Show this help
@@ -143,6 +147,7 @@ while [[ $# -gt 0 ]]; do
         --min-depth) MIN_DEPTH="$2"; shift 2 ;;
         -t|--threads) THREADS="$2"; shift 2 ;;
         -j|--max-jobs) MAX_JOBS="$2"; shift 2 ;;
+        --no-unfiltered) USE_UNFILTERED=false; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -217,6 +222,18 @@ if [[ ${#BAM_FILES[@]} -eq 0 ]]; then
     log_error "No BAM files specified. Use --bam or --sample-info."
     usage
     exit 1
+fi
+
+# process_poolseq.sh keeps the pre-filter BAM beside a MAPQ/primary-filtered one; the metrics
+# (frac_mapq0, mean_coverage vs mean_coverage_hq) need the reads the filter removed.
+if [[ "$USE_UNFILTERED" == true ]]; then
+    for i in "${!BAM_FILES[@]}"; do
+        unf="${BAM_FILES[$i]%.bam}.unfiltered.bam"
+        if [[ "${BAM_FILES[$i]}" != *.unfiltered.bam && -f "$unf" ]]; then
+            log "Using unfiltered BAM $unf in place of ${BAM_FILES[$i]}"
+            BAM_FILES[$i]="$unf"
+        fi
+    done
 fi
 
 check_command samtools
@@ -389,6 +406,14 @@ process_one_sample() {
     # Chromosome table: idx, name, length (reference .fai order when given, else BAM header order)
     samtools view -H "$bam" | awk -F'\t' '$1 == "@SQ" { for (i = 2; i <= NF; i++) { if ($i ~ /^SN:/) n = substr($i, 4); if ($i ~ /^LN:/) l = substr($i, 4) } print n "\t" l }' > "${tmp}/header.tsv"
     if [[ -n "$REFERENCE_GENOME" && -f "${REFERENCE_GENOME}.fai" ]]; then
+        # Window ends come from these lengths; they must match the reference grenedalf uses
+        local mismatch
+        mismatch=$(awk -F'\t' 'NR == FNR { len[$1] = $2; next } ($1 in len) && len[$1] != $2 { n++; if (n <= 3) ex = ex " " $1 ":" $2 "!=" len[$1] } END { if (n) print n ex }' \
+            "${REFERENCE_GENOME}.fai" "${tmp}/header.tsv")
+        if [[ -n "$mismatch" ]]; then
+            log_error "$bam: ${mismatch%% *} chromosome length(s) differ from ${REFERENCE_GENOME}.fai (BAM!=fai:${mismatch#* }); was it aligned to another assembly?"
+            return 1
+        fi
         awk -F'\t' -v OFS='\t' 'NR == FNR { ord[$1] = NR; next } { print ($1 in ord) ? ord[$1] : 1000000 + FNR, $1, $2 }' \
             "${REFERENCE_GENOME}.fai" "${tmp}/header.tsv" | sort -k1,1n > "${tmp}/chroms.tsv"
     else
@@ -475,6 +500,7 @@ for i in "${!BAM_FILES[@]}"; do
         sample_name="${SAMPLE_NAMES[$i]}"
     else
         sample_name=$(basename "$bam" .bam)
+        sample_name="${sample_name%.unfiltered}"
         sample_name="${sample_name%_All_seq.dedup}"
         sample_name="${sample_name%.dedup}"
     fi

@@ -74,13 +74,20 @@ read_fst_for_pbs <- function(path, pop1, pop2, pop3) {
         chr_col <- header_names[1L]
         pos_col <- header_names[2L]
     }
-    tibble(
+    out <- tibble(
         chr = raw[[chr_col]],
         pos = as.numeric(raw[[pos_col]]),
         fst_12 = as.numeric(raw[[cols$col_12]]),
         fst_13 = as.numeric(raw[[cols$col_13]]),
         fst_23 = as.numeric(raw[[cols$col_23]])
     )
+    # Windowed FST (chrom, start, end, ...): keep the window bounds so PBE rows join on the shared grid
+    if (all(c("start", "end") %in% tolower(header_names))) {
+        out$start <- as.numeric(raw[[header_names[tolower(header_names) == "start"][1L]]])
+        out$end <- as.numeric(raw[[header_names[tolower(header_names) == "end"][1L]]])
+        out <- out %>% relocate("start", "end", .after = "pos")
+    }
+    out
 }
 
 # -----------------------------------------------------------------------------
@@ -143,6 +150,8 @@ write_hdf5 <- function(dat, path) {
     grp <- h5$create_group("pbs_pbe")
     grp[["chr"]] <- as.character(dat$chr)
     grp[["pos"]] <- dat$pos
+    if ("start" %in% names(dat)) grp[["start"]] <- dat$start
+    if ("end" %in% names(dat)) grp[["end"]] <- dat$end
     grp[["fst_12"]] <- dat$fst_12
     grp[["fst_13"]] <- dat$fst_13
     grp[["fst_23"]] <- dat$fst_23
@@ -258,7 +267,7 @@ if (fmt == "hdf5") {
     names(out_names)[names(out_names) == "fst_23"] <- paste0("Fst_", opts$`pop2-name`, "_", opts$`pop3-name`)
     pbs_path <- file.path(opts$`output-dir`, paste0(prefix, "pbs.", fmt))
     pbe_path <- file.path(opts$`output-dir`, paste0(prefix, "pbe.", fmt))
-    pbs_cols <- c("chr", "pos", paste0("Fst_", opts$`pop1-name`, "_", opts$`pop2-name`),
+    pbs_cols <- c("chr", "pos", intersect(c("start", "end"), names(out_names)), paste0("Fst_", opts$`pop1-name`, "_", opts$`pop2-name`),
                   paste0("Fst_", opts$`pop1-name`, "_", opts$`pop3-name`),
                   paste0("Fst_", opts$`pop2-name`, "_", opts$`pop3-name`),
                   "T12", "T13", "T23", "PBS")

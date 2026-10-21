@@ -56,32 +56,53 @@ The analysis scripts calculate:
 After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked FASTA files. This pipeline follows a single coherent policy:
 
 1. **Alignment** ([`process_poolseq.sh`](../alignment/process_poolseq.sh)): use the **unmasked** reference. Optionally apply **`--bam-min-mapq 20 --bam-primary-only`** so the BAMs passed to stats exclude low-MAPQ and non-primary alignments.
-2. **Diversity (π, θ, Tajima's D)** (`calculate_pi_theta.sh`): BAM input; exclude repeat **windows** with **`--filter-mask-total-bed`** (same BED as below).
+2. **Diversity (π, θ, Tajima's D)** (`calculate_pi_theta.sh`): BAM input; exclude masked positions with **`--filter-mask-total-bed`** (same BED as below). Use the combined `mask.bed` from [`build_mask.sh`](../alignment/README.md#combined-mask-build_masksh) (repeats plus poorly mapping windows), or a plain RepeatMasker BED.
 3. **FST** (`calculate_fst.sh`): same **`--filter-mask-total-bed`** (or `--filter-mask-total-fasta`) as diversity.
 4. **Variants** ([`snp_call.sh`](../variants/README.md#snp_callsh) for SNPs, [`indel_call.sh`](../variants/README.md#indel_callsh) for indels): **same unmasked** reference as alignment; same **`--filter-mask-total-bed`** as diversity/FST.
 5. **Functional annotation** ([`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr)): **`--reference` must be the unmasked assembly that matches your GFF** (not hard-masked). Run csq on a BCF that still has the same `chr`/`pos` as that assembly.
 
 **PBE** (`calculate_pbe.sh`) uses FST outputs, so repeat handling follows step 3.
 
+Masked positions count as missing in grenedalf, so they are removed from the valid-loci denominator instead of being treated as invariant. Collate keeps grenedalf's `total.masked` as **`n_masked`** (masked bp per window) in the diversity and FST HDF5, so windows that are mostly masked can be filtered downstream.
+
+### Window boundaries
+
+Every windowed table must use the same `(chr, start, end)` so collate's exact joins line up. All scripts use grenedalf's interval grid: start = 1 + k·step, with the last window being the first whose end reaches the chromosome end (the end is not clipped).
+
+- **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Fully masked or empty windows are written as `nan`, and chromosomes with no data at all are omitted.
+- **PBE** keeps FST's `start` / `end`. Older PBE files with only `pos` get `end = start + window - 1` in collate.
+- **`seq_qual_metrics.sh`** builds the same grid from the `.fai` and fails if BAM lengths differ from it.
+- **`variant_csq_windows.sh`** builds the grid from `--reference` and `-w` / `--step-size`, so windows without sites are included.
+- **Collate** checks each table against the grid and against the first table at the same scale (on shared chromosomes), and prints `Window check ... matches ...` or a `WARNING window check` naming the off-grid or unmatched windows.
+
+Use the same reference FASTA (or its `.fai`) and the same `-w` / `--step-size` lists for every script.
+
 ### End-to-end example
 
-Assume `ref.unmasked.fa`, `genome.out.bed` from `repeatmasker_bed.sh`, and BAMs from alignment.
+Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/README.md#combined-mask-build_masksh), and BAMs from alignment.
 
 ```bash
-# 1–2. Alignment (in popgen/alignment/)
+# 1–2. Alignment and mask (in popgen/alignment/)
 ./process_poolseq.sh --reference ref.unmasked.fa --bam-min-mapq 20 --bam-primary-only ...
+./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
+  -w 1000 --step-size 250 -o seq_qual_mask
+./build_mask.sh --reference ref.unmasked.fa --repeatmasker-out ref.fa.out \
+  --seq-qual-dir seq_qual_mask -o mask
+./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
+  -w 1000 --step-size 500 -o seq_qual_out
 
-# 3. Diversity + FST (same repeat BED for comparable windows)
-./calculate_pi_theta.sh --sample-info ../../sample_info.csv \
-  --filter-mask-total-bed genome.out.bed -o pi_out ...
-./calculate_fst.sh --sample-info ../../sample_info.csv \
-  --filter-mask-total-bed genome.out.bed -o fst_out ...
+# 3. Diversity + FST (same mask and reference, so windows and masked bp match)
+./calculate_pi_theta.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
+  --filter-mask-total-bed mask/mask.bed --window-size 1000 --step-size 500 -o pi_out ...
+./calculate_fst.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
+  --window-type interval --window-size 1000 --step-size 500 \
+  --filter-mask-total-bed mask/mask.bed -o fst_out ...
 
 # 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
-  --filter-mask-total-bed genome.out.bed --output-dir snps_out
+  --filter-mask-total-bed mask/mask.bed --output-dir snps_out
 ../variants/indel_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
-  --filter-mask-total-bed genome.out.bed --output-dir indels_out
+  --filter-mask-total-bed mask/mask.bed --output-dir indels_out
 
 # 5. CSQ (unmasked ref + GFF; BCFs from step 4)
 ../variants/variant_csq.sh --bcf snps_out/snp_sites.bcf --reference ref.unmasked.fa \
@@ -89,11 +110,12 @@ Assume `ref.unmasked.fa`, `genome.out.bed` from `repeatmasker_bed.sh`, and BAMs 
 ../variants/variant_csq.sh --bcf indels_out/indel_sites.bcf --reference ref.unmasked.fa \
   --gff annotation.gff3 --output-dir csq_indels
 
-# 6. Windowed variant features on the FST windows, then collate
+# 6. Windowed variant features on the same grid, then collate
 ../variants/variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv \
-  --sites-tsv csq_indels/variants_csq.tsv --template-dir fst_out --output-dir variant_features
+  --sites-tsv csq_indels/variants_csq.tsv --reference ref.unmasked.fa \
+  -w 1000 --step-size 500 --output-dir variant_features
 mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
-./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out \
+./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --seq-qual-dir seq_qual_out \
   --variant-tsv-dir sites --variant-csq csq_snps --variant-csq csq_indels \
   --variant-feature-dir variant_features -o collated
 ```
@@ -114,6 +136,7 @@ Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s).
 - **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*` counts and `genes` / `genes_protein_altering` (semicolon-separated gene names with a site in the window) alongside population-genetics stats.
 - **Variant sites** (`variants.h5`, group `/sites`): `--variant-tsv-dir` points at a directory with `snp_sites.tsv` and/or `indel_sites.tsv` ([`snp_call.sh`](../variants/README.md#snp_callsh) / [`indel_call.sh`](../variants/README.md#indel_callsh)). Their rows are stacked, one per site and ALT allele, with `variant_type` (`snp` or `indel`), `ref`, `alt`, `dp`, `alt_freq`, `indel_len` (indels) and per-pool `<sample>_AD` (`ref,alt`) and `<sample>_alt_freq`. `--variant-csq` (repeatable in `collate.sh`; comma-separated in `collate.R`) takes `variants_csq.tsv` files or their directories from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr); their `bcsq`, `csq_consequences`, `region_category`, `coding_effect`, `genes` and `genes_protein_altering` columns are joined onto the sites by `chr`, `pos`, `ref`, `alt`. A `variants_csq.tsv` inside `--variant-tsv-dir` is treated the same way, and with no site TSVs the csq tables become the sites. `*_long.tsv` files are ignored.
 - **`--single-position-merged`**: replaces `fst_single.h5`, `pbe_single.h5` and `variants.h5` with one `single_position.h5` (`/sites`): the variant table above with single-position FST and PBE added as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, with `_rank` / `_quantile`). FST and PBE are joined only onto SNP rows, so an indel at the same position as a SNP does not inherit the SNP's values; positions with FST but no called site are not included. Without variant TSVs, the rows are the FST (or PBE) positions.
+- **Masking and windows**: diversity and FST windows carry **`n_masked`** (masked bp, from grenedalf `total.masked`). Every windowed input is checked against the shared grid; see [Window boundaries](#window-boundaries).
 - **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE) is NA/NaN before ranking and collation.
 - **Sample names** keep their case from the input (FST pairs such as `Echo:Kjer`, `<sample>_AD` columns); standard column names (`chr`, `pos`, `ref`, ...) are lowercased.
 - **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out -o collated`
@@ -167,7 +190,8 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
 - `--max-coverage N`: Maximum coverage per site (default: 200)
 - `--min-count N`: Minimum allele count (default: 2, popoolation2 only)
 - `--pool-size N`: Pool size (haploid chromosomes) for Tajima's D calculation (default: 50)
-- `--filter-mask-total-bed FILE`: Exclude intervals in BED from windowed diversity (e.g. RepeatMasker `*.out.bed`)
+- `--reference-genome FILE`: Reference FASTA (required with grenedalf); fixes the window grid across samples (see [Window boundaries](#window-boundaries))
+- `--filter-mask-total-bed FILE`: Exclude intervals in BED from windowed diversity (`mask.bed` from `build_mask.sh`, or a RepeatMasker `*.out.bed`)
 - `--filter-mask-total-fasta FILE`: Alternative grenedalf mask FASTA (use one of BED or FASTA)
 - `-t, --threads N`: Number of threads (default: 1)
 - `--dry-run`: Preview commands without executing (dry-run mode)

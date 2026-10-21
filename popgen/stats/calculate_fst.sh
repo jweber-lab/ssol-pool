@@ -104,7 +104,8 @@ Comparison options:
   --comparand-list FILE       File with sample pairs to compute FST for (one pair per line, optional)
 
 Other options:
-  --reference-genome FILE     Reference genome FASTA file (recommended for chromosome ordering)
+  --reference-genome FILE     Reference genome FASTA (required for interval windows or masks): chromosome
+                              lengths fix the window grid shared with diversity, seq_qual and variant windows
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
   --separator-char SEP        Output separator: comma, tab, space, semicolon (default: comma)
   --overwrite-output          Allow overwriting existing output files (default: false)
@@ -623,6 +624,18 @@ fi
 # Warn if both mask files are provided (grenedalf allows only one)
 if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ -n "$FILTER_MASK_TOTAL_BED" ]]; then
     log_warn "Both FASTA and BED mask files specified. Grenedalf will use only one (FASTA takes precedence if both are valid)"
+fi
+
+# Chromosome lengths from the reference fix the interval window grid (shared with diversity,
+# seq_qual and variant feature windows); grenedalf 0.6.3 also crashes part-way when a mask is
+# given without them, in both single and interval mode.
+if [[ -z "$REFERENCE_GENOME" ]] && { [[ "$WINDOW_TYPE" == "interval" ]] || [[ -n "$FILTER_MASK_TOTAL_FASTA$FILTER_MASK_TOTAL_BED" ]]; }; then
+    log_error "--reference-genome is required for interval windows and for masks (chromosome lengths fix the window grid)"
+    exit 1
+fi
+if [[ -n "$REFERENCE_GENOME" ]] && [[ "$DRY_RUN" == false ]] && [[ ! -f "$REFERENCE_GENOME" ]]; then
+    log_error "Reference genome not found: $REFERENCE_GENOME"
+    exit 1
 fi
 
 # Warn if window/step size parameters are provided with single mode

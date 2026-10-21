@@ -7,10 +7,18 @@
 # Schistocephalus solidus genomic DNA.
 #
 # This script processes pooled sequencing data through adapter trimming,
-# read merging (for overlapping reads), mapping, deduplication, and variant
-# calling preparation. BAM @RG SM (sample) is set from --sample-name (or
+# read merging (for overlapping reads), mapping, deduplication, and optional
+# MAPQ / primary-only filtering. BAM @RG SM (sample) is set from --sample-name (or
 # sample_name in sample_info.csv when using --sample-info) so downstream
 # tools (e.g. indel_call.sh, which groups reads into pools by SM) see matching sample names.
+#
+# Each step writes to its output only after the step completes (temporary file + rename, or a
+# completion marker in {work_dir}/.done), so re-running after an interruption resumes at the
+# first incomplete step instead of skipping a truncated file.
+#
+# When filtering (--bam-min-mapq / --bam-primary-only), the unfiltered BAM is kept as
+# {sample}_All_seq.dedup.unfiltered.bam: seq_qual_metrics.sh reads it so the MAPQ-0 signal
+# used by build_mask.sh is not removed by the filter.
 #
 # Author: Based on workflow by JW
 # Usage: See README.md or run with --help
@@ -36,6 +44,7 @@ MIN_OVERLAP0=15
 TRIMQ=20
 MPILEUP_MIN_QUAL=20
 SKIP_SYNC=false
+WRITE_MPILEUP=false
 DRY_RUN=false
 PARALLEL=false
 PARALLEL_MAX_JOBS=0
@@ -64,9 +73,11 @@ Required options:
   -n, --sample-name NAME      Sample name (e.g., Echo_Pool_S1)
   -1, --read1 FILE            Path to R1 fastq.gz file
   -2, --read2 FILE            Path to R2 fastq.gz file
-  -r, --reference FILE        Path to reference genome (FASTA, can be .gz).
-                              Use the **unmasked** assembly for alignment (see README:
-                              Repeat masking). Soft-masked FASTA behaves like unmasked for BWA.
+  -r, --reference FILE        Reference genome FASTA. Use the unmasked (or soft-masked) assembly,
+                              never hard-masked (see README: Repeat masking). Prefer an
+                              uncompressed FASTA: the same file is passed as --reference /
+                              --reference-genome downstream, which needs a .fai index
+                              (created here if missing; a .gz must be bgzip-compressed).
   -o, --output-dir DIR        Output directory for final results (default: ./)
 
 Required for full pipeline:
@@ -78,41 +89,57 @@ Required for full pipeline:
 Optional:
   -w, --work-dir DIR          Working directory for intermediate files (default: output-dir/work)
   -t, --threads N             Number of threads (default: 8)
-  -p, --popoolation2 JAR      Path to popoolation2 mpileup2sync.jar (optional, for sync file generation)
+  --mpileup                   Also write a per-sample samtools mpileup (off by default: no script in
+                              this repo reads it; grenedalf works from the BAM). Implied by --popoolation2.
+  -p, --popoolation2 JAR      Path to popoolation2 mpileup2sync.jar (optional, sync file from the mpileup)
   -g, --grenedalf PATH        Path to grenedalf executable (optional, default: check PATH)
-  --use-grenedalf-sync        Use grenedalf for sync file generation instead of popoolation2
+  --use-grenedalf-sync        Write a sync file with grenedalf (from the final BAM) instead of popoolation2
   --min-overlap N             Minimum overlap for bbmerge (default: 20)
   --min-overlap0 N            Minimum overlap0 for bbmerge (default: 15)
   --trimq N                   Quality threshold for trimming in merge step (default: 20)
-  --mpileup-min-qual N        Minimum quality for mpileup (default: 20)
+  --mpileup-min-qual N        Minimum base quality for the mpileup / sync file (default: 20)
   --bam-min-mapq N            After merge, filter final BAM: keep reads with MAPQ >= N (default: 0 = off).
-                              Recommended for pop-gen stats: 20 (use with --bam-primary-only).
+                              Recommended for pop-gen stats: 20 (use with --bam-primary-only); grenedalf
+                              diversity/FST have no MAPQ filter of their own.
   --bam-primary-only          After merge, exclude secondary and supplementary alignments from final BAM.
+                              With either filter, the unfiltered BAM is kept as *.dedup.unfiltered.bam
+                              (for seq_qual_metrics.sh / build_mask.sh, which need the MAPQ-0 reads).
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
   --bbtools-memory SIZE       Maximum Java heap size for BBtools (e.g., "8g" or "16000m")
                               Default: auto-detect available memory and allocate 80% divided by parallel jobs
-  --skip-sync                 Skip sync file generation (default: false)
+  --skip-sync                 Skip sync file generation (default: false; a sync file is only written
+                              with --use-grenedalf-sync or --popoolation2)
   --dry-run                   Preview commands without executing (dry-run mode)
   --parallel                  Enable parallel processing for multiple samples
-  --sample-info FILE          CSV file with sample information (see sample-info.csv)
+  --sample-info FILE          CSV file with sample information (see sample_info.csv)
                               Columns: sample_name, read1_file, read2_file, pool_size
                               BAM @RG SM (sample) is set from sample_name so downstream
                               tools (e.g. indel_call.sh, bcftools) see matching names.
-  --parallel-max-jobs N       Maximum concurrent jobs (default: number of CPU cores)
+                              Each finished sample writes its final BAM path to the bam_file column.
+  --parallel-max-jobs N       Maximum concurrent samples (default: CPU cores / --threads, at least 1).
+                              Applies to tmux, screen and background jobs; the launcher waits for a
+                              free slot, so keep it running (e.g. inside tmux) until all are launched.
   --use-tmux                  Force use of tmux for parallel jobs
   --use-screen                Force use of screen for parallel jobs
   -h, --help                  Show this help message
 
-Example:
+Example (one sample):
   $0 \\
     --sample-name Echo_Pool_S1 \\
     --read1 /path/to/Echo_Pool_S1_L001_R1_001.fastq.gz \\
     --read2 /path/to/Echo_Pool_S1_L001_R2_001.fastq.gz \\
-    --reference /path/to/GCA_017591395.1_ASM1759139v1_genomic.fna.gz \\
+    --reference /path/to/ref.unmasked.fa \\
     --output-dir /path/to/output \\
-    --adapters /path/to/bbmap/resources/adapters.fa \\
-    --bbtools-dir /path/to/bbtools \\
+    --bam-min-mapq 20 --bam-primary-only \\
     --threads 16
+
+Example (all samples in sample_info.csv, 2 at a time with 6 threads each):
+  $0 --parallel --sample-info sample_info.csv --reference /path/to/ref.unmasked.fa \\
+    --output-dir /path/to/output --bam-min-mapq 20 --bam-primary-only \\
+    --threads 6 --parallel-max-jobs 2
+
+BBtools (bbduk.sh, bbmerge.sh) and adapters.fa are found in PATH / the conda env when
+--bbtools-dir and --adapters are not given; without them, trimming and merging are skipped.
 
 EOF
 }
@@ -682,6 +709,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_SYNC=true
             shift
             ;;
+        --mpileup)
+            WRITE_MPILEUP=true
+            shift
+            ;;
         --file-prefix)
             FILE_PREFIX="$2"
             shift 2
@@ -749,13 +780,23 @@ if [[ -n "$REFERENCE" ]]; then
         else
             log "Reference genome already indexed"
         fi
+        # .fai: chromosome lengths for seq_qual_metrics.sh, build_mask.sh and grenedalf --reference-genome
+        if [[ ! -f "${REFERENCE}.fai" ]]; then
+            log "Creating reference .fai index (samtools faidx)..."
+            if ! samtools faidx "$REFERENCE"; then
+                log_warn "samtools faidx failed for $REFERENCE (a .gz reference must be bgzip-compressed)."
+                log_warn "Downstream scripts need an indexed FASTA: decompress it and run samtools faidx."
+            fi
+        fi
     else
         log_dry_run "Would check if reference is indexed: $REFERENCE"
         if [[ ! -f "${REFERENCE}.bwt" ]] && [[ ! -f "${REFERENCE%.gz}.bwt" ]]; then
             log_dry_run "Would create BWA index for: $REFERENCE"
         fi
+        [[ -f "${REFERENCE}.fai" ]] || log_dry_run "Would create .fai index: samtools faidx $REFERENCE"
     fi
 fi
+[[ -n "$POPOOLATION2_JAR" && "$USE_GRENEDALF_SYNC" == false && "$SKIP_SYNC" == false ]] && WRITE_MPILEUP=true
 
 # Handle parallel processing mode
 if [[ "$PARALLEL" == true ]]; then
@@ -800,18 +841,25 @@ if [[ "$PARALLEL" == true ]]; then
         } >> "$LOG_FILE"
         log "Parallel launcher log file: $LOG_FILE"
     else
-        log_dry_run "Would create log file: $LOG_FILE"
+        DRY_LOG_FILE="$LOG_FILE"
+        LOG_FILE=""
+        log_dry_run "Would create log file: $DRY_LOG_FILE"
     fi
     
     # Detect multiplexer
     detect_multiplexer || exit 1
     log "Using $MULTIPLEXER for parallel processing"
     
-    # Set max jobs if not specified
+    # Set max jobs if not specified: each job uses --threads cores
+    CPU_CORES=$(get_cpu_cores)
     if [[ "$PARALLEL_MAX_JOBS" -eq 0 ]]; then
-        PARALLEL_MAX_JOBS=$(get_cpu_cores)
+        PARALLEL_MAX_JOBS=$(( CPU_CORES / THREADS ))
+        (( PARALLEL_MAX_JOBS < 1 )) && PARALLEL_MAX_JOBS=1
     fi
-    log "Maximum concurrent jobs: $PARALLEL_MAX_JOBS"
+    log "Maximum concurrent jobs: $PARALLEL_MAX_JOBS (x $THREADS threads each; $CPU_CORES CPU cores)"
+    if (( PARALLEL_MAX_JOBS * THREADS > CPU_CORES )); then
+        log_warn "$PARALLEL_MAX_JOBS jobs x $THREADS threads exceeds $CPU_CORES cores; jobs will compete for CPU"
+    fi
     
     # Detect available memory and calculate BBtools memory per job (unless manually specified)
     if [[ -z "$BBTOOLS_MEMORY" ]]; then
@@ -843,6 +891,15 @@ if [[ "$PARALLEL" == true ]]; then
     # Read sample list and launch jobs
     JOB_COUNT=0
     PIDS=()
+    RUNNING=()  # PIDs (background) or session names (tmux/screen) counted against PARALLEL_MAX_JOBS
+
+    job_alive() {
+        case "$MULTIPLEXER" in
+            tmux) tmux has-session -t "=$1" 2>/dev/null ;;
+            screen) screen -ls 2>/dev/null | grep -q "[0-9]\.$1[[:space:]]" ;;
+            *) kill -0 "$1" 2>/dev/null ;;
+        esac
+    }
     
     line_num=0
     header_skipped=false
@@ -898,17 +955,18 @@ if [[ "$PARALLEL" == true ]]; then
             continue
         fi
         
-        # Wait if we've reached max jobs
-        while [[ ${#PIDS[@]} -ge "$PARALLEL_MAX_JOBS" ]]; do
-            # Check for completed jobs
-            NEW_PIDS=()
-            for pid in "${PIDS[@]}"; do
-                if kill -0 "$pid" 2>/dev/null; then
-                    NEW_PIDS+=("$pid")
-                fi
+        # Wait for a free slot
+        waited=false
+        while true; do
+            STILL_RUNNING=()
+            for job in "${RUNNING[@]}"; do
+                job_alive "$job" && STILL_RUNNING+=("$job")
             done
-            PIDS=("${NEW_PIDS[@]}")
-            sleep 1
+            RUNNING=("${STILL_RUNNING[@]}")
+            [[ ${#RUNNING[@]} -lt "$PARALLEL_MAX_JOBS" ]] && break
+            [[ "$waited" == false ]] && log "Waiting for a free slot ($PARALLEL_MAX_JOBS jobs running) before $sample_name..."
+            waited=true
+            sleep 10
         done
         
         # Build command for this sample
@@ -933,6 +991,9 @@ if [[ "$PARALLEL" == true ]]; then
         [[ -n "$BBTOOLS_MEMORY" ]] && CMD="$CMD --bbtools-memory \"$BBTOOLS_MEMORY\""
         [[ "$USE_GRENEDALF_SYNC" == true ]] && CMD="$CMD --use-grenedalf-sync"
         [[ "$SKIP_SYNC" == true ]] && CMD="$CMD --skip-sync"
+        [[ "$WRITE_MPILEUP" == true ]] && CMD="$CMD --mpileup"
+        [[ -n "$MPILEUP_MIN_QUAL" ]] && CMD="$CMD --mpileup-min-qual \"$MPILEUP_MIN_QUAL\""
+        CMD="$CMD --min-overlap \"$MIN_OVERLAP\" --min-overlap0 \"$MIN_OVERLAP0\" --trimq \"$TRIMQ\""
         [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null && CMD="$CMD --bam-min-mapq \"$BAM_MIN_MAPQ\""
         [[ "$BAM_PRIMARY_ONLY" == true ]] && CMD="$CMD --bam-primary-only"
         # Pass CSV file path to each job so it can update it when BAM is created
@@ -954,23 +1015,21 @@ if [[ "$PARALLEL" == true ]]; then
         
         # First, try to detect environment from PATH (most reliable)
         ENV_NAME=""
-        if [[ "$PATH" =~ /opt/conda/envs/([^/:]+) ]]; then
-            ENV_NAME="${BASH_REMATCH[1]}"
-        elif [[ "$PATH" =~ /([^/:]+)/envs/([^/:]+) ]]; then
+        CONDA_BASE=""
+        if [[ ":$PATH:" =~ :(/[^:]+)/envs/([^/:]+)/bin: ]]; then
+            # e.g. /home/user/miniforge3/envs/popgen/bin -> base /home/user/miniforge3, env popgen
             CONDA_BASE="${BASH_REMATCH[1]}"
             ENV_NAME="${BASH_REMATCH[2]}"
-        elif [[ -n "$CONDA_DEFAULT_ENV" ]]; then
+        elif [[ -n "${CONDA_DEFAULT_ENV:-}" ]]; then
             ENV_NAME="$CONDA_DEFAULT_ENV"
         fi
         
         # Determine conda base directory
-        CONDA_BASE=""
-        if [[ -n "$CONDA_PREFIX" ]]; then
+        if [[ -z "$CONDA_BASE" ]] && [[ "${CONDA_PREFIX:-}" =~ ^(.+)/envs/[^/]+$ ]]; then
             # Extract base from prefix (e.g., /opt/conda/envs/pop-gen -> /opt/conda)
-            if [[ "$CONDA_PREFIX" =~ ^(.+)/envs/[^/]+$ ]]; then
-                CONDA_BASE="${BASH_REMATCH[1]}"
-            fi
+            CONDA_BASE="${BASH_REMATCH[1]}"
         fi
+        [[ -n "$CONDA_BASE" && ! -f "$CONDA_BASE/etc/profile.d/conda.sh" ]] && CONDA_BASE=""
         
         # Try common conda locations
         if [[ -z "$CONDA_BASE" ]]; then
@@ -980,6 +1039,10 @@ if [[ "$PARALLEL" == true ]]; then
                 CONDA_BASE="$HOME/anaconda3"
             elif [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
                 CONDA_BASE="$HOME/miniconda3"
+            elif [[ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]]; then
+                CONDA_BASE="$HOME/miniforge3"
+            elif [[ -f "$HOME/mambaforge/etc/profile.d/conda.sh" ]]; then
+                CONDA_BASE="$HOME/mambaforge"
             elif command -v conda &> /dev/null; then
                 # Try to find conda base from conda command
                 CONDA_BASE=$(conda info --base 2>/dev/null || echo "")
@@ -1009,24 +1072,34 @@ if [[ "$PARALLEL" == true ]]; then
                 log_dry_run "Would create tmux session: $SESSION_NAME"
                 log_dry_run "Command: $CMD"
             else
+                if tmux has-session -t "=$SESSION_NAME" 2>/dev/null; then
+                    log_error "tmux session $SESSION_NAME already exists (a previous run still going?); skipping $sample_name"
+                    continue
+                fi
                 # Wrap command with conda initialization if available
                 FULL_CMD="${CONDA_INIT}$CMD"
-                tmux new-session -d -s "$SESSION_NAME" "bash -c '$FULL_CMD 2>&1; echo \"Job completed with exit code: \$?\"'"
+                rm -f "${LOG_DIR_ABS}/${SESSION_NAME}.exit"
+                tmux new-session -d -s "$SESSION_NAME" "bash -c '$FULL_CMD 2>&1; rc=\$?; echo \$rc > \"${LOG_DIR_ABS}/${SESSION_NAME}.exit\"; echo \"Job completed with exit code: \$rc\"'"
+                RUNNING+=("$SESSION_NAME")
                 log "Job launched in tmux session: $SESSION_NAME"
                 log "View with: tmux attach -t $SESSION_NAME"
-                log "Log file will be created by child job in: ${output_dir}/log/"
             fi
         elif [[ "$MULTIPLEXER" == "screen" ]]; then
             if [[ "$DRY_RUN" == true ]]; then
                 log_dry_run "Would create screen session: $SESSION_NAME"
                 log_dry_run "Command: $CMD"
             else
+                if screen -ls 2>/dev/null | grep -q "[0-9]\.${SESSION_NAME}[[:space:]]"; then
+                    log_error "screen session $SESSION_NAME already exists (a previous run still going?); skipping $sample_name"
+                    continue
+                fi
                 # Wrap command with conda initialization if available
                 FULL_CMD="${CONDA_INIT}$CMD"
-                screen -dmS "$SESSION_NAME" bash -c "$FULL_CMD 2>&1; echo \"Job completed with exit code: \$?\""
+                rm -f "${LOG_DIR_ABS}/${SESSION_NAME}.exit"
+                screen -dmS "$SESSION_NAME" bash -c "$FULL_CMD 2>&1; rc=\$?; echo \$rc > \"${LOG_DIR_ABS}/${SESSION_NAME}.exit\"; echo \"Job completed with exit code: \$rc\""
+                RUNNING+=("$SESSION_NAME")
                 log "Job launched in screen session: $SESSION_NAME"
                 log "View with: screen -r $SESSION_NAME"
-                log "Log file will be created by child job in: ${output_dir}/log/"
             fi
         else
             # Background job
@@ -1036,11 +1109,12 @@ if [[ "$PARALLEL" == true ]]; then
             else
                 # Wrap command with conda initialization if available
                 FULL_CMD="${CONDA_INIT}$CMD"
-                bash -c "$FULL_CMD" > /dev/null 2>&1 &
+                rm -f "${LOG_DIR_ABS}/${SESSION_NAME}.exit"
+                bash -c "$FULL_CMD > /dev/null 2>&1; echo \$? > \"${LOG_DIR_ABS}/${SESSION_NAME}.exit\"" &
                 PID=$!
                 PIDS+=("$PID")
+                RUNNING+=("$PID")
                 log "Job launched in background (PID: $PID)"
-                log "Log file will be created by child job in: ${output_dir}/log/"
             fi
         fi
         
@@ -1054,6 +1128,11 @@ if [[ "$PARALLEL" == true ]]; then
             wait "$pid"
         done
         log "All jobs completed"
+        for f in "${LOG_DIR}"/poolseq_*.exit; do
+            [[ -f "$f" ]] || continue
+            rc=$(cat "$f")
+            [[ "$rc" == 0 ]] || log_warn "$(basename "$f" .exit) exited with code $rc (see its log in $LOG_DIR)"
+        done
         
         # Post-processing: Verify CSV updates and optionally update any missing BAM paths
         if [[ -n "$SAMPLE_INFO_CSV" ]] && [[ -f "$SAMPLE_INFO_CSV" ]]; then
@@ -1147,6 +1226,7 @@ if [[ "$PARALLEL" == true ]]; then
         fi
     else
         log "Launched $JOB_COUNT jobs"
+        log "Per-sample logs: $LOG_DIR/<sample>_<time>.log; exit code of each job: $LOG_DIR/<session>.exit"
         if [[ "$MULTIPLEXER" == "tmux" ]]; then
             log "List sessions with: tmux ls"
             log "Attach to session with: tmux attach -t <session_name>"
@@ -1216,6 +1296,8 @@ if [[ "$DRY_RUN" == false ]]; then
     exec 2>&1
     # Set flag so logging functions know redirection is active (avoid duplicate writes)
     LOG_REDIRECT_ACTIVE=true
+elif [[ ! -d "$LOG_DIR" ]]; then
+    LOG_FILE=""
 fi
 
 # Validate required arguments
@@ -1443,6 +1525,30 @@ UNMERGED_SAM="${MAPPED_DIR}/${SAMPLE_NAME}_unmerged.sam"
 MERGED_BAM="${DEDUP_DIR}/${SAMPLE_NAME}_merged.dedup.bam"
 UNMERGED_BAM="${DEDUP_DIR}/${SAMPLE_NAME}_unmerged.dedup.bam"
 
+# With filtering, step 6 writes the unfiltered BAM and the filter step derives FINAL_BAM from it
+FILTER_BAM=false
+if [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null || [[ "$BAM_PRIMARY_ONLY" == true ]]; then
+    FILTER_BAM=true
+fi
+UNFILTERED_BAM="${FINAL_BAM%.bam}.unfiltered.bam"
+if [[ "$FILTER_BAM" == true ]]; then
+    MERGE_TARGET="$UNFILTERED_BAM"
+else
+    MERGE_TARGET="$FINAL_BAM"
+fi
+
+# Steps 1-5 overwrite their outputs and record completion in DONE_DIR, so a step interrupted
+# part-way is re-run rather than skipped on the next run.
+DONE_DIR="${WORK_DIR}/.done"
+check_dir "$DONE_DIR"
+UPSTREAM_RERUN=false
+step_done() { [[ -f "${DONE_DIR}/$1" ]]; }
+mark_done() { UPSTREAM_RERUN=true; [[ "$DRY_RUN" == true ]] || touch "${DONE_DIR}/$1"; }
+SKIP_TO_BAM=false
+if [[ -f "$MERGE_TARGET" ]]; then
+    SKIP_TO_BAM=true
+fi
+
 # Start processing
 if [[ "$DRY_RUN" == true ]]; then
     log_dry_run "DRY-RUN MODE: Commands will be previewed but not executed"
@@ -1469,11 +1575,17 @@ log "Reference: $REFERENCE"
 log "Output directory: $OUTPUT_DIR"
 log "Working directory: $WORK_DIR"
 log "Threads: $THREADS"
+if [[ "$FILTER_BAM" == true ]]; then
+    log "BAM filter: MAPQ >= ${BAM_MIN_MAPQ}, primary only = ${BAM_PRIMARY_ONLY}; unfiltered BAM kept as $UNFILTERED_BAM"
+fi
 
+if [[ "$SKIP_TO_BAM" == true ]]; then
+    log "$MERGE_TARGET exists; skipping steps 1-5 (delete it to re-run alignment)"
+else
 # Step 1: Trim adapters
 if [[ -n "$ADAPTERS_FA" ]]; then
     log "Step 1/7: Trimming adapters..."
-    if [[ ! -f "$R1_CLEAN" ]] || [[ ! -f "$R2_CLEAN" ]]; then
+    if ! step_done trim; then
         # Build BBduk command with optional memory limit
         BBDUK_CMD=("$BBDUK")
         if [[ -n "$BBTOOLS_MEMORY" ]]; then
@@ -1493,8 +1605,10 @@ if [[ -n "$ADAPTERS_FA" ]]; then
             tbo
             tpe
             threads="$THREADS"
+            overwrite=t
         )
         dry_run_cmd "${BBDUK_CMD[@]}"
+        mark_done trim
         log "Adapter trimming complete"
     else
         log "Adapter trimming already done, skipping..."
@@ -1508,7 +1622,7 @@ fi
 # Step 2: Quality correction and overlap assessment
 if [[ -n "$ADAPTERS_FA" ]]; then
     log "Step 2/7: Quality correction and overlap assessment..."
-    if [[ ! -f "$R1_QUAL" ]] || [[ ! -f "$R2_QUAL" ]]; then
+    if [[ "$UPSTREAM_RERUN" == true ]] || ! step_done qual_correct; then
         # Build BBmerge command with optional memory limit
         BBMERGE_CMD=("$BBMERGE")
         if [[ -n "$BBTOOLS_MEMORY" ]]; then
@@ -1524,8 +1638,10 @@ if [[ -n "$ADAPTERS_FA" ]]; then
             ecco
             mix
             threads="$THREADS"
+            overwrite=t
         )
         dry_run_cmd "${BBMERGE_CMD[@]}"
+        mark_done qual_correct
         log "Quality correction complete"
     else
         log "Quality correction already done, skipping..."
@@ -1541,7 +1657,7 @@ fi
 # Step 3: Merge overlapping reads
 if [[ -n "$ADAPTERS_FA" ]]; then
     log "Step 3/7: Merging overlapping reads..."
-    if [[ ! -f "$MERGED_FQ" ]] || [[ ! -f "$UNMERGED_R1" ]] || [[ ! -f "$UNMERGED_R2" ]]; then
+    if [[ "$UPSTREAM_RERUN" == true ]] || ! step_done merge; then
         # Build BBmerge command with optional memory limit
         BBMERGE_CMD=("$BBMERGE")
         if [[ -n "$BBTOOLS_MEMORY" ]]; then
@@ -1557,8 +1673,10 @@ if [[ -n "$ADAPTERS_FA" ]]; then
             outu1="$UNMERGED_R1"
             outu2="$UNMERGED_R2"
             threads="$THREADS"
+            overwrite=t
         )
         dry_run_cmd "${BBMERGE_CMD[@]}"
+        mark_done merge
         log "Read merging complete"
     else
         log "Read merging already done, skipping..."
@@ -1575,14 +1693,15 @@ fi
 log "Step 4/7: Mapping reads with BWA mem..."
 
 # Map merged reads if they exist
-if [[ -n "$MERGED_FQ" ]] && [[ -f "$MERGED_FQ" ]]; then
-    if [[ ! -f "$MERGED_SAM" ]]; then
+if [[ -n "$MERGED_FQ" ]] && { [[ -f "$MERGED_FQ" ]] || [[ "$DRY_RUN" == true ]]; }; then
+    if [[ "$UPSTREAM_RERUN" == true ]] || ! step_done map_merged; then
         log "Mapping merged reads..."
         if [[ "$DRY_RUN" == true ]]; then
             log_dry_run "Would execute: bwa mem -M -t $THREADS $REFERENCE $MERGED_FQ > $MERGED_SAM"
         else
             bwa mem -M -t "$THREADS" "$REFERENCE" "$MERGED_FQ" > "$MERGED_SAM"
         fi
+        mark_done map_merged
         log "Merged reads mapping complete"
     else
         log "Merged reads already mapped, skipping..."
@@ -1590,13 +1709,14 @@ if [[ -n "$MERGED_FQ" ]] && [[ -f "$MERGED_FQ" ]]; then
 fi
 
 # Map unmerged paired-end reads
-if [[ ! -f "$UNMERGED_SAM" ]]; then
+if [[ "$UPSTREAM_RERUN" == true ]] || ! step_done map_unmerged; then
     log "Mapping unmerged paired-end reads..."
     if [[ "$DRY_RUN" == true ]]; then
         log_dry_run "Would execute: bwa mem -M -t $THREADS $REFERENCE $UNMERGED_R1 $UNMERGED_R2 > $UNMERGED_SAM"
     else
         bwa mem -M -t "$THREADS" "$REFERENCE" "$UNMERGED_R1" "$UNMERGED_R2" > "$UNMERGED_SAM"
     fi
+    mark_done map_unmerged
     log "Unmerged reads mapping complete"
 else
     log "Unmerged reads already mapped, skipping..."
@@ -1606,7 +1726,8 @@ fi
 log "Step 5/7: Processing SAM files (deduplication)..."
 
 # Process merged SAM if it exists
-if [[ -f "$MERGED_SAM" ]] && [[ ! -f "$MERGED_BAM" ]]; then
+if { [[ -f "$MERGED_SAM" ]] || { [[ "$DRY_RUN" == true ]] && [[ -n "$MERGED_FQ" ]]; }; } && \
+   { [[ "$UPSTREAM_RERUN" == true ]] || ! step_done dedup_merged; }; then
     log "Processing merged SAM..."
     if [[ "$DRY_RUN" == true ]]; then
         log_dry_run "Would execute: samtools collate | samtools fixmate | samtools sort | samtools markdup"
@@ -1618,11 +1739,12 @@ if [[ -f "$MERGED_SAM" ]] && [[ ! -f "$MERGED_BAM" ]]; then
             samtools sort -@ "$THREADS" -u - | \
             samtools markdup -@ "$THREADS" -r - "$MERGED_BAM"
     fi
+    mark_done dedup_merged
     log "Merged BAM processing complete"
 fi
 
 # Process unmerged SAM
-if [[ ! -f "$UNMERGED_BAM" ]]; then
+if [[ "$UPSTREAM_RERUN" == true ]] || ! step_done dedup_unmerged; then
     log "Processing unmerged SAM..."
     if [[ "$DRY_RUN" == true ]]; then
         log_dry_run "Would execute: samtools collate | samtools fixmate | samtools sort | samtools markdup"
@@ -1634,8 +1756,10 @@ if [[ ! -f "$UNMERGED_BAM" ]]; then
             samtools sort -@ "$THREADS" -u - | \
             samtools markdup -@ "$THREADS" -r - "$UNMERGED_BAM"
     fi
+    mark_done dedup_unmerged
     log "Unmerged BAM processing complete"
 fi
+fi  # SKIP_TO_BAM
 
 # Step 6: Merge BAM files
 # Read group @RG SM (sample) is set from SAMPLE_NAME so that BAM sample names match
@@ -1653,131 +1777,131 @@ bam_reads_have_rg() {
     [[ "$n_missing" == 0 ]]
 }
 
-if [[ ! -f "$FINAL_BAM" ]]; then
-    # Intermediate files are written beside FINAL_BAM and renamed only once complete, so an
-    # interrupted run never leaves a FINAL_BAM that later runs would skip.
-    if [[ -f "$MERGED_BAM" ]]; then
+if [[ ! -f "$MERGE_TARGET" ]] || [[ "$UPSTREAM_RERUN" == true ]]; then
+    # Intermediate files are written beside MERGE_TARGET and renamed only once complete, so an
+    # interrupted run never leaves a BAM that later runs would skip.
+    if [[ -f "$MERGED_BAM" ]] || { [[ "$DRY_RUN" == true ]] && [[ -n "$MERGED_FQ" ]]; }; then
         if [[ "$DRY_RUN" == true ]]; then
-            log_dry_run "Would execute: samtools merge -@ $THREADS ${FINAL_BAM%.bam}.merge.tmp.bam $MERGED_BAM $UNMERGED_BAM"
-            log_dry_run "Would execute: samtools addreplacerg -w -r '<RG_HEADER>' -o ${FINAL_BAM%.bam}.rg.tmp.bam <merged> (assign SM to all reads)"
+            log_dry_run "Would execute: samtools merge -@ $THREADS ${MERGE_TARGET%.bam}.merge.tmp.bam $MERGED_BAM $UNMERGED_BAM"
+            log_dry_run "Would execute: samtools addreplacerg -w -r '<RG_HEADER>' -o ${MERGE_TARGET%.bam}.rg.tmp.bam <merged> (assign SM to all reads)"
         else
-            samtools merge -f -@ "$THREADS" -o "${FINAL_BAM%.bam}.merge.tmp.bam" "$MERGED_BAM" "$UNMERGED_BAM"
-            samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${FINAL_BAM%.bam}.rg.tmp.bam" "${FINAL_BAM%.bam}.merge.tmp.bam"
-            rm -f "${FINAL_BAM%.bam}.merge.tmp.bam"
-            mv "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
+            samtools merge -f -@ "$THREADS" -o "${MERGE_TARGET%.bam}.merge.tmp.bam" "$MERGED_BAM" "$UNMERGED_BAM"
+            samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${MERGE_TARGET%.bam}.rg.tmp.bam" "${MERGE_TARGET%.bam}.merge.tmp.bam"
+            rm -f "${MERGE_TARGET%.bam}.merge.tmp.bam"
+            mv "${MERGE_TARGET%.bam}.rg.tmp.bam" "$MERGE_TARGET"
         fi
     else
         if [[ "$DRY_RUN" == true ]]; then
-            log_dry_run "Would execute: samtools addreplacerg -w -r '<RG_HEADER>' -o ${FINAL_BAM%.bam}.rg.tmp.bam $UNMERGED_BAM"
+            log_dry_run "Would execute: samtools addreplacerg -w -r '<RG_HEADER>' -o ${MERGE_TARGET%.bam}.rg.tmp.bam $UNMERGED_BAM"
         else
-            samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${FINAL_BAM%.bam}.rg.tmp.bam" "$UNMERGED_BAM"
-            mv "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
+            samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${MERGE_TARGET%.bam}.rg.tmp.bam" "$UNMERGED_BAM"
+            mv "${MERGE_TARGET%.bam}.rg.tmp.bam" "$MERGE_TARGET"
         fi
     fi
-    
-    # Index final BAM
     if [[ "$DRY_RUN" == true ]]; then
-        log_dry_run "Would execute: samtools index -@ $THREADS $FINAL_BAM"
+        log_dry_run "Would execute: samtools index -@ $THREADS $MERGE_TARGET"
     else
-        samtools index -@ "$THREADS" "$FINAL_BAM"
+        samtools index -@ "$THREADS" "$MERGE_TARGET"
     fi
-    log "BAM merging complete"
-
-    # For MAPQ threshold vs depth assessment, see mapq_threshold_counts.sh (e.g. run on this BAM with -i sample_info -o dir).
-    # Update CSV file with BAM path if CSV file is provided
-    # Use file locking if we might be running in parallel (when SAMPLE_INFO_CSV is provided,
-    # it could be a parallel job updating the same CSV file)
-    if [[ -n "$SAMPLE_INFO_CSV" ]]; then
-        # Always use locking when SAMPLE_INFO_CSV is provided to be safe
-        # (harmless overhead in single-sample mode, critical for parallel mode)
-        update_csv_with_bam "$SAMPLE_INFO_CSV" "$SAMPLE_NAME" "$FINAL_BAM" true
-    fi
-elif [[ "$DRY_RUN" != true ]] && ! bam_reads_have_rg "$FINAL_BAM"; then
-    log_warn "Reads in existing $FINAL_BAM lack RG:Z tags; re-tagging with SM:${SAMPLE_NAME}"
-    samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
-    mv "${FINAL_BAM%.bam}.rg.tmp.bam" "$FINAL_BAM"
-    samtools index -@ "$THREADS" "$FINAL_BAM"
+    log "BAM merging complete: $MERGE_TARGET"
+elif [[ "$DRY_RUN" != true ]] && ! bam_reads_have_rg "$MERGE_TARGET"; then
+    log_warn "Reads in existing $MERGE_TARGET lack RG:Z tags; re-tagging with SM:${SAMPLE_NAME}"
+    samtools addreplacerg -w -@ "$THREADS" -r "$RG_HEADER" -o "${MERGE_TARGET%.bam}.rg.tmp.bam" "$MERGE_TARGET"
+    mv "${MERGE_TARGET%.bam}.rg.tmp.bam" "$MERGE_TARGET"
+    samtools index -@ "$THREADS" "$MERGE_TARGET"
 else
     log "BAM files already merged, skipping..."
 fi
 
-# Optional post-alignment BAM QC (recommended before grenedalf / variant calling)
-if [[ -f "$FINAL_BAM" ]] && { [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null || [[ "$BAM_PRIMARY_ONLY" == true ]]; }; then
-    log "Filtering final BAM (MAPQ>=${BAM_MIN_MAPQ:-0}, primary-only=${BAM_PRIMARY_ONLY})..."
-    FILTERED_BAM="${FINAL_BAM%.bam}.filt.bam"
-    VIEW_ARGS=(-b -@ "$THREADS")
-    if [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null; then
-        VIEW_ARGS+=(-q "$BAM_MIN_MAPQ")
-    fi
-    if [[ "$BAM_PRIMARY_ONLY" == true ]]; then
-        VIEW_ARGS+=(-F 2304)  # exclude secondary (256) + supplementary (2048)
-    fi
-    if [[ "$DRY_RUN" == true ]]; then
-        log_dry_run "Would execute: samtools view ${VIEW_ARGS[*]} $FINAL_BAM > $FILTERED_BAM && mv && samtools index"
+# Optional post-alignment filter: FINAL_BAM is (re)built whenever it is missing or older than
+# the unfiltered BAM it comes from.
+if [[ "$FILTER_BAM" == true ]]; then
+    if [[ ! -f "$FINAL_BAM" ]] || [[ "$UNFILTERED_BAM" -nt "$FINAL_BAM" ]] || [[ "$DRY_RUN" == true ]]; then
+        log "Filtering BAM (MAPQ >= ${BAM_MIN_MAPQ:-0}, primary only = ${BAM_PRIMARY_ONLY})..."
+        VIEW_ARGS=(-b -@ "$THREADS")
+        if [[ "$BAM_MIN_MAPQ" -gt 0 ]] 2>/dev/null; then
+            VIEW_ARGS+=(-q "$BAM_MIN_MAPQ")
+        fi
+        if [[ "$BAM_PRIMARY_ONLY" == true ]]; then
+            VIEW_ARGS+=(-F 2304)  # exclude secondary (256) + supplementary (2048)
+        fi
+        if [[ "$DRY_RUN" == true ]]; then
+            log_dry_run "Would execute: samtools view ${VIEW_ARGS[*]} -o ${FINAL_BAM%.bam}.filt.tmp.bam $UNFILTERED_BAM && mv to $FINAL_BAM && samtools index"
+        else
+            samtools view "${VIEW_ARGS[@]}" -o "${FINAL_BAM%.bam}.filt.tmp.bam" "$UNFILTERED_BAM"
+            mv "${FINAL_BAM%.bam}.filt.tmp.bam" "$FINAL_BAM"
+            samtools index -@ "$THREADS" "$FINAL_BAM"
+        fi
+        log "BAM filtering complete: $FINAL_BAM (unfiltered: $UNFILTERED_BAM)"
     else
-        samtools view "${VIEW_ARGS[@]}" "$FINAL_BAM" > "$FILTERED_BAM"
-        mv "$FILTERED_BAM" "$FINAL_BAM"
-        samtools index -@ "$THREADS" "$FINAL_BAM"
+        log "Filtered BAM is up to date, skipping..."
     fi
-    log "BAM filtering complete"
 fi
 
-# Step 7: Create mpileup
-log "Step 7/7: Creating mpileup..."
-if [[ ! -f "$MPILEUP" ]]; then
-    if [[ "$DRY_RUN" == true ]]; then
-        log_dry_run "Would execute: samtools mpileup -B -q $MPILEUP_MIN_QUAL $FINAL_BAM > $MPILEUP"
+# For MAPQ threshold vs depth assessment, see mapq_threshold_counts.sh.
+# Record the final BAM in the sample CSV (locking: parallel jobs may update it concurrently)
+if [[ -n "$SAMPLE_INFO_CSV" ]]; then
+    update_csv_with_bam "$SAMPLE_INFO_CSV" "$SAMPLE_NAME" "$FINAL_BAM" true || true
+fi
+
+# Step 7: Create mpileup (optional)
+if [[ "$WRITE_MPILEUP" == true ]]; then
+    log "Step 7/7: Creating mpileup..."
+    if [[ ! -f "$MPILEUP" ]] || [[ "$FINAL_BAM" -nt "$MPILEUP" ]]; then
+        if [[ "$DRY_RUN" == true ]]; then
+            log_dry_run "Would execute: samtools mpileup -B -Q $MPILEUP_MIN_QUAL $FINAL_BAM > $MPILEUP"
+        else
+            samtools mpileup -B -Q "$MPILEUP_MIN_QUAL" -o "${MPILEUP}.tmp" "$FINAL_BAM"
+            mv "${MPILEUP}.tmp" "$MPILEUP"
+        fi
+        log "Mpileup creation complete"
     else
-        samtools mpileup -B -q "$MPILEUP_MIN_QUAL" "$FINAL_BAM" > "$MPILEUP"
+        log "Mpileup already exists, skipping..."
     fi
-    log "Mpileup creation complete"
 else
-    log "Mpileup already exists, skipping..."
+    log "Step 7/7: Skipping mpileup (use --mpileup to write one)"
 fi
 
 # Optional: Create sync file
 if [[ "$SKIP_SYNC" == false ]]; then
-    if [[ ! -f "$SYNC_FILE" ]]; then
-        # Use grenedalf if requested and available
-        if [[ "$USE_GRENEDALF_SYNC" == true ]] && [[ -n "$GRENEDALF" ]]; then
-            log "Creating sync file with grenedalf..."
-            # Grenedalf sync command (exact options to be verified)
-            # Assuming: grenedalf sync --sam-path <BAM> --output <SYNC_FILE>
-            if command -v "$GRENEDALF" &> /dev/null || [[ -f "$GRENEDALF" ]]; then
-                dry_run_cmd "$GRENEDALF" sync \
-                    --sam-path "$FINAL_BAM" \
-                    --output "$SYNC_FILE" \
-                    --threads "$THREADS" \
-                    --min-base-qual "$MPILEUP_MIN_QUAL" || {
-                    if [[ "$DRY_RUN" == false ]]; then
-                        log_error "Grenedalf sync failed"
-                        exit 1
-                    fi
-                }
-                log "Sync file creation complete with grenedalf"
-            else
-                log_error "Grenedalf executable not found: $GRENEDALF"
-                exit 1
-            fi
-        # Fall back to popoolation2 if available
-        elif [[ -n "$POPOOLATION2_JAR" ]]; then
-            log "Creating sync file with popoolation2..."
-            if [[ ! -f "$POPOOLATION2_JAR" ]]; then
-                log_warn "Popoolation2 JAR not found, skipping sync file creation"
-            else
-                dry_run_cmd java -jar "$POPOOLATION2_JAR" \
-                    --input "$MPILEUP" \
-                    --output "$SYNC_FILE" \
-                    --fastq-type sanger \
-                    --min-qual "$MPILEUP_MIN_QUAL" \
-                    --threads "$THREADS"
-                log "Sync file creation complete with popoolation2"
-            fi
+    if [[ -f "$SYNC_FILE" ]] && [[ ! "$FINAL_BAM" -nt "$SYNC_FILE" ]]; then
+        log "Sync file already exists, skipping..."
+    elif [[ "$USE_GRENEDALF_SYNC" == true ]] && [[ -n "$GRENEDALF" ]]; then
+        log "Creating sync file with grenedalf..."
+        # grenedalf writes {out-dir}/{file-prefix}sync.sync; --sam-split-by-rg names the column by
+        # the read group (SAMPLE_NAME) instead of the BAM file name
+        SYNC_TMP_DIR="${WORK_DIR}/sync_tmp"
+        check_dir "$SYNC_TMP_DIR"
+        if dry_run_cmd "$GRENEDALF" sync \
+                --sam-path "$FINAL_BAM" \
+                --sam-split-by-rg \
+                --sam-min-base-qual "$MPILEUP_MIN_QUAL" \
+                --out-dir "$SYNC_TMP_DIR" \
+                --file-prefix "${SAMPLE_NAME}_" \
+                --allow-file-overwriting \
+                --threads "$THREADS"; then
+            [[ "$DRY_RUN" == true ]] || mv "${SYNC_TMP_DIR}/${SAMPLE_NAME}_sync.sync" "$SYNC_FILE"
+            log "Sync file creation complete with grenedalf"
         else
-            log "Skipping sync file creation (no tool specified: use --use-grenedalf-sync or --popoolation2)"
+            log_error "Grenedalf sync failed"
+            exit 1
+        fi
+    elif [[ -n "$POPOOLATION2_JAR" ]]; then
+        log "Creating sync file with popoolation2..."
+        if [[ ! -f "$POPOOLATION2_JAR" ]]; then
+            log_warn "Popoolation2 JAR not found, skipping sync file creation"
+        else
+            dry_run_cmd java -jar "$POPOOLATION2_JAR" \
+                --input "$MPILEUP" \
+                --output "${SYNC_FILE}.tmp" \
+                --fastq-type sanger \
+                --min-qual "$MPILEUP_MIN_QUAL" \
+                --threads "$THREADS"
+            [[ "$DRY_RUN" == true ]] || mv "${SYNC_FILE}.tmp" "$SYNC_FILE"
+            log "Sync file creation complete with popoolation2"
         fi
     else
-        log "Sync file already exists, skipping..."
+        log "Skipping sync file creation (no tool specified: use --use-grenedalf-sync or --popoolation2)"
     fi
 fi
 
@@ -1789,10 +1913,10 @@ else
     log "Pipeline complete!"
     log "Final outputs:"
     log "  BAM file: $FINAL_BAM"
-    log "  Mpileup: $MPILEUP"
-    if [[ -f "$SYNC_FILE" ]]; then
-        log "  Sync file: $SYNC_FILE"
-    fi
-    log "Intermediate files are in: $WORK_DIR"
+    [[ "$FILTER_BAM" == true ]] && log "  Unfiltered BAM (for seq_qual_metrics.sh / build_mask.sh): $UNFILTERED_BAM"
+    [[ -f "$MPILEUP" ]] && log "  Mpileup: $MPILEUP"
+    [[ -f "$SYNC_FILE" ]] && log "  Sync file: $SYNC_FILE"
+    log "Intermediate files are in: $WORK_DIR (delete once all samples are done)"
+    log "Next: seq_qual_metrics.sh and build_mask.sh (see README: Recommended order)"
 fi
-
+exit 0

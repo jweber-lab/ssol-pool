@@ -294,6 +294,44 @@ infer_scale_from_window_table <- function(path) {
   list(scale = paste0("w", window_size, "_s", step_size), window_size = window_size, step_size = step_size)
 }
 
+# ---- Window grid checks ----
+# All windowed inputs of one scale should share grenedalf's interval grid: start = 1 + k * step,
+# end = start + window - 1. The first table registered for a scale is the reference; later tables
+# are compared on the chromosomes both contain (grenedalf omits chromosomes without data).
+WINDOW_SETS <- new.env()
+
+register_windows <- function(scale, label, d) {
+  if (is.null(d) || nrow(d) == 0L || !all(c("chr", "start", "end") %in% names(d))) return(invisible(NULL))
+  w <- distinct(tibble(chr = as.character(d$chr), start = as.numeric(d$start), end = as.numeric(d$end)))
+  ws <- parse_window_step(scale)
+  if (!is.na(ws$window_size) && !is.na(ws$step_size)) {
+    off <- (w$start - 1) %% ws$step_size != 0 | (w$end - w$start + 1) != ws$window_size
+    if (any(off, na.rm = TRUE)) {
+      i <- which(off)[1L]
+      message("WARNING window check ", scale, ": ", sum(off, na.rm = TRUE), " ", label, " window(s) are off the ", scale,
+              " grid (e.g. ", w$chr[i], ":", w$start[i], "-", w$end[i], ")")
+    }
+  }
+  ref <- WINDOW_SETS[[scale]]
+  if (is.null(ref)) {
+    assign(scale, list(label = label, w = w), envir = WINDOW_SETS)
+    return(invisible(NULL))
+  }
+  shared <- intersect(unique(ref$w$chr), unique(w$chr))
+  a <- ref$w[ref$w$chr %in% shared, ]
+  b <- w[w$chr %in% shared, ]
+  only_new <- nrow(anti_join(b, a, by = c("chr", "start", "end")))
+  only_ref <- nrow(anti_join(a, b, by = c("chr", "start", "end")))
+  if (only_new + only_ref > 0L) {
+    message("WARNING window check ", scale, ": ", label, " vs ", ref$label, ": ", only_new, " window(s) only in ", label,
+            ", ", only_ref, " only in ", ref$label, " (", length(shared), " shared chromosome(s)). ",
+            "Re-run with the same --reference-genome and window/step sizes so boundaries match.")
+  } else {
+    message("Window check ", scale, ": ", label, " matches ", ref$label, " (", nrow(b), " windows on ", length(shared), " shared chromosome(s))")
+  }
+  invisible(NULL)
+}
+
 # ---- Diversity ----
 # Parse window and step from filename (e.g. diversity_w1000_s500.tsv -> 1000, 500)
 parse_window_step <- function(basename_file) {
@@ -375,6 +413,7 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   if (!is.na(passed_col) && !is.na(invariant_col)) {
     d$n_total <- as.numeric(d[[passed_col]]) + as.numeric(d[[invariant_col]])
   }
+  if ("total.masked" %in% names(d)) d$n_masked <- as.numeric(d[["total.masked"]])
   # Use sample from CSV if present and non-NA; otherwise use name derived from path/filename
   if (!("sample" %in% names(d) && any(!is.na(d$sample)))) {
     d$sample <- sample_name
@@ -383,7 +422,7 @@ read_one_diversity <- function(path, sample_name, window_size, step_size) {
   }
   d$window_size <- window_size
   d$step_size <- step_size
-  d %>% select(any_of(c("chr", "pos", "start", "end", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total")))  # nolint: object_usage_linter
+  d %>% select(any_of(c("chr", "pos", "start", "end", "sample", "window_size", "step_size", "pi", "theta", "tajima_d", "n_snps", "n_total", "n_masked")))  # nolint: object_usage_linter
 }
 
 SEQ_QUAL_COLS <- c("mean_coverage", "mean_mapping_quality", "mean_coverage_hq", "frac_mapq0", "breadth",
@@ -411,6 +450,7 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     # Fallback when input has no start/end (e.g. position-only format)
     if (!"start" %in% names(d)) d$start <- d$pos
     if (!"end" %in% names(d)) d$end <- if (all(!is.na(d$window_size))) d$start + d$window_size - 1 else d$pos
+    for (s in unique(d$sample)) register_windows(key, paste("diversity", s), d[d$sample == s, ])
     if (!"n_snps" %in% names(d)) {
       message("Diversity: no n_snps column (e.g. total.passed) in input; consider re-running with grenedalf output that includes these counts.")
     }
@@ -442,6 +482,7 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
       sq_list <- sq_list[!vapply(sq_list, is.null, logical(1L))]
       if (length(sq_list) > 0) {
         sq <- bind_rows(sq_list) %>% distinct(chr, start, end, sample, .keep_all = TRUE)
+        register_windows(key, "seq_qual", sq)
         d <- d %>% left_join(sq, by = c("chr", "start", "end", "sample"))
         if (verbose) message("[verbose] diversity ", key, " after seq_qual join: n_row ", n_before_join, " -> ", nrow(d), " (duplicates if >before)")
       }
@@ -449,6 +490,7 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     if (!is.null(variant_feature_dir) && nzchar(variant_feature_dir) && dir.exists(variant_feature_dir)) {
       vf <- load_variant_features_tsv(variant_feature_dir, scale_infos[[1]]$window_size, scale_infos[[1]]$step_size)
       if (!is.null(vf)) {
+        register_windows(key, "variant features", vf)
         n_before_join <- nrow(d)
         vf_cols <- setdiff(names(vf), c("chr", "start", "end"))
         if (length(vf_cols) > 0L) {
@@ -476,7 +518,7 @@ write_diversity_h5 <- function(d, path) {
   grp[["sample"]] <- as.character(d$sample)
   core_num <- intersect(
     c("pi", "theta", "tajima_d", "pi_rank", "pi_quantile", "theta_rank", "theta_quantile",
-      "tajima_d_rank", "tajima_d_quantile", SEQ_QUAL_COLS, "n_snps", "n_total"),
+      "tajima_d_rank", "tajima_d_quantile", SEQ_QUAL_COLS, "n_snps", "n_total", "n_masked"),
     names(d)
   )
   vf_num <- grep("^n_(csq|region|effect|sites)", names(d), value = TRUE, ignore.case = TRUE)
@@ -530,6 +572,7 @@ process_one_fst <- function(path, window_size = NULL, step_size = NULL, drop_all
   if (!is.null(step_size)) d$step_size <- as.numeric(step_size)
   n_snps_col <- intersect(c("total.passed", "total_passed"), names(d))[1L]
   if (!is.na(n_snps_col)) d$n_snps <- as.numeric(d[[n_snps_col]])
+  if ("total.masked" %in% names(d)) d$n_masked <- as.numeric(d[["total.masked"]])
   fst_cols <- grep("\\.fst$|_fst$", names(d), value = TRUE, ignore.case = TRUE)
   for (fc in fst_cols) {
     d[[fc]] <- as.numeric(d[[fc]])
@@ -551,7 +594,7 @@ fst_wide_to_long <- function(d) {
   fst_cols <- grep("^fst_.+", names(d), value = TRUE)
   fst_cols <- fst_cols[!grepl("_rank$|_quantile$", fst_cols)]
   if (length(fst_cols) == 0) return(d)
-  base_cols <- c("chr", "start", "end", "pos", "n_snps", "window_size", "step_size")
+  base_cols <- c("chr", "start", "end", "pos", "n_snps", "n_masked", "window_size", "step_size")
   base_cols <- intersect(base_cols, names(d))
   out_list <- list()
   for (fc in fst_cols) {
@@ -593,6 +636,7 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
     long_list <- long_list[!vapply(long_list, is.null, logical(1L))]
     if (length(long_list) == 0) next
     d_long <- bind_rows(long_list)
+    if (scale != "single") register_windows(scale, "fst", d_long)
     if (verbose) message("[verbose] FST ", scale, " n_row=", nrow(d_long), " n_NA_fst=", sum(is.na(d_long$fst)), " (of ", length(d_long$fst), ")")
     if ("fst" %in% names(d_long)) {
       group_vars <- c("pop1", "pop2", "window_size", "step_size")
@@ -679,7 +723,7 @@ parse_trio_pops <- function(trio_name) {
   }
 }
 
-read_one_pbe <- function(path, trio_name, drop_all_na = FALSE) {
+read_one_pbe <- function(path, trio_name, drop_all_na = FALSE, window_size = NA_real_) {
   d <- read_tab(path)
   d <- d %>% rename_all(tolower)
   chr_col <- intersect(c("chr", "chromosome"), names(d))[1L]
@@ -689,7 +733,8 @@ read_one_pbe <- function(path, trio_name, drop_all_na = FALSE) {
   d$chr <- as.character(d$chr)
   d$pos <- as.numeric(d$pos)
   if (!"start" %in% names(d)) d$start <- d$pos
-  if (!"end" %in% names(d)) d$end <- d$pos
+  # PBE tables written before calculate_pbe.R kept window ends carry only the window start
+  if (!"end" %in% names(d)) d$end <- if (!is.na(window_size)) d$start + window_size - 1 else d$pos
   if (drop_all_na && "pbe" %in% names(d)) {
     d <- d %>% filter(!is.na(.data$pbe))
   }
@@ -745,13 +790,14 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
   for (scale in names(by_scale)) {
     scale_infos <- by_scale[[scale]]
     tbl_list <- lapply(scale_infos, function(x) {
-      d <- read_one_pbe(x$path, x$trio_name, drop_all_na = drop_all_na)
+      d <- read_one_pbe(x$path, x$trio_name, drop_all_na = drop_all_na, window_size = x$window_size)
       if (is.null(d)) return(NULL)
       list(trio_name = x$trio_name, data = d)
     })
     tbl_list <- tbl_list[!vapply(tbl_list, is.null, logical(1L))]
     if (length(tbl_list) == 0) next
     is_single <- scale == "single"
+    if (!is_single) for (x in tbl_list) register_windows(scale, paste("pbe", x$trio_name), x$data)
     if (!is_single && !is.null(variant_feature_dir) && nzchar(variant_feature_dir) && dir.exists(variant_feature_dir)) {
       vf <- load_variant_features_tsv(variant_feature_dir, scale_infos[[1]]$window_size, scale_infos[[1]]$step_size)
       if (!is.null(vf)) {

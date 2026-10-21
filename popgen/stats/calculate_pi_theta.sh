@@ -81,7 +81,8 @@ Optional options:
   --pool-size N               Pool size (haploid chromosomes) (default: 50)
   --window-average-policy     Window averaging policy: window-length, available-loci, valid-loci, valid-snps, sum (default: valid-loci)
   --tajima-d-policy           Tajima's D denominator policy: empirical-min-read-depth, provided-min-read-depth, popoolation-bugs, pool-size, uncorrected (default: empirical-min-read-depth)
-  --reference-genome FILE     Reference genome FASTA file (optional, for better chromosome ordering)
+  --reference-genome FILE     Reference genome FASTA (required): chromosome lengths fix the window grid
+                              shared by all samples, FST, seq_qual and variant feature windows
   --filter-mask-total-fasta FILE  Grenedalf mask FASTA (vcftools-style; optional; exclude repeats from windows)
   --filter-mask-total-bed FILE    RepeatMasker BED (or other) for grenedalf to skip masked intervals (optional)
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
@@ -98,6 +99,7 @@ Examples:
   $0 \\
     --bam /path/to/sample.bam \\
     --grenedalf /usr/bin/grenedalf \\
+    --reference-genome /path/to/ref.unmasked.fa \\
     --output-dir /path/to/output \\
     --window-size 10000 \\
     --pool-size 50
@@ -106,6 +108,7 @@ Examples:
   $0 \\
     --sample-info sample_info.csv \\
     --grenedalf /usr/bin/grenedalf \\
+    --reference-genome /path/to/ref.unmasked.fa \\
     --output-dir /path/to/output \\
     --window-size 1000 \\
     --window-size 5000 \\
@@ -118,6 +121,7 @@ Examples:
   $0 \\
     --sample-info sample_info.csv \\
     --grenedalf /usr/bin/grenedalf \\
+    --reference-genome /path/to/ref.unmasked.fa \\
     --output-dir /path/to/output \\
     --window-size 1000 \\
     --window-size 5000 \\
@@ -442,6 +446,18 @@ if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ "$DRY_RUN" == false ]]; then
 fi
 if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ -n "$FILTER_MASK_TOTAL_BED" ]]; then
     log_warn "Both FASTA and BED mask files specified. Grenedalf uses only one (FASTA takes precedence if both are valid)."
+fi
+
+# Chromosome lengths from the reference fix the window grid: without them grenedalf ends each
+# sample's windows at its last covered position (windows differ between samples) and
+# grenedalf 0.6.3 crashes part-way when a mask is given.
+if [[ -z "$REFERENCE_GENOME" ]]; then
+    log_error "--reference-genome is required so every sample uses the same window grid (chromosome lengths from the reference)"
+    exit 1
+fi
+if [[ "$DRY_RUN" == false ]] && [[ ! -f "$REFERENCE_GENOME" ]]; then
+    log_error "Reference genome not found: $REFERENCE_GENOME"
+    exit 1
 fi
 
 # Initialize log file (create output/log directory)

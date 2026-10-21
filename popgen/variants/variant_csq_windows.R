@@ -3,8 +3,11 @@
 ###############################################################################
 # variant_csq_windows.R
 #
-# Aggregate annotated variant sites (variant_csq.R output) into per-window
-# counts using template grenedalf windows from FST or diversity TSV.
+# Aggregate annotated variant sites (variant_csq.R output) into per-window counts.
+# Windows: grenedalf's interval grid built from the reference .fai (--reference with
+# --window-size / --step-size, or scales taken from template file names), so they match
+# diversity, FST, PBE and seq_qual windows exactly; or, without --reference, the windows
+# listed in template grenedalf TSVs.
 #
 # Outputs variant_features_w{W}_s{S}.tsv with n_sites, n_sites_<type> (snp/indel),
 # n_csq_*, n_region_*, n_effect_*, and genes / genes_protein_altering (semicolon-separated).
@@ -33,13 +36,6 @@ parse_window_step_name <- function(b) {
   }
 }
 
-# Union of semicolon-separated gene lists, sorted; NA when empty
-join_genes <- function(x) {
-  g <- unlist(strsplit(x[!is.na(x)], ";", fixed = TRUE))
-  g <- sort(unique(trimws(g[nzchar(trimws(g))])))
-  if (length(g) == 0L) NA_character_ else paste(g, collapse = ";")
-}
-
 sanitize_suffix <- function(x) {
   s <- gsub("[^A-Za-z0-9]+", "_", x)
   s <- gsub("^_+|_+$", "", s)
@@ -57,21 +53,20 @@ prepare_sites <- function(sites) {
     alt <- sub(",.*", "", as.character(d$alt))
     d$variant_type <- ifelse(nchar(ref) == 1L & nchar(alt) == 1L, "snp", ifelse(nchar(ref) != nchar(alt), "indel", "other"))
   }
-  for (gc in c("genes", "genes_protein_altering")) {
+  for (gc in c("genes", "genes_protein_altering", "csq_consequences", "region_category", "coding_effect")) {
     if (!gc %in% names(d)) d[[gc]] <- NA_character_
     d[[gc]] <- as.character(d[[gc]])
   }
-  if ("csq_consequences" %in% names(d)) {
-    d$toks <- strsplit(ifelse(is.na(d$csq_consequences), "", d$csq_consequences), ";", fixed = TRUE)
-    d$toks <- lapply(d$toks, function(z) unique(trimws(z[nzchar(trimws(z))])))
-  } else {
-    d$toks <- replicate(nrow(d), character(0L), simplify = FALSE)
-  }
-  if (!"region_category" %in% names(d)) d$region_category <- NA_character_
-  if (!"coding_effect" %in% names(d)) d$coding_effect <- NA_character_
-  d$region_category <- as.character(d$region_category)
-  d$coding_effect <- as.character(d$coding_effect)
   d
+}
+
+#' grenedalf interval grid: start = 1 + k * step; the last window is the first whose end reaches
+#' the chromosome length (end not clipped)
+grid_windows <- function(fai, window_size, step_size) {
+  n_win <- ifelse(fai$length > window_size, ceiling((fai$length - window_size) / step_size) + 1, 1)
+  k <- sequence(n_win) - 1
+  start <- 1 + k * step_size
+  tibble(chr = rep(fai$chr, n_win), start = start, end = start + window_size - 1)
 }
 
 extract_windows_template <- function(path) {
@@ -86,118 +81,96 @@ extract_windows_template <- function(path) {
     filter(!is.na(.data$chr), !is.na(.data$start), !is.na(.data$end))
 }
 
+#' (site, window) index pairs for sites inside windows. Windows of one chromosome must have
+#' non-decreasing starts and ends (true for any fixed-width grid), so each site's windows form
+#' one contiguous run found with findInterval.
+site_window_hits <- function(sites, windows) {
+  site_i <- integer(0); win_i <- integer(0)
+  wi_by_chr <- split(seq_len(nrow(windows)), windows$chr)
+  si_by_chr <- split(seq_len(nrow(sites)), sites$chr)
+  for (chr in intersect(names(si_by_chr), names(wi_by_chr))) {
+    wi <- wi_by_chr[[chr]]
+    wi <- wi[order(windows$start[wi], windows$end[wi])]
+    st <- windows$start[wi]; en <- windows$end[wi]
+    if (is.unsorted(en)) stop("Windows on ", chr, " have decreasing ends; window widths must be constant")
+    si <- si_by_chr[[chr]]
+    si <- si[!is.na(sites$pos[si])]
+    pos <- sites$pos[si]
+    lo <- findInterval(pos, en, left.open = TRUE) + 1L   # first window with end >= pos
+    hi <- findInterval(pos, st)                          # last window with start <= pos
+    n <- pmax(hi - lo + 1L, 0L)
+    site_i <- c(site_i, rep(si, n))
+    win_i <- c(win_i, wi[rep(lo, n) + sequence(n) - 1L])
+  }
+  list(site = site_i, win = win_i)
+}
+
+#' Per window: sorted union of semicolon-separated gene lists over its sites
+genes_by_window <- function(genes, hits, n_win) {
+  out <- rep(NA_character_, n_win)
+  keep <- !is.na(genes[hits$site]) & nzchar(genes[hits$site])
+  if (!any(keep)) return(out)
+  g <- strsplit(genes[hits$site[keep]], ";", fixed = TRUE)
+  win <- rep(hits$win[keep], lengths(g))
+  g <- trimws(unlist(g, use.names = FALSE))
+  ok <- nzchar(g)
+  pairs <- unique(data.frame(win = win[ok], g = g[ok], stringsAsFactors = FALSE))
+  pairs <- pairs[order(pairs$win, pairs$g), ]
+  s <- split(pairs$g, pairs$win)
+  out[as.integer(names(s))] <- vapply(s, paste, character(1L), collapse = ";")
+  out
+}
+
 aggregate_hits <- function(sites, windows) {
-  if (nrow(windows) == 0L) {
-    return(tibble())
+  if (nrow(windows) == 0L) return(tibble())
+  n_win <- nrow(windows)
+  hits <- site_window_hits(sites, windows)
+  count_where <- function(flag) tabulate(hits$win[flag[hits$site]], nbins = n_win)
+
+  out <- windows
+  out$n_sites <- tabulate(hits$win, nbins = n_win)
+
+  type_lev <- sort(unique(na.omit(sites$variant_type)))
+  for (vt in type_lev) out[[paste0("n_sites_", sanitize_suffix(vt))]] <- as.numeric(count_where(sites$variant_type %in% vt))
+
+  # csq tokens: one count per site carrying the token
+  tok <- strsplit(ifelse(is.na(sites$csq_consequences), "", sites$csq_consequences), ";", fixed = TRUE)
+  tok_site <- rep(seq_len(nrow(sites)), lengths(tok))
+  tok <- trimws(unlist(tok, use.names = FALSE))
+  keep <- nzchar(tok)
+  tok_site <- tok_site[keep]; tok <- tok[keep]
+  for (tk in sort(unique(tok))) {
+    has <- logical(nrow(sites)); has[tok_site[tok == tk]] <- TRUE
+    out[[paste0("n_csq_", sanitize_suffix(tk))]] <- as.numeric(count_where(has))
   }
-  all_toks <- unique(unlist(sites$toks))
-  all_toks <- all_toks[nzchar(all_toks)]
-  all_toks <- sort(all_toks)
-
-  rc_lev <- sort(unique(sites$region_category))
-  rc_lev <- rc_lev[!is.na(rc_lev)]
-  ec_lev <- sort(unique(sites$coding_effect))
-  ec_lev <- ec_lev[!is.na(ec_lev)]
-
-  # Join sites to all windows on chr, then position overlap
-  hits <- sites %>%
-    inner_join(windows, by = "chr", suffix = c("", ".w"), relationship = "many-to-many") %>%
-    filter(.data$pos >= .data$start, .data$pos <= .data$end)
-
-  by_win <- if (nrow(hits) > 0L) hits %>% group_by(.data$chr, .data$start, .data$end) else NULL
-
-  first <- if (nrow(hits) > 0L) {
-    by_win %>% summarise(n_sites = dplyr::n(), .groups = "drop")
-  } else {
-    tibble(chr = character(0), start = numeric(0), end = numeric(0), n_sites = integer(0))
+  for (rc in sort(unique(na.omit(sites$region_category)))) {
+    out[[paste0("n_region_", sanitize_suffix(rc))]] <- as.numeric(count_where(sites$region_category %in% rc))
   }
-
-  type_lev <- if ("variant_type" %in% names(sites)) sort(unique(na.omit(sites$variant_type))) else character(0)
-  genes_df <- NULL
-  if (nrow(hits) > 0L) {
-    for (vt in type_lev) {
-      cn <- paste0("n_sites_", sanitize_suffix(vt))
-      cnt <- by_win %>% summarise(!!cn := sum(.data$variant_type == vt, na.rm = TRUE), .groups = "drop")
-      first <- first %>% left_join(cnt, by = c("chr", "start", "end"))
-    }
-    genes_df <- by_win %>%
-      summarise(
-        genes = join_genes(.data$genes),
-        genes_protein_altering = join_genes(.data$genes_protein_altering),
-        .groups = "drop"
-      )
+  for (ec in sort(unique(na.omit(sites$coding_effect)))) {
+    out[[paste0("n_effect_", sanitize_suffix(ec))]] <- as.numeric(count_where(sites$coding_effect %in% ec))
   }
-
-  if (nrow(hits) > 0L) {
-    for (tk in all_toks) {
-      cn <- paste0("n_csq_", sanitize_suffix(tk))
-      cnt <- by_win %>%
-        summarise(
-          !!cn := sum(vapply(.data$toks, function(z) tk %in% z, logical(1L))),
-          .groups = "drop"
-        )
-      first <- first %>% left_join(cnt, by = c("chr", "start", "end"))
-    }
-
-    for (rc in rc_lev) {
-      cn <- paste0("n_region_", sanitize_suffix(rc))
-      cnt <- by_win %>%
-        summarise(!!cn := sum(.data$region_category == rc, na.rm = TRUE), .groups = "drop")
-      first <- first %>% left_join(cnt, by = c("chr", "start", "end"))
-    }
-
-    for (ec in ec_lev) {
-      cn <- paste0("n_effect_", sanitize_suffix(ec))
-      cnt <- by_win %>%
-        summarise(!!cn := sum(.data$coding_effect == ec, na.rm = TRUE), .groups = "drop")
-      first <- first %>% left_join(cnt, by = c("chr", "start", "end"))
-    }
-  }
-
-  # Ensure every template window appears; fill NAs with 0
-  out <- windows %>%
-    left_join(first, by = c("chr", "start", "end")) %>%
-    mutate(n_sites = if_else(is.na(.data$n_sites), 0L, as.integer(.data$n_sites)))
-
-  num_cols <- setdiff(names(out), c("chr", "start", "end"))
-  for (nm in num_cols) {
-    v <- out[[nm]]
-    v[is.na(v)] <- 0
-    out[[nm]] <- if (nm == "n_sites") as.integer(v) else as.numeric(v)
-  }
-
-  # Fill missing counter columns with 0 when no hits at all
-  for (tk in all_toks) {
-    cn <- paste0("n_csq_", sanitize_suffix(tk))
-    if (!cn %in% names(out)) out[[cn]] <- 0L
-  }
-  for (rc in rc_lev) {
-    cn <- paste0("n_region_", sanitize_suffix(rc))
-    if (!cn %in% names(out)) out[[cn]] <- 0L
-  }
-  for (ec in ec_lev) {
-    cn <- paste0("n_effect_", sanitize_suffix(ec))
-    if (!cn %in% names(out)) out[[cn]] <- 0L
-  }
-  for (vt in type_lev) {
-    cn <- paste0("n_sites_", sanitize_suffix(vt))
-    if (!cn %in% names(out)) out[[cn]] <- 0L
-  }
-
-  if (!is.null(genes_df)) {
-    out <- out %>% left_join(genes_df, by = c("chr", "start", "end"))
-  } else {
-    out$genes <- NA_character_
-    out$genes_protein_altering <- NA_character_
-  }
+  out$genes <- genes_by_window(sites$genes, hits, n_win)
+  out$genes_protein_altering <- genes_by_window(sites$genes_protein_altering, hits, n_win)
   out %>% arrange(.data$chr, .data$start, .data$end)
 }
+
+read_fai <- function(path) {
+  fai <- if (grepl("\\.fai$", path)) path else paste0(path, ".fai")
+  if (!file.exists(fai)) stop("Reference index not found: ", fai, " (run samtools faidx)")
+  x <- utils::read.delim(fai, header = FALSE, colClasses = c("character", "numeric", rep("NULL", 3)))
+  tibble(chr = x[[1L]], length = x[[2L]])
+}
+
+split_num <- function(x) if (is.null(x)) numeric(0) else as.numeric(trimws(strsplit(x, ",", fixed = TRUE)[[1L]]))
 
 main <- function() {
   option_list <- list(
     make_option(c("--sites-tsv"), type = "character", help = "Annotated variants TSV(s) from variant_csq.R; comma-separate to combine (e.g. SNP and indel outputs)"),
     make_option(c("--output-dir"), type = "character", default = ".", help = "Directory for variant_features_wW_sS.tsv"),
-    make_option(c("--template-dir"), type = "character", default = NULL, help = "Directory with *fst*w*_s*.tsv or similar window TSVs"),
+    make_option(c("--reference"), type = "character", default = NULL, help = "Reference FASTA (with .fai) or .fai: windows are built on the grenedalf interval grid from chromosome lengths"),
+    make_option(c("--window-size"), type = "character", default = NULL, help = "Window size(s), comma-separated (with --reference)"),
+    make_option(c("--step-size"), type = "character", default = NULL, help = "Step size(s), comma-separated and paired with --window-size [default: window/2]"),
+    make_option(c("--template-dir"), type = "character", default = NULL, help = "Directory with *fst*w*_s*.tsv or similar window TSVs (scales from file names; windows from them only without --reference)"),
     make_option(c("--template-tsv"), type = "character", default = NULL, help = "Single template TSV (if only one scale)")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
@@ -205,62 +178,54 @@ main <- function() {
   if (length(sites_paths) == 0L || !all(file.exists(sites_paths))) {
     stop("--sites-tsv must exist: ", paste(sites_paths[!file.exists(sites_paths)], collapse = ", "))
   }
-  if (is.null(opt$`template-dir`) && is.null(opt$`template-tsv`)) {
-    stop("Provide --template-dir or --template-tsv")
+
+  # Scales: explicit sizes, else template file names
+  ws <- split_num(opt$`window-size`)
+  ss <- split_num(opt$`step-size`)
+  if (length(ss) == 0L) ss <- ws / 2
+  if (length(ws) != length(ss)) stop("--window-size and --step-size need the same number of values")
+  if (any(ws <= 0 | ss <= 0 | ws %% 1 != 0 | ss %% 1 != 0)) stop("window and step sizes must be positive integers")
+  template_files <- character(0)
+  if (!is.null(opt$`template-tsv`)) template_files <- opt$`template-tsv`
+  if (!is.null(opt$`template-dir`)) {
+    template_files <- c(template_files, list.files(opt$`template-dir`, pattern = ".*(fst|diversity|pi|theta).*w[0-9]+_s[0-9]+.*\\.(tsv|csv)$",
+                                                   full.names = TRUE, ignore.case = TRUE))
+  }
+  scales <- list()
+  for (i in seq_along(ws)) scales[[sprintf("w%d_s%d", as.integer(ws[i]), as.integer(ss[i]))]] <- list(w = ws[i], s = ss[i], files = character(0))
+  for (f in template_files) {
+    inf <- parse_window_step_name(basename(f))
+    if (is.na(inf$scale)) next
+    if (is.null(scales[[inf$scale]])) scales[[inf$scale]] <- list(w = inf$window_size, s = inf$step_size, files = character(0))
+    scales[[inf$scale]]$files <- c(scales[[inf$scale]]$files, f)
+  }
+  if (length(scales) == 0L) stop("Give --reference with --window-size [--step-size], or --template-dir / --template-tsv with w*_s* file names")
+  fai <- if (!is.null(opt$reference)) read_fai(opt$reference) else NULL
+  if (is.null(fai)) {
+    no_tpl <- names(scales)[vapply(scales, function(z) length(z$files) == 0L, logical(1L))]
+    if (length(no_tpl) > 0L) stop("--reference is required for scales without template files: ", paste(no_tpl, collapse = ", "))
+    message("No --reference: using windows listed in templates (chromosomes or windows grenedalf did not write are missing)")
   }
 
   sites <- prepare_sites(bind_rows(lapply(sites_paths, function(p) read_tab(p) %>% mutate(across(everything(), as.character)))) %>% readr::type_convert(col_types = readr::cols()))
-
-  template_files <- if (!is.null(opt$`template-tsv`)) {
-    c(opt$`template-tsv`)
-  } else {
-    list.files(
-      opt$`template-dir`,
-      pattern = ".*(fst|diversity|pi|theta).*w[0-9]+_s[0-9]+.*\\.(tsv|csv)$",
-      full.names = TRUE,
-      ignore.case = TRUE
-    )
-  }
-  template_files <- setdiff(template_files, NA_character_)
-  if (length(template_files) == 0L) {
-    stop("No template files found; check --template-dir pattern or pass --template-tsv")
-  }
-
-  by_path <- lapply(template_files, function(f) {
-    inf <- parse_window_step_name(basename(f))
-    list(path = f, scale = inf$scale, window_size = inf$window_size, step_size = inf$step_size)
-  })
-  scales <- unique(vapply(by_path, function(z) z$scale, character(1L)))
-  scales <- scales[!is.na(scales)]
-  if (length(scales) == 0L) {
-    stop("Could not infer w*_s* scale from template file names. Rename files to include w1000_s500 style suffix.")
+  if (!is.null(fai)) {
+    unknown <- setdiff(unique(sites$chr), fai$chr)
+    if (length(unknown) > 0L) message("Sites on ", length(unknown), " sequence(s) not in the reference index are skipped (e.g. ", paste(head(unknown, 3), collapse = ", "), ")")
   }
 
   dir.create(opt$`output-dir`, showWarnings = FALSE, recursive = TRUE)
-
-  for (sc in scales) {
-    tpls <- Filter(function(z) identical(z$scale, sc), by_path)
-    tpl_paths <- vapply(tpls, function(z) z$path, character(1L))
-    # Union windows from all templates of this scale
-    win <- NULL
-    for (tp in tpl_paths) {
-      wi <- extract_windows_template(tp)
-      win <- if (is.null(win)) wi else bind_rows(win, wi)
+  for (sc in names(scales)) {
+    z <- scales[[sc]]
+    win <- if (!is.null(fai)) {
+      grid_windows(fai, z$w, z$s)
+    } else {
+      distinct(bind_rows(lapply(z$files, extract_windows_template)), .data$chr, .data$start, .data$end)
     }
-    win <- win %>% distinct(.data$chr, .data$start, .data$end)
-
     agg <- aggregate_hits(sites, win)
-
-    ## Parse W and S from scale
-    m <- regmatches(sc, regexec("^w([0-9]+)_s([0-9]+)$", sc))[[1L]]
     out_name <- file.path(opt$`output-dir`, sprintf("variant_features_%s.tsv", sc))
-    if (length(m) >= 3L) {
-      out_name <- file.path(opt$`output-dir`, sprintf("variant_features_w%s_s%s.tsv", m[2L], m[3L]))
-    }
     readr::write_tsv(agg, out_name, na = "")
     message("Wrote ", out_name, " (rows=", nrow(agg), ", scale=", sc, ")")
   }
-
   invisible(NULL)
 }
 
