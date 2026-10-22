@@ -17,10 +17,13 @@
 #     Group /windows: chr, start, end, sample, pi, theta, tajima_d,
 #     *_rank, *_quantile, n_snps (total.passed), n_total (total.passed + total.invariant),
 #     seq_qual columns when --seq-qual-dir is set (mean_coverage, mean_mapping_quality, mean_coverage_hq,
-#     frac_mapq0, breadth, rel_coverage, n_reads, frac_proper_pair, frac_mate_other_chr),
+#     frac_mapq0, breadth, rel_coverage, n_reads, frac_proper_pair, frac_mate_other_chr). An exact
+#     seq_qual_metrics_w{W}_s{S}.tsv is preferred; otherwise a finer step for the same window is
+#     kept on the analysis grid when S is a multiple of the source step (e.g. s250 -> s500).
 #     optional n_sites / n_sites_snp / n_sites_indel / n_csq_* / n_region_* / n_effect_* counts and
 #     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set
-#     (the same window columns are joined into fst_w*.h5 and pbe_w*.h5)
+#     (the same window columns are joined into fst_w*.h5 and pbe_w*.h5; variant_features_wW_sS.tsv
+#     uses the same exact-then-finer-step lookup as seq_qual)
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
 #   fst_w{W}_s{S}.h5  (or fst_single.h5)
@@ -343,6 +346,66 @@ parse_window_step <- function(basename_file) {
   )
 }
 
+# Source scale can fill a target scale when window widths match and the target
+# step is an integer multiple of the source step. Both grids start at position 1,
+# so source rows with (start - 1) %% target_step == 0 are the target windows
+# (e.g. seq_qual_metrics_w1000_s250.tsv can supply w1000_s500).
+compatible_finer_step <- function(target_step, source_step) {
+  !is.na(target_step) && !is.na(source_step) &&
+    source_step > 0 && target_step >= source_step &&
+    (as.numeric(target_step) %% as.numeric(source_step) == 0)
+}
+
+subset_windows_to_step <- function(d, window_size, step_size) {
+  if (is.null(d) || nrow(d) == 0L) return(d)
+  if (is.na(window_size) || is.na(step_size)) return(d)
+  span <- as.numeric(d$end) - as.numeric(d$start) + 1
+  keep <- (as.numeric(d$start) - 1) %% as.numeric(step_size) == 0 & span == as.numeric(window_size)
+  d[keep, , drop = FALSE]
+}
+
+list_named_scale_files <- function(dir, prefix) {
+  if (is.null(dir) || !nzchar(dir) || !dir.exists(dir)) return(list())
+  pat <- paste0("^", prefix, "_w[0-9]+_s[0-9]+\\.tsv$")
+  files <- list.files(dir, pattern = pat, full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
+  lapply(files, function(f) {
+    ps <- parse_window_step(basename(f))
+    list(path = f, window_size = ps$window_size, step_size = ps$step_size)
+  })
+}
+
+# Exact w{W}_s{S} first; else the coarsest compatible finer step (largest source
+# step that divides the target) so e.g. s250 fills s500 when no s500 table exists.
+resolve_scale_files <- function(dir, prefix, window_size, step_size, label = prefix) {
+  empty <- list(files = character(0), source_step = NA_real_, subsampled = FALSE)
+  infos <- list_named_scale_files(dir, prefix)
+  if (length(infos) == 0L || is.na(window_size) || is.na(step_size)) return(empty)
+  same_w <- Filter(function(x) !is.na(x$window_size) && x$window_size == window_size, infos)
+  exact <- Filter(function(x) !is.na(x$step_size) && x$step_size == step_size, same_w)
+  if (length(exact) > 0L) {
+    return(list(
+      files = vapply(exact, function(x) x$path, character(1)),
+      source_step = as.numeric(step_size),
+      subsampled = FALSE
+    ))
+  }
+  finer <- Filter(function(x) {
+    !is.na(x$step_size) && x$step_size < step_size && compatible_finer_step(step_size, x$step_size)
+  }, same_w)
+  if (length(finer) == 0L) return(empty)
+  source_steps <- unique(vapply(finer, function(x) as.numeric(x$step_size), numeric(1)))
+  chosen_step <- max(source_steps)
+  chosen <- Filter(function(x) x$step_size == chosen_step, finer)
+  message(label, ": no ", prefix, "_w", window_size, "_s", step_size,
+          ".tsv; using w", window_size, "_s", chosen_step,
+          " windows on the ", step_size, " bp grid ((start-1) %% ", step_size, " == 0)")
+  list(
+    files = vapply(chosen, function(x) x$path, character(1)),
+    source_step = chosen_step,
+    subsampled = TRUE
+  )
+}
+
 # Extract sample name from diversity subdir or filename (e.g. diversity_w1000_s500_sampleCheney -> Cheney).
 # If no pattern matches and default_if_no_match is set, return it (e.g. "unknown" for root-level files).
 normalize_diversity_sample_name <- function(name, default_if_no_match = NULL) {
@@ -473,8 +536,10 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
     }
     if (!is.null(seq_qual_dir) && dir.exists(seq_qual_dir)) {
       n_before_join <- nrow(d)
-      sq_files <- list.files(seq_qual_dir, pattern = paste0("^seq_qual_metrics_", key, "\\.tsv$"), full.names = TRUE, recursive = TRUE)
-      sq_list <- lapply(sq_files, function(f) {
+      ws <- scale_infos[[1]]$window_size
+      ss <- scale_infos[[1]]$step_size
+      resolved <- resolve_scale_files(seq_qual_dir, "seq_qual_metrics", ws, ss, label = paste("seq_qual", key))
+      sq_list <- lapply(resolved$files, function(f) {
         x <- read_tab(f)
         if (!all(c("chr", "start", "end", "sample", "mean_coverage", "mean_mapping_quality") %in% names(x))) return(NULL)
         x %>% select(any_of(c("chr", "start", "end", "sample", SEQ_QUAL_COLS)))
@@ -482,6 +547,7 @@ collate_diversity <- function(diversity_dir, output_dir, seq_qual_dir = NULL, va
       sq_list <- sq_list[!vapply(sq_list, is.null, logical(1L))]
       if (length(sq_list) > 0) {
         sq <- bind_rows(sq_list) %>% distinct(chr, start, end, sample, .keep_all = TRUE)
+        if (isTRUE(resolved$subsampled)) sq <- subset_windows_to_step(sq, ws, ss)
         register_windows(key, "seq_qual", sq)
         d <- d %>% left_join(sq, by = c("chr", "start", "end", "sample"))
         if (verbose) message("[verbose] diversity ", key, " after seq_qual join: n_row ", n_before_join, " -> ", nrow(d), " (duplicates if >before)")
@@ -965,17 +1031,15 @@ add_n_snps_from_variants <- function(window_df, variant_tsv_dir) {
 
 # Per-window variant feature counts from variant_csq_windows.R (variant_features_wW_sS.tsv)
 find_variant_feature_file <- function(variant_feature_dir, window_size, step_size) {
-  if (is.null(variant_feature_dir) || !nzchar(variant_feature_dir) || !dir.exists(variant_feature_dir)) return(NULL)
-  if (is.na(window_size) || is.na(step_size)) return(NULL)
-  pat <- sprintf("^variant_features_w%s_s%s\\.tsv$", window_size, step_size)
-  files <- list.files(variant_feature_dir, pattern = pat, full.names = TRUE, ignore.case = TRUE)
-  if (length(files) > 0L) return(files[[1L]])
-  NULL
+  resolved <- resolve_scale_files(variant_feature_dir, "variant_features", window_size, step_size, label = "variant features")
+  if (length(resolved$files) == 0L) return(NULL)
+  resolved$files[[1L]]
 }
 
 load_variant_features_tsv <- function(variant_feature_dir, window_size, step_size) {
-  f <- find_variant_feature_file(variant_feature_dir, window_size, step_size)
-  if (is.null(f)) return(NULL)
+  resolved <- resolve_scale_files(variant_feature_dir, "variant_features", window_size, step_size, label = "variant features")
+  if (length(resolved$files) == 0L) return(NULL)
+  f <- resolved$files[[1L]]
   d <- read_tab(f) %>% rename_all(tolower)
   if (!all(c("chr", "start", "end") %in% names(d))) {
     message("Variant features file missing chr/start/end: ", f)
@@ -984,6 +1048,7 @@ load_variant_features_tsv <- function(variant_feature_dir, window_size, step_siz
   d$chr <- as.character(d$chr)
   for (col in setdiff(names(d), c("chr", VF_GENE_COLS))) d[[col]] <- as.numeric(d[[col]])
   for (col in intersect(VF_GENE_COLS, names(d))) d[[col]] <- as.character(d[[col]])
+  if (isTRUE(resolved$subsampled)) d <- subset_windows_to_step(d, window_size, step_size)
   d
 }
 
@@ -1092,10 +1157,10 @@ option_list <- list(
   make_option(c("--diversity-dir"), type = "character", default = NULL, help = "Directory containing diversity TSV/CSV (e.g. output of calculate_pi_theta.sh)"),
   make_option(c("--fst-dir"), type = "character", default = NULL, help = "Directory containing FST TSV/CSV"),
   make_option(c("--pbe-dir"), type = "character", default = NULL, help = "Directory containing PBE TSV/CSV"),
-  make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV"),
+  make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV (exact wW_sS, or a finer same-window step when the analysis step is a multiple of the source step)"),
   make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with site TSVs (snp_sites.tsv / indel_sites.tsv from snp_call.sh / indel_call.sh); variants_csq.tsv files here are joined as annotation"),
   make_option(c("--variant-csq"), type = "character", default = NULL, help = "Optional: comma-separated variants_csq.tsv files or directories (variant_csq.sh output) to join onto the sites by chr, pos, ref, alt"),
-  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv from variant_csq_windows.R"),
+  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv from variant_csq_windows.R (exact scale, or a finer same-window step as for --seq-qual-dir)"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
   make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Merge per-locus FST, PBE, and variant TSV into single_position.h5"),
   make_option(c("--no-summary"), action = "store_true", default = FALSE, help = "Do not write companion *_summary.tsv files"),

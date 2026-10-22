@@ -73,9 +73,9 @@ Every windowed table must use the same `(chr, start, end)` so collate's exact jo
 - **PBE** keeps FST's `start` / `end`. Older PBE files with only `pos` get `end = start + window - 1` in collate.
 - **`seq_qual_metrics.sh`** builds the same grid from the `.fai` and fails if BAM lengths differ from it.
 - **`variant_csq_windows.sh`** builds the grid from `--reference` and `-w` / `--step-size`, so windows without sites are included.
-- **Collate** checks each table against the grid and against the first table at the same scale (on shared chromosomes), and prints `Window check ... matches ...` or a `WARNING window check` naming the off-grid or unmatched windows.
+- **Collate** checks each table against the grid and against the first table at the same scale (on shared chromosomes), and prints `Window check ... matches ...` or a `WARNING window check` naming the off-grid or unmatched windows. For `--seq-qual-dir` and `--variant-feature-dir`, an exact `w{W}_s{S}` table is used when present; otherwise collate keeps the analysis-grid windows from a finer same-window table when the analysis step is a multiple of the source step (e.g. `seq_qual_metrics_w1000_s250.tsv` supplies the 500 bp starts for diversity `w1000_s500`).
 
-Use the same reference FASTA (or its `.fai`) and the same `-w` / `--step-size` lists for every script.
+Use the same reference FASTA (or its `.fai`) and the same window width for every script. Analysis step sizes should match, or be an integer multiple of, the seq_qual / variant-feature step.
 
 ### End-to-end example
 
@@ -88,8 +88,6 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
   -w 1000 --step-size 250 -o seq_qual_mask
 ./build_mask.sh --reference ref.unmasked.fa --repeatmasker-out ref.fa.out \
   --seq-qual-dir seq_qual_mask -o mask
-./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
-  -w 1000 --step-size 500 -o seq_qual_out
 
 # 3. Diversity + FST (same mask and reference, so windows and masked bp match)
 ./calculate_pi_theta.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
@@ -115,7 +113,7 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
   --sites-tsv csq_indels/variants_csq.tsv --reference ref.unmasked.fa \
   -w 1000 --step-size 500 --output-dir variant_features
 mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
-./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --seq-qual-dir seq_qual_out \
+./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --seq-qual-dir seq_qual_mask \
   --variant-tsv-dir sites --variant-csq csq_snps --variant-csq csq_indels \
   --variant-feature-dir variant_features -o collated
 ```
@@ -124,7 +122,7 @@ mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
 
 ## Scripts
 
-**Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [popgen/alignment/](popgen/alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`.
+**Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [popgen/alignment/](popgen/alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`. A mask-scale table (e.g. `-w 1000 --step-size 250`) is enough when the analysis window matches and the analysis step is a multiple of that step.
 
 **Variant sites and annotation** (`snp_call.sh`, `indel_call.sh`, `variant_csq.sh`, `variant_csq_windows.sh`) live in [popgen/variants/](../variants/README.md); their site tables and consequence annotations are collated with `--variant-tsv-dir` / `--variant-csq`, and their per-window feature tables with `--variant-feature-dir`.
 
@@ -133,6 +131,7 @@ mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
 Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s). Computes integer rank (1..N) and 0–1 quantile per stat within (sample, window_size) for diversity, and within window for FST/PBE.
 
 - **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, `--variant-csq`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`).
+- **Scale matching**: diversity / FST / PBE are grouped by exact `w{W}_s{S}`. Seq-qual and variant-feature tables prefer that exact filename; if it is missing, collate uses a finer same-window table whose step divides the analysis step and keeps rows with `(start - 1) %% S == 0` (and `end - start + 1 == W`). So `seq_qual_metrics_w1000_s250.tsv` can fill `diversity_w1000_s500`. A different window width, or a step that is not a multiple of the source step, is not used.
 - **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*` counts and `genes` / `genes_protein_altering` (semicolon-separated gene names with a site in the window) alongside population-genetics stats.
 - **Variant sites** (`variants.h5`, group `/sites`): `--variant-tsv-dir` points at a directory with `snp_sites.tsv` and/or `indel_sites.tsv` ([`snp_call.sh`](../variants/README.md#snp_callsh) / [`indel_call.sh`](../variants/README.md#indel_callsh)). Their rows are stacked, one per site and ALT allele, with `variant_type` (`snp` or `indel`), `ref`, `alt`, `dp`, `alt_freq`, `indel_len` (indels) and per-pool `<sample>_AD` (`ref,alt`) and `<sample>_alt_freq`. `--variant-csq` (repeatable in `collate.sh`; comma-separated in `collate.R`) takes `variants_csq.tsv` files or their directories from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr); their `bcsq`, `csq_consequences`, `region_category`, `coding_effect`, `genes` and `genes_protein_altering` columns are joined onto the sites by `chr`, `pos`, `ref`, `alt`. A `variants_csq.tsv` inside `--variant-tsv-dir` is treated the same way, and with no site TSVs the csq tables become the sites. `*_long.tsv` files are ignored.
 - **`--single-position-merged`**: replaces `fst_single.h5`, `pbe_single.h5` and `variants.h5` with one `single_position.h5` (`/sites`): the variant table above with single-position FST and PBE added as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, with `_rank` / `_quantile`). FST and PBE are joined only onto SNP rows, so an indel at the same position as a SNP does not inherit the SNP's values; positions with FST but no called site are not included. Without variant TSVs, the rows are the FST (or PBE) positions.

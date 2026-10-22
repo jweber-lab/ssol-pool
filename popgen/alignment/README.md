@@ -74,7 +74,7 @@ Recommended order:
 3. Run `seq_qual_metrics.sh` at a finely overlapping scale for the mask (e.g. `-w 1000 --step-size 250`).
 4. Build one mask: `build_mask.sh` → `mask.bed`.
 5. Pass the same `mask.bed` and the same `--reference-genome` to diversity, FST, SNP and indel calling.
-6. Run `seq_qual_metrics.sh` and `variant_csq_windows.sh` at the analysis scales with the same reference, then collate (see [window boundaries](../stats/README.md#window-boundaries)).
+6. Run `variant_csq_windows.sh` at the analysis scales with the same reference, then collate. Collate can take the mask-scale `seq_qual_metrics` TSV and keep the analysis-grid windows (e.g. 500 bp steps from a 250 bp step, same 1000 bp window); a second `seq_qual_metrics.sh` run is only needed if you want a different window width. See [window boundaries](../stats/README.md#window-boundaries).
 
 **Post-alignment BAM filtering** (`process_poolseq.sh`, after merge):
 
@@ -291,17 +291,15 @@ Optional: `--reference ref.fa` (with `ref.fa.fai`) adds an `estimated_mean_depth
 - **Parallelism**: the genome is cut into ~4×`--threads` chunks (≥ 1 Mb; small contigs packed together). `--threads` chunks per sample run concurrently, each a `samtools view` + `samtools depth` pass into bins of gcd(all window/step sizes) bp. All scales are then built from one sorted bin table, so additional `-w/--step-size` pairs cost almost nothing. `--max-jobs` runs samples in parallel; total processes ≈ 2 × threads × max-jobs.
 - **Options**: `--reference-genome` (recommended: the .fai sets chromosome order, and BAM `@SQ` lengths are checked against it so a BAM aligned to another assembly fails instead of producing shifted windows), `--window-size`/`--step-size` (repeatable, paired; default step = window/2), `--min-mapq`, `--min-depth`, `--threads`, `--max-jobs`, `--dry-run`. Logs: `{output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log`. A failure in any chunk or sample makes the script exit non-zero.
 
-**Suggested runs.** Use a finely overlapping scale for the mask, then the same window/step as diversity / FST / collate for the analysis tables:
+**Suggested run.** One finely overlapping scale is enough for both the mask and collate: `build_mask.sh` uses every overlapping window, and collate keeps the analysis-grid subset (e.g. every 500 bp start from a 250 bp step) when the window width matches.
 
 ```bash
-# Mask (caught by build_mask.sh; overlapping windows so boundary-straddling problems vote in)
+# Mask + analysis (collate --seq-qual-dir seq_qual_mask; overlapping windows so boundary-straddling problems vote in)
 ./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
   -w 1000 --step-size 250 -o seq_qual_mask -t 8 -j 4
-
-# Analysis scales (join to diversity HDF5 via collate --seq-qual-dir; add more -w/--step-size as needed)
-./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
-  -w 1000 --step-size 500 -o seq_qual_out -t 8 -j 4
 ```
+
+A second run at `-w 1000 --step-size 500` is optional. Add more `-w` / `--step-size` pairs only when you need a different window width.
 
 `--reference-genome` is recommended so windows match the rest of the pipeline. When `process_poolseq.sh` wrote `*.unfiltered.bam`, those files are used automatically.
 

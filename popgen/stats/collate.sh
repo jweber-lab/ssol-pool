@@ -6,8 +6,10 @@
 # Wrapper for collate.R: discovers diversity, FST, and PBE TSV/CSV (from
 # calculate_pi_theta.sh, calculate_fst.sh, and PBE outputs) and writes
 # combined HDF5 plus *_summary.tsv to OUTPUT_DIR. Optional: --seq-qual-dir
-# for mean_coverage/mean_mapping_quality, --variant-tsv-dir (+ --variant-csq) for
-# variants.h5, --variant-feature-dir for variant_features_wW_sS.tsv joins. Missing/empty FST or PBE dirs are skipped.
+# for mean_coverage/mean_mapping_quality (exact wW_sS, or a finer same-window
+# step when the analysis step is a multiple of the source step),
+# --variant-tsv-dir (+ --variant-csq) for variants.h5, --variant-feature-dir
+# for variant_features_wW_sS.tsv joins (same scale fallback). Missing/empty FST or PBE dirs are skipped.
 # For full output file list and variable naming (HDF5 groups, TSV columns),
 # see the header of collate.R.
 # Usage: See below or --help
@@ -45,11 +47,14 @@ Input (at least one required):
   --pbe-dir DIR          Directory containing PBE TSV/CSV (output of calculate_pbe)
 
 Optional:
-  --seq-qual-dir DIR     Directory with seq_qual_metrics TSV (from seq_qual_metrics.sh)
+  --seq-qual-dir DIR     Directory with seq_qual_metrics TSV (from seq_qual_metrics.sh). Exact
+                         w{W}_s{S} is preferred; otherwise a finer same-window step is kept on the
+                         analysis grid when S is a multiple of the source step (e.g. s250 -> s500)
   --variant-tsv-dir DIR  Directory with site TSVs (snp_sites.tsv, indel_sites.tsv from snp_call.sh / indel_call.sh)
   --variant-csq PATH     variants_csq.tsv file or directory from variant_csq.sh (repeatable); consequence and
                          gene columns are joined onto the sites by chr, pos, ref, alt
-  --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh)
+  --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh);
+                         same exact-then-finer-step lookup as --seq-qual-dir
   --output-dir DIR       Output directory for HDF5 files [default: ./collated]
   --rscript PATH         Path to Rscript [default: Rscript]
   --single-position-merged  Merge per-locus FST, PBE, and variant TSV into single_position.h5
