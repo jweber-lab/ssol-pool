@@ -7,7 +7,7 @@ Step-by-step description of the **identify_outliers.sh** and **identify_outliers
 ## Shell script (identify_outliers.sh)
 
 1. **Parse arguments**  
-   Options (--hdf5-dir, --output-dir, --high-quantile, --low-quantile, --statistics, --window-size, --chromosome, etc.) are parsed. At least one of --fst-dir, --diversity-dir, or --hdf5-dir is required; --output-dir is required; either (--high-quantile and --low-quantile) or all four seed/expand quantiles are required.
+    Options (--hdf5-dir, --output-dir, --high-quantile, --low-quantile, --statistics, --window-size, --step-size, --chromosome, etc.) are parsed. At least one of --fst-dir, --diversity-dir, or --hdf5-dir is required; --output-dir is required; either (--high-quantile and --low-quantile) or all four seed/expand quantiles are required.
 
 2. **Validate**  
    Quantiles in [0,1], directories exist, Rscript and the R script path are found. Optional checks on FST/diversity dirs for presence of files.
@@ -34,7 +34,7 @@ Step-by-step description of the **identify_outliers.sh** and **identify_outliers
 ### 2. Read input data
 
 - **HDF5 (--hdf5-dir):**  
-  Diversity (`diversity_w*_s*.h5`), FST (`fst_w*.h5`), PBE (`pbe_*.h5`) are read. Optional **--window-size** restricts to that window size. Columns include chr, start, end, sample (or pair/trio), stat values, *_quantile, and where present: mean_coverage, mean_mapping_quality, n_snps.
+  Diversity (`diversity_w*_s*.h5`), FST (`fst_w*_s*.h5`), PBE (`pbe_w*_s*.h5`) are read. Optional **--window-size** and **--step-size** restrict to one overlapping-window scale (required together when several steps exist for the same window). Sample names are kept as stored in collate (CSV case). Columns include chr, start, end, sample (or pair/trio), window_size, step_size, stat values, *_quantile, and where present: mean_coverage, mean_mapping_quality, n_snps, n_total, n_masked.
 - **TSV fallback:**  
   If --hdf5-dir not set, --diversity-dir and/or --fst-dir are used to read TSV/CSV with the same logical structure.
 - PBE and FST can get mean_coverage etc. from diversity (by chr, start, end) when available.
@@ -43,14 +43,14 @@ Step-by-step description of the **identify_outliers.sh** and **identify_outliers
 
 - **Chromosome lengths** from data or from --reference-genome (FASTA index or dict).
 - **Filters:** --top-n-chromosomes, --min-chromosome-length, --chromosome (single chr), and optionally --region-start / --region-end on that chr.
-- Diversity, FST, and PBE are restricted to the selected chromosomes and, if set, to windows overlapping [region_start, region_end].
+- Diversity, FST, and PBE are restricted to the selected chromosomes and, if set, to windows overlapping [region_start, region_end]. Detection loops **per (window_size, step_size)** so overlapping grids are not pooled for quantiles.
 
 ### 4. Per-statistic outlier detection
 
 For each requested statistic:
 
 - **Diversity (pi, theta, tajima_d):**  
-  For each sample and each window size, windows are flagged as high or low outliers by quantile (or by seed-then-expand). Seed-then-expand: seed windows at strict quantile (e.g. 0.999/0.001), then expand with softer quantile (e.g. 0.99/0.01), then merge by gap (merge_distance). Optional depth/mapping-quality/SNP filters apply to seeds and expansion.
+  For each sample and each (window_size, step_size), windows are flagged as high or low outliers by quantile (or by seed-then-expand). Seed-then-expand: seed windows at strict quantile (e.g. 0.999/0.001), then expand with softer quantile (e.g. 0.99/0.01), then merge by gap (merge_distance). Optional depth/mapping-quality/SNP filters apply to seeds and expansion.
 - **FST:**  
   Same logic per sample_pair.
 - **PBE:**  
@@ -69,7 +69,7 @@ Each result is standardized (same columns: chr, start, end, value, quantile, sam
 ### 6. Fill step (recent)
 
 - **Goal:** For every outlier window, fill in the **stat value and quantile for every sample** from the unfiltered data, not only for the sample that passed the threshold.
-- **Keys:** When the wide table has **window_size**, the fill uses keys **(chr, start, end, window_size)** so the same window definition is used as for outlier detection.
+- **Keys:** When the wide table has **window_size** / **step_size**, the fill uses keys **(chr, start, end, window_size, step_size)** so overlapping scales are not mixed.
 - **Source data for fill:**  
   Diversity, FST, and PBE are filtered to the **same window_size(s)** as in the wide table and deduped (one row per (chr, start, end, sample) or per pair/trio) so the fill does not pull in other window sizes or duplicate rows.
 - **build_windows_by_value_col** now returns tibbles that include **window_size** (when present in the source), so the fill pipeline can join on it.
@@ -86,7 +86,7 @@ Each result is standardized (same columns: chr, start, end, value, quantile, sam
 
 ### 8. Write outputs
 
-- **outlier_windows_*.csv:** Wide table (chr, start, end, window_size, …, outlier_stat, outlier_direction, then all samplename.stat and samplename.stat_quantile columns).
+- **outlier_windows_*.csv:** Wide table (chr, start, end, window_size, step_size, …, outlier_stat, outlier_direction, then all samplename.stat and samplename.stat_quantile columns). The filename encodes `_w{W}_s{S}`.
 - **outlier_regions_*.csv:** One row per merged/expanded region with region summaries.
 - Filename suffix encodes window size, chromosome(s), quantiles, merge/expand, and optional region.
 
@@ -99,11 +99,11 @@ Annotates `outlier_regions_*.csv` in two independent ways; give either or both.
 **Consequence calls and assembly GFF** (`--variant-csq`, `--gff`). These are on the same assembly as the regions, so no BLAST is needed.
 - `--variant-csq` (repeatable) takes `variants_csq.tsv` files or directories from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr) (for example the SNP and indel csq directories), or collate `variants.h5` / `single_position.h5`. HDF5 input also carries per-pool allele frequencies and per-site FST/PBE into the site table.
 - `--gff` is the GFF given to `variant_csq.sh`. It lists genes overlapping each region (even with no variant in them) and adds `gene_name`, `product` and `go_terms` to the genes named by csq.
-- Outputs (suffix from the regions file name):
-  - `outlier_csq_sites_*.csv`: one row per (region, site), with `outlier_stat`, `variant_type`, `coding_effect`, `region_category`, `genes`, `genes_protein_altering`, `bcsq` and the per-pool columns.
-  - `outlier_csq_genes_*.csv`: one row per (region, gene), with `n_sites`, `n_protein_altering`, `coding_effects` (for example `missense:3;synonymous:2`), `overlaps_region` and the GFF fields.
-  - `outlier_csq_summary_*.csv`: one row per region, with `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_protein_altering`, `n_effect_*`, `n_region_*`, the region columns, then `genes_csq`, `genes_protein_altering`, `genes_gff_overlap` and `products_gff`.
-  - `outlier_csq_background_*.csv`: genome-wide counts by consequence for all sites and for non-outlier sites. [`plot_outlier_csq.sh`](../plotting/README.md#7-plot_outlier_csqr--plot_outlier_csqsh) uses it for the per-statistic composition and enrichment plots.
+- Outputs (suffix copied from the regions file after stripping `outlier_regions_`). Coordinates are 1-based inclusive. Region extra columns (outlier_stat, n_windows, region_mean_*, …) are passed through; `read_regions` lowercases those names.
+  - `outlier_csq_sites_*.csv`: one row per (region, site). Lead columns `qseqid` (`chr:start-end`), `region_chr`, `region_start`, `region_end`, `outlier_stat`, `n_windows`; then the site (`chr`, `pos`, `ref`, `alt`, `variant_type`, `region_category`, `coding_effect`, `genes`, `genes_protein_altering`, `csq_consequences`, `bcsq`). Collate `variants.h5` / `single_position.h5` also add per-pool `*_AD` / `*_alt_freq` and site FST/PBE when present.
+  - `outlier_csq_genes_*.csv`: one row per (region, gene). Same region lead columns, then `gene`, `n_sites`, `n_protein_altering`, `coding_effects` (for example `missense:3;synonymous:2`), `overlaps_region` (TRUE if the GFF gene interval overlaps the region, even with no variant), plus GFF `gene_id`, `gene_name`, `product`, `go_terms`, `strand`, `gene_start`, `gene_end`.
+  - `outlier_csq_summary_*.csv`: one row per region. Site counts (`n_sites`, `n_sites_snp`, `n_sites_indel`, `n_protein_altering`, `n_effect_*`, `n_region_*`), then the region columns, then semicolon-separated `genes_csq`, `genes_protein_altering`, `genes_gff_overlap`, `products_gff`.
+  - `outlier_csq_background_*.csv`: genome-wide counts by (`set`, `variant_type`, `region_category`, `coding_effect`) for `set` = `all_sites` and `non_outlier` (sites in no region). [`plot_outlier_csq.sh`](../plotting/README.md#7-plot_outlier_csqr--plot_outlier_csqsh) uses it for the per-statistic composition and enrichment plots.
 
 **BLAST** (`--blast-config`, `--reference`): region sequences are BLASTed against each configured DB and hits are mapped to that DB's GFF. Outputs: `outlier_genes_*.csv` and `outlier_genes_summary_*.csv`. Use this to find homologs in other annotated assemblies.
 
@@ -115,17 +115,39 @@ Annotates `outlier_regions_*.csv` in two independent ways; give either or both.
 
 ---
 
+## Gene collation (gene_collation.sh)
+
+Annotation is region- and site-focused. **`gene_collation.sh`** turns those tables around so the unit is an assembly GFF gene.
+
+```bash
+./gene_collation.sh --gff annotation.gff3 --annotation-dir outlier_annotation --output-dir gene_collation
+```
+
+- `--gff` is the same GFF given to `variant_csq.sh`. Genes overlapping an outlier region are kept even when they have no variant.
+- `--annotation-dir` is the `outlier_annotation.sh` output directory (`outlier_csq_sites_*.csv`, `outlier_csq_summary_*.csv`, optional `outlier_csq_genes_*.csv` and BLAST `outlier_genes_*.csv`). `--suffix` picks one run if several share the directory.
+- Sites are assigned to a gene when their position falls in the gene interval and/or the csq `genes` field names it (`assigned_by` is `position`, `csq`, or `csq+position`). Intergenic sites in a region do not appear here.
+- BLAST hits are homologs on other assemblies; they join by overlapping region (`qseqid`), not by gene_id.
+- `--include-non-outlier` also lists GFF genes that overlap no outlier region (`in_outlier=FALSE`).
+
+Outputs (suffix copied from the annotation files):
+- `outlier_gene_summary_*.csv`: one row per gene — GFF identity and coordinates, `n_regions`, `n_sites`, `n_protein_altering`, `coding_effects`, `outlier_stat`, `qseqids`, and BLAST homologs collapsed across those regions (`blast_gene_ids`, `blast_products`, `best_evalue`).
+- `outlier_gene_regions_*.csv`: one row per (gene, outlier region), with the region stats and per-gene site counts in that region.
+- `outlier_gene_sites_*.csv`: one row per (gene, site); `qseqids` are semicolon-collapsed when a site sits in several regions.
+
+---
+
 ## Recent changes (summary)
 
 1. **Fill from unfiltered data**  
    Stat and quantile columns are filled for **all** samples from the raw diversity/FST/PBE data so you see values even for samples that did not pass the threshold for that window.
 
-2. **window_size in fill path**  
-   To avoid many-to-many joins and duplicate rows:
-   - Fill uses **(chr, start, end, window_size)** as the key when the wide table has window_size.
-   - Source data for the fill are restricted to the **same window_size(s)** as the outlier table and deduped.
-   - **build_windows_by_value_col** now passes through **window_size** in its returned tibbles.
-   - **pivot_wider** in the fill step uses **id_cols = join_by** so there is one row per (chr, start, end, window_size).
+2. **window_size and step_size in fill path**  
+   To avoid many-to-many joins and duplicate rows with overlapping windows:
+   - Fill uses **(chr, start, end, window_size, step_size)** as the key when those columns are present.
+   - Source data for the fill are restricted to the **same window and step** as the outlier table.
+   - **build_windows_by_value_col** passes through **window_size** and **step_size**.
+   - **pivot_wider** in the fill step uses **id_cols = join_by** so there is one row per scale.
+   - If `--window-size` is set and several step sizes exist, the script stops and asks for `--step-size`.
 
 3. **Verbose diagnostics for fill**  
    With --verbose, the script prints [fill] lines: wide_outliers row count and unique keys, diversity_data row count and unique (chr, start, end, sample), window_size in use, full_long and full_values/full_quants row counts and unique keys, and a note when duplicate keys would cause a many-to-many join.

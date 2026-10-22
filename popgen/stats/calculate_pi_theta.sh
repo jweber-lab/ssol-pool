@@ -495,6 +495,31 @@ else
     log_dry_run "Would create log file: $LOG_FILE"
 fi
 
+# grenedalf 0.6.3 segfaults once the data reach a chromosome that has no interval in a BED
+# mask, so every such chromosome gets a 1-bp interval on its last base.
+pad_mask_bed() {
+    local bed="$1" ref="$2" out="$3"
+    local lengths
+    if [[ -f "${ref}.fai" ]]; then
+        lengths=$(cut -f1,2 "${ref}.fai")
+    else
+        lengths=$(awk '/^>/ { if (n != "") print n "\t" l; n = substr($1, 2); l = 0; next } { l += length($0) } END { if (n != "") print n "\t" l }' "$ref")
+    fi
+    awk -F'\t' -v OFS='\t' '
+        NR == FNR { if ($0 !~ /^(#|track|browser)/ && NF >= 3) { seen[$1] = 1; print $1, $2, $3 }; next }
+        !($1 in seen) && $2 > 0 { print $1, $2 - 1, $2 }' "$bed" <(printf '%s\n' "$lengths") > "$out"
+}
+if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -z "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
+    padded_mask="${OUTPUT_DIR}/.mask_all_chromosomes.bed"
+    pad_mask_bed "$FILTER_MASK_TOTAL_BED" "$REFERENCE_GENOME" "$padded_mask"
+    n_orig=$(awk '$0 !~ /^(#|track|browser)/ && NF >= 3 { n++ } END { print n+0 }' "$FILTER_MASK_TOTAL_BED")
+    n_padded=$(( $(wc -l < "$padded_mask") - n_orig ))
+    if (( n_padded > 0 )); then
+        log "Mask has no interval on $n_padded chromosome(s); masking their last base so grenedalf accepts the mask ($padded_mask)"
+        FILTER_MASK_TOTAL_BED="$padded_mask"
+    fi
+fi
+
 # Validate output separator
 case "$OUTPUT_SEPARATOR" in
     comma|tab|space|semicolon)

@@ -46,6 +46,7 @@ CHROMOSOME=""
 REGION_START=""
 REGION_END=""
 WINDOW_SIZE=""
+STEP_SIZE=""
 STATISTICS="pi,theta,tajima_d"
 SAMPLE_PAIRS=""
 TOP_N_EXTREME=""
@@ -91,6 +92,7 @@ Optional:
   --region-start N           Restrict to interval start on --chromosome (requires --chromosome)
   --region-end N             Restrict to interval end on --chromosome (requires --chromosome)
   --window-size NUMBER       Filter to specific window size (default: all window sizes)
+  --step-size NUMBER         Filter to specific step size (required when several steps exist for --window-size)
   --statistics LIST          Comma-separated list: pi, theta, tajima_d, pbe, fst (default: pi,theta,tajima_d)
   --sample-pairs LIST        Comma-separated list of FST pairs to process (default: all)
   --top-n-extreme N          Return only the N most extreme values in each quantile (optional)
@@ -133,7 +135,7 @@ Examples:
     --low-quantile 0.05
 
 Output files:
-  - {output_dir}/outlier_windows*.csv: Wide table: chr, start, end; window_size; optional mean_coverage, mean_mapping_quality, n_snps; outlier_stat, outlier_direction (high/low); optional window_type (seed/expanded); samplename.stat and samplename.stat_quantile columns.
+  - {output_dir}/outlier_windows*.csv: Wide table: chr, start, end; window_size; step_size; optional mean_coverage, mean_mapping_quality, n_snps, n_total, n_masked; outlier_stat, outlier_direction (high/low); optional window_type (seed/expanded); samplename.stat and samplename.stat_quantile columns.
   - {output_dir}/outlier_regions*.csv: Merged/expanded regions when --merge-distance or seed-expand used. Filename includes _across_samples or _within_samples and _seed_expand or _merge_only. Columns include per-stat region mean (over overlapping windows), max value, and quantile of the most extreme window.
 
 EOF
@@ -297,6 +299,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --window-size)
             WINDOW_SIZE="$2"
+            shift 2
+            ;;
+        --step-size)
+            STEP_SIZE="$2"
             shift 2
             ;;
         --statistics)
@@ -520,6 +526,9 @@ fi
 if [[ -n "$WINDOW_SIZE" ]]; then
     R_CMD+=(--window-size "$WINDOW_SIZE")
 fi
+if [[ -n "$STEP_SIZE" ]]; then
+    R_CMD+=(--step-size "$STEP_SIZE")
+fi
 
 if [[ -n "$SAMPLE_PAIRS" ]]; then
     R_CMD+=(--sample-pairs "$SAMPLE_PAIRS")
@@ -569,6 +578,9 @@ if [[ "$DRY_RUN" == true ]]; then
     if [[ -n "$WINDOW_SIZE" ]]; then
         log_dry_run "Window size: $WINDOW_SIZE"
     fi
+    if [[ -n "$STEP_SIZE" ]]; then
+        log_dry_run "Step size: $STEP_SIZE"
+    fi
     if [[ -n "$SAMPLE_PAIRS" ]]; then
         log_dry_run "Sample pairs: $SAMPLE_PAIRS"
     fi
@@ -616,6 +628,9 @@ else
     fi
     if [[ -n "$WINDOW_SIZE" ]]; then
         log "  Window size: $WINDOW_SIZE"
+    fi
+    if [[ -n "$STEP_SIZE" ]]; then
+        log "  Step size: $STEP_SIZE"
     fi
     if [[ -n "$SAMPLE_PAIRS" ]]; then
         log "  Sample pairs: $SAMPLE_PAIRS"

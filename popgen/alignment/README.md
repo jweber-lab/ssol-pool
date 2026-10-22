@@ -291,7 +291,19 @@ Optional: `--reference ref.fa` (with `ref.fa.fai`) adds an `estimated_mean_depth
 - **Parallelism**: the genome is cut into ~4×`--threads` chunks (≥ 1 Mb; small contigs packed together). `--threads` chunks per sample run concurrently, each a `samtools view` + `samtools depth` pass into bins of gcd(all window/step sizes) bp. All scales are then built from one sorted bin table, so additional `-w/--step-size` pairs cost almost nothing. `--max-jobs` runs samples in parallel; total processes ≈ 2 × threads × max-jobs.
 - **Options**: `--reference-genome` (recommended: the .fai sets chromosome order, and BAM `@SQ` lengths are checked against it so a BAM aligned to another assembly fails instead of producing shifted windows), `--window-size`/`--step-size` (repeatable, paired; default step = window/2), `--min-mapq`, `--min-depth`, `--threads`, `--max-jobs`, `--dry-run`. Logs: `{output_dir}/log/seq_qual_metrics_YYYYmmdd_HHMMSS.log`. A failure in any chunk or sample makes the script exit non-zero.
 
-Use the same window/step as your diversity runs (e.g. `--window-size 1000 --step-size 500`) so collate can join qual data to diversity windows.
+**Suggested runs.** Use a finely overlapping scale for the mask, then the same window/step as diversity / FST / collate for the analysis tables:
+
+```bash
+# Mask (caught by build_mask.sh; overlapping windows so boundary-straddling problems vote in)
+./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
+  -w 1000 --step-size 250 -o seq_qual_mask -t 8 -j 4
+
+# Analysis scales (join to diversity HDF5 via collate --seq-qual-dir; add more -w/--step-size as needed)
+./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
+  -w 1000 --step-size 500 -o seq_qual_out -t 8 -j 4
+```
+
+`--reference-genome` is recommended so windows match the rest of the pipeline. When `process_poolseq.sh` wrote `*.unfiltered.bam`, those files are used automatically.
 
 ### Combined mask (build_mask.sh)
 

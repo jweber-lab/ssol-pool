@@ -229,6 +229,21 @@ OUT_TSV="${OUTPUT_DIR}/${PREFIX}.tsv"
 OUT_BCF="${OUTPUT_DIR}/${PREFIX}.bcf"
 WORK_DIR="${OUTPUT_DIR}/.${PREFIX}_work"
 
+# grenedalf 0.6.3 segfaults once the data reach a chromosome that has no interval in a BED
+# mask, so every such chromosome gets a 1-bp interval on its last base.
+if [[ -n "$FILTER_MASK_TOTAL_BED" && "$DRY_RUN" == false ]]; then
+    padded_mask="${OUTPUT_DIR}/.${PREFIX}_mask_all_chromosomes.bed"
+    awk -F'\t' -v OFS='\t' '
+        NR == FNR { if ($0 !~ /^(#|track|browser)/ && NF >= 3) { seen[$1] = 1; print $1, $2, $3 }; next }
+        !($1 in seen) && $2 > 0 { print $1, $2 - 1, $2 }' "$FILTER_MASK_TOTAL_BED" "${REFERENCE_FASTA}.fai" > "$padded_mask"
+    n_orig=$(awk '$0 !~ /^(#|track|browser)/ && NF >= 3 { n++ } END { print n+0 }' "$FILTER_MASK_TOTAL_BED")
+    n_padded=$(( $(wc -l < "$padded_mask") - n_orig ))
+    if (( n_padded > 0 )); then
+        log "Mask has no interval on $n_padded chromosome(s); masking their last base so grenedalf accepts the mask ($padded_mask)"
+        FILTER_MASK_TOTAL_BED="$padded_mask"
+    fi
+fi
+
 # Build grenedalf sync command
 GRENEDALF_CMD=("$GRENEDALF" sync)
 if [[ -n "$SYNC_FILE" ]]; then
