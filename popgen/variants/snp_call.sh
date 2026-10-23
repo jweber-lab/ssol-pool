@@ -236,28 +236,34 @@ WORK_DIR="${OUTPUT_DIR}/.${PREFIX}_work"
 # earlier ones (e.g. scaffold_171 then scaffold_170) and aborted with "Invalid sorting order".
 if [[ -n "$FILTER_MASK_TOTAL_BED" && "$DRY_RUN" == false ]]; then
     padded_mask="${OUTPUT_DIR}/.${PREFIX}_mask_all_chromosomes.bed"
-    awk -F'\t' -v OFS='\t' '
-        NR == FNR { ord[$1] = NR; len[$1] = $2 + 0; name[NR] = $1; n = NR; next }
+    count_file=$(mktemp)
+    log "Rewriting mask into reference (.fai) order for grenedalf..."
+    awk -F'\t' -v OFS='\t' -v count_file="$count_file" '
+        NR == FNR { ord[$1] = NR; clen[$1] = $2 + 0; name[NR] = $1; n = NR; next }
         /^(#|track|browser)/ || NF < 3 { next }
         ($1 in ord) {
             s = $2 + 0; e = $3 + 0
             if (s < 0) s = 0
-            if (e > len[$1]) e = len[$1]
+            if (e > clen[$1]) e = clen[$1]
             if (e > s) { seen[$1] = 1; print ord[$1], $1, s, e }
         }
         END {
+            n_pad = 0
             for (i = 1; i <= n; i++)
-                if (!(name[i] in seen) && len[name[i]] > 0)
-                    print i, name[i], len[name[i]] - 1, len[name[i]]
+                if (!(name[i] in seen) && clen[name[i]] > 0) {
+                    print i, name[i], clen[name[i]] - 1, clen[name[i]]
+                    n_pad++
+                }
+            print n_pad + 0 > count_file
+            close(count_file)
         }' "${REFERENCE_FASTA}.fai" "$FILTER_MASK_TOTAL_BED" \
     | sort -t$'\t' -k1,1n -k3,3n -k4,4n \
     | cut -f2-4 > "$padded_mask"
-    n_orig_chr=$(awk '$0 !~ /^(#|track|browser)/ && NF >= 3 { c[$1] = 1 } END { print length(c)+0 }' "$FILTER_MASK_TOTAL_BED")
-    n_out_chr=$(awk '{ c[$1] = 1 } END { print length(c)+0 }' "$padded_mask")
-    n_padded=$(( n_out_chr - n_orig_chr ))
+    n_padded=$(cat "$count_file")
+    rm -f "$count_file"
     FILTER_MASK_TOTAL_BED="$padded_mask"
-    log "Rewrote mask in reference (.fai) order for grenedalf: $padded_mask"
-    if (( n_padded > 0 )); then
+    log "Wrote $padded_mask"
+    if (( ${n_padded:-0} > 0 )); then
         log "Mask had no interval on $n_padded chromosome(s); masked their last base so grenedalf accepts the mask"
     fi
 fi
