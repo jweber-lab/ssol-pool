@@ -805,10 +805,16 @@ read_one_pbe <- function(path, trio_name, drop_all_na = FALSE, window_size = NA_
     d <- d %>% filter(!is.na(.data$pbe))
   }
   if ("pbe" %in% names(d)) d <- add_rank_quantile(d, character(0), "pbe")
-  pops <- parse_trio_pops(trio_name)
-  d$pop1 <- pops$pop1
-  d$pop2 <- pops$pop2
-  d$pop3 <- pops$pop3
+  if (!all(c("pop1", "pop2", "pop3") %in% names(d))) {
+    pops <- parse_trio_pops(trio_name)
+    d$pop1 <- pops$pop1
+    d$pop2 <- pops$pop2
+    d$pop3 <- pops$pop3
+  } else {
+    d$pop1 <- as.character(d$pop1)
+    d$pop2 <- as.character(d$pop2)
+    d$pop3 <- as.character(d$pop3)
+  }
   d$trio_name <- trio_name
   d %>% select(any_of(c("chr", "pos", "start", "end", "pbe", "pbe_rank", "pbe_quantile", "pop1", "pop2", "pop3", "trio_name")))
 }

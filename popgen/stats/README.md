@@ -9,8 +9,8 @@ The analysis scripts calculate:
 1. **π (Pi)**: Nucleotide diversity - the average number of pairwise nucleotide differences per site
 2. **θ (Theta)**: Watterson's theta - estimated from the number of segregating sites
 3. **Tajima's D**: Test statistic comparing π and θ to detect selection and demographic events
-4. **PBS**: Population Branch Statistic - measures population-specific branch length, useful for detecting selection
-5. **PBE**: Population Branch Excess - Z-score normalization of PBS for identifying outliers
+4. **PBS**: Population Branch Statistic — population-specific branch length from three pairwise FSTs
+5. **PBE**: Population Branch Excess — PBS minus the median-scaled expectation from the sister-pair branch (`T23`)
 
 ## Requirements
 
@@ -31,16 +31,15 @@ The analysis scripts calculate:
 - **Perl** - Required for running popoolation2 scripts
 
 **Common Requirements:**
-- **awk** - Required for PBS/PBE calculations
 - **samtools** - Required for BAM file processing (if using grenedalf)
-- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
+- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `calculate_pbe.R` and `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
 
 ### Input Files
 
 **Primary Method (grenedalf):**
 - **BAM files** - Direct input from the main processing pipeline (`process_poolseq.sh`)
-  - One BAM file per population for diversity calculations
-  - Three BAM files (one per population) for PBS calculations
+  - One BAM file per population for diversity and FST
+  - PBS/PBE are computed from FST tables (`calculate_pbe.sh`), not from BAMs
   - BAM files should be sorted and indexed
 
 **Fallback Method (popoolation2):**
@@ -97,6 +96,7 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
 ./calculate_fst.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
   --window-type interval --window-size 1000 --step-size 500 \
   --filter-mask-total-bed mask/mask.bed -o fst_out ...
+./calculate_pbe.sh --fst-dir fst_out --pop1-name Echo --pop2-name Kjer --pop3-name Cheney -o pbe_out
 
 # 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
@@ -134,7 +134,7 @@ Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s).
 
 - **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, `--variant-csq`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`).
 - **Scale matching**: diversity / FST / PBE are grouped by exact `w{W}_s{S}`. Seq-qual and variant-feature tables prefer that exact filename; if it is missing, collate uses a finer same-window table whose step divides the analysis step and keeps rows with `(start - 1) %% S == 0` (and `end - start + 1 == W`). So `seq_qual_metrics_w1000_s250.tsv` can fill `diversity_w1000_s500`. A different window width, or a step that is not a multiple of the source step, is not used.
-- **Output**: In `--output-dir`: `diversity_w{N}.h5`, `fst_w{N}.h5`, `pbe.h5` (one group per trio). Each HDF5 has group `/windows` (or `/windows_trio_*` for PBE) with chr, start, end, sample/pairs, stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*` counts and `genes` / `genes_protein_altering` (semicolon-separated gene names with a site in the window) alongside population-genetics stats.
+- **Output**: In `--output-dir`: `diversity_w{W}_s{S}.h5`, `fst_w{W}_s{S}.h5`, `pbe_w{W}_s{S}.h5` (and `fst_single.h5` / `pbe_single.h5` for per-locus). Each HDF5 has group `/windows` (or `/sites`) with chr, start, end, sample/pairs (pop1, pop2, pop3 for PBE), stat values, and `*_rank`, `*_quantile`. With `--variant-feature-dir`, matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` so window HDF5 also carries `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*` counts and `genes` / `genes_protein_altering` (semicolon-separated gene names with a site in the window) alongside population-genetics stats.
 - **Variant sites** (`variants.h5`, group `/sites`): `--variant-tsv-dir` points at a directory with `snp_sites.tsv` and/or `indel_sites.tsv` ([`snp_call.sh`](../variants/README.md#snp_callsh) / [`indel_call.sh`](../variants/README.md#indel_callsh)). Their rows are stacked, one per site and ALT allele, with `variant_type` (`snp` or `indel`), `ref`, `alt`, `dp`, `alt_freq`, `indel_len` (indels) and per-pool `<sample>_AD` (`ref,alt`) and `<sample>_alt_freq`. `--variant-csq` (repeatable in `collate.sh`; comma-separated in `collate.R`) takes `variants_csq.tsv` files or their directories from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr); their `bcsq`, `csq_consequences`, `region_category`, `coding_effect`, `genes` and `genes_protein_altering` columns are joined onto the sites by `chr`, `pos`, `ref`, `alt`. A `variants_csq.tsv` inside `--variant-tsv-dir` is treated the same way, and with no site TSVs the csq tables become the sites. `*_long.tsv` files are ignored.
 - **`--single-position-merged`**: replaces `fst_single.h5`, `pbe_single.h5` and `variants.h5` with one `single_position.h5` (`/sites`): the variant table above with single-position FST and PBE added as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, with `_rank` / `_quantile`). FST and PBE are joined only onto SNP rows, so an indel at the same position as a SNP does not inherit the SNP's values; positions with FST but no called site are not included. Without variant TSVs, the rows are the FST (or PBE) positions.
 - **Masking and windows**: diversity and FST windows carry **`n_masked`** (masked bp, from grenedalf `total.masked`). Every windowed input is checked against the shared grid; see [Window boundaries](#window-boundaries).
@@ -234,141 +234,57 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
   --max-coverage 100
 ```
 
-### calculate_pbs.sh
+### calculate_pbe.sh / calculate_pbe.R
 
-Calculates Population Branch Statistic (PBS) and Population Branch Excess (PBE) from three populations using BAM files (grenedalf) or sync files (popoolation2 fallback). PBS measures population-specific branch length and is useful for detecting signals of selection.
+Computes Population Branch Statistic (PBS) and Population Branch Excess (PBE) from **FST tables** produced by `calculate_fst.sh` (grenedalf). It does not read BAMs or sync files. Names in `--pop1-name` / `--pop2-name` / `--pop3-name` must match the FST pair columns (grenedalf’s `PopA:PopB.fst`).
 
-PBS is calculated as: **PBS = (T12 + T13 - T23) / 2**
+**PBS = (T12 + T13 − T23) / 2**, with **Tij = −ln(1 − FSTij)** (FST ≥ 1 is capped). Pop1 is the focal branch; pop2 and pop3 are the sister pair.
 
-Where Tij = -ln(1 - Fst_ij) is the branch length between populations i and j.
+**PBE = PBS − T23 × median(PBS) / median(T23)**. Medians are genome-wide (`--median-scope genome`, default) or per chromosome. This is an excess relative to the sister-pair branch, not a Z-score.
 
-PBE is calculated as: **PBE = (PBS - mean(PBS)) / sd(PBS)**
-
-PBE is a Z-score normalization of PBS, making it easier to identify outliers across the genome.
+Windows are whatever the FST file used: `start` / `end` are copied when present so collate can join on the shared grid. Run FST with the same `--reference-genome`, `--window-size`, and `--step-size` as diversity.
 
 #### Usage
 
-**Primary method with grenedalf (recommended):**
 ```bash
-./calculate_pbs.sh \
-  --bam-pop1 /path/to/pop1.bam \
-  --bam-pop2 /path/to/pop2.bam \
-  --bam-pop3 /path/to/pop3.bam \
-  --grenedalf /usr/bin/grenedalf \
-  --output-dir /path/to/output \
-  --pop1-name Echo \
-  --pop2-name Kjer \
-  --pop3-name Outgroup \
-  --window-size 10000
-```
+# One trio, every *fst*.tsv/csv in the FST directory (single and each w{W}_s{S})
+./calculate_pbe.sh --fst-dir fst_out \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Cheney -o pbe_out
 
-**Fallback method with popoolation2:**
-```bash
-./calculate_pbs.sh \
-  --sync /path/to/populations.sync \
-  --popoolation2 /path/to/popoolation2 \
-  --output-dir /path/to/output \
-  --pop1-index 1 \
-  --pop2-index 2 \
-  --pop3-index 3 \
-  --pop1-name Echo \
-  --pop2-name Kjer \
-  --pop3-name Outgroup
+# One FST file
+./calculate_pbe.sh --fst-file fst_out/fst_w1000_s500.tsv \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Cheney -o pbe_out
+
+# Several trios (CSV header: pop1,pop2,pop3). Duplicate pop1 + {pop2,pop3} pairs are skipped
+# unless --compute-dup-comps. --sample-info warns if a name is missing from sample_name.
+./calculate_pbe.sh --fst-dir fst_out --pbe-comparisons pbe_comparisons.csv \
+  --sample-info ../../sample_info.csv -o pbe_out
 ```
 
 #### Options
 
 **Input (choose one):**
-- `--bam-pop1 FILE`: BAM file for population 1 (primary method)
-- `--bam-pop2 FILE`: BAM file for population 2 (primary method)
-- `--bam-pop3 FILE`: BAM file for population 3 (primary method)
-- `-s, --sync FILE`: Sync file (fallback method)
-- `--pop1-index N`: Column index (1-based) for population 1 in sync file (fallback method)
-- `--pop2-index N`: Column index (1-based) for population 2 in sync file (fallback method)
-- `--pop3-index N`: Column index (1-based) for population 3 in sync file (fallback method)
+- `-f, --fst-file FILE`: one FST TSV/CSV from `calculate_fst.sh`
+- `-d, --fst-dir DIR`: directory of `*fst*.tsv` / `*fst*.csv` (top level)
 
-**Tool selection:**
-- `-g, --grenedalf PATH`: Path to grenedalf executable (default: check PATH)
-- `-p, --popoolation2 DIR`: Directory containing popoolation2 scripts (for fallback)
-- `--use-popoolation2`: Force use of popoolation2 instead of grenedalf
+**Trio (choose one):**
+- `--pop1-name` / `--pop2-name` / `--pop3-name`: single comparison
+- `--pbe-comparisons FILE`: CSV with columns `pop1`, `pop2`, `pop3`
 
-**Required:**
-- `-o, --output-dir DIR`: Output directory for results
+**Required:** `-o, --output-dir DIR`
 
-**Optional:**
-- `--pop1-name NAME`: Name for population 1 (default: Pop1)
-- `--pop2-name NAME`: Name for population 2 (default: Pop2)
-- `--pop3-name NAME`: Name for population 3 (default: Pop3)
-- `-w, --window-size N`: Window size in bp (default: 1000)
-- `--step-size N`: Step size in bp (default: 1000)
-- `--min-coverage N`: Minimum coverage per site (default: 4)
-- `--max-coverage N`: Maximum coverage per site (default: 200)
-- `--min-count N`: Minimum allele count (default: 2, popoolation2 only)
-- `--pool-size N`: Pool size (haploid chromosomes) (default: 50)
-- `-t, --threads N`: Number of threads (default: 1)
-- `--dry-run`: Preview commands without executing (dry-run mode)
+**Optional:** `--sample-info FILE`, `--compute-dup-comps`, `--file-prefix PREFIX`, `--output-format tsv|csv|hdf5` (default tsv), `--median-scope genome|chromosome`, `--drop-all-na` (drop rows with any of the three FSTs missing; skip the file if none remain), `--dry-run`
 
-#### Understanding Population Indices
+#### Output files
 
-Sync files have the format:
-```
-chr    pos    ref    pop1    pop2    pop3    ...
-```
+For each FST file × trio (label is `w{W}_s{S}` or `single` from the FST name):
 
-The first three columns are: chromosome, position, reference allele. Population data starts at column 4. Therefore:
-- Column 4 = Population index 1
-- Column 5 = Population index 2
-- Column 6 = Population index 3
+- `{label}_{pop1}_{pop2}_{pop3}_pbs.tsv` — chr, pos, start, end (if present), pop1, pop2, pop3, three FST columns, T12, T13, T23, PBS
+- `{label}_{pop1}_{pop2}_{pop3}_pbe.tsv` — same plus PBE. **Collate reads these** (`--pbe-dir`)
+- `--output-format hdf5`: `{label}_{pop1}_{pop2}_{pop3}_pbs_pbe.h5` (not used by collate)
+- Logs: `{output_dir}/log/calculate_pbe_YYYYmmdd_HHMMSS.log`
 
-However, the script uses 1-based indexing for populations, so:
-- `--pop1-index 1` refers to column 4 (first population)
-- `--pop2-index 2` refers to column 5 (second population)
-- `--pop3-index 3` refers to column 6 (third population)
-
-#### Output Files
-
-- `pbs.txt`: PBS values per window
-  - Columns: chr, pos, Fst_pop1_pop2, Fst_pop1_pop3, Fst_pop2_pop3, T12, T13, T23, PBS
-- `pbe.txt`: Population Branch Excess (PBE) per window
-  - Columns: chr, pos, Fst_pop1_pop2, Fst_pop1_pop3, Fst_pop2_pop3, T12, T13, T23, PBS, PBE
-- `fst_pop1_pop2.txt`: Fst between population 1 and 2
-- `fst_pop1_pop3.txt`: Fst between population 1 and 3
-- `fst_pop2_pop3.txt`: Fst between population 2 and 3
-- `fst_*_snps.txt`: SNP-level Fst files for each pair
-
-#### Examples
-
-**Using grenedalf with BAM files (recommended):**
-```bash
-./calculate_pbs.sh \
-  --bam-pop1 ../output/Echo_Pool_S1/Echo_Pool_S1_All_seq.dedup.bam \
-  --bam-pop2 ../output/Kjer_Pool_S4/Kjer_Pool_S4_All_seq.dedup.bam \
-  --bam-pop3 ../output/Outgroup_Pool_S2/Outgroup_Pool_S2_All_seq.dedup.bam \
-  --grenedalf /usr/bin/grenedalf \
-  --output-dir ./pbs_results \
-  --pop1-name Echo \
-  --pop2-name Kjer \
-  --pop3-name Outgroup \
-  --window-size 10000 \
-  --step-size 5000 \
-  --threads 8
-```
-
-**Using popoolation2 with sync file (fallback):**
-```bash
-./calculate_pbs.sh \
-  --sync ../output/Echo_Kjer_Outgroup.sync \
-  --popoolation2 /opt/popoolation2 \
-  --output-dir ./pbs_results \
-  --pop1-index 1 \
-  --pop2-index 2 \
-  --pop3-index 3 \
-  --pop1-name Echo \
-  --pop2-name Kjer \
-  --pop3-name Outgroup \
-  --window-size 10000 \
-  --step-size 5000
-```
+The FST table must contain all three pairs. Population names keep their case.
 
 ## Workflow Example
 
@@ -403,20 +319,19 @@ done
   --threads 8
 ```
 
-3. **Calculate PBS using grenedalf (recommended)**:
+3. **Calculate FST, then PBS/PBE** (same reference, mask, and window/step as diversity):
 ```bash
-./calculate_pbs.sh \
-  --bam-pop1 /path/to/output/Echo_Pool_S1/Echo_Pool_S1_All_seq.dedup.bam \
-  --bam-pop2 /path/to/output/Kjer_Pool_S4/Kjer_Pool_S4_All_seq.dedup.bam \
-  --bam-pop3 /path/to/output/Outgroup_Pool_S2/Outgroup_Pool_S2_All_seq.dedup.bam \
-  --grenedalf /usr/bin/grenedalf \
-  --output-dir ./pbs_analysis \
-  --pop1-name Echo \
-  --pop2-name Kjer \
-  --pop3-name Outgroup \
-  --window-size 10000 \
-  --step-size 5000 \
+./calculate_fst.sh \
+  --sample-info ../../sample_info.csv \
+  --reference-genome /path/to/ref.unmasked.fa \
+  --window-type interval --window-size 10000 --step-size 5000 \
+  --filter-mask-total-bed mask/mask.bed \
+  --output-dir ./fst_out \
   --threads 8
+./calculate_pbe.sh \
+  --fst-dir ./fst_out \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Outgroup \
+  --output-dir ./pbe_out
 ```
 
 ### Alternative Workflow with Popoolation2 (Fallback)
@@ -466,21 +381,7 @@ java -jar /opt/popoolation2/mpileup2sync.jar \
   --step-size 5000
 ```
 
-4. **Calculate PBS with popoolation2**:
-```bash
-./calculate_pbs.sh \
-  --sync combined.sync \
-  --popoolation2 /opt/popoolation2 \
-  --output-dir ./pbs_analysis \
-  --pop1-index 1 \
-  --pop2-index 2 \
-  --pop3-index 3 \
-  --pop1-name Echo \
-  --pop2-name Kjer \
-  --pop3-name Outgroup \
-  --window-size 10000 \
-  --step-size 5000
-```
+4. **PBS/PBE** in this repo always come from `calculate_fst.sh` tables (grenedalf), not from popoolation2. After a popoolation2 diversity run, still compute FST with `calculate_fst.sh` on the BAMs, then `calculate_pbe.sh --fst-dir fst_out ...`.
 
 ## Dry-Run Mode
 
@@ -531,17 +432,17 @@ This is particularly useful for:
 
 ### PBS (Population Branch Statistic)
 
-- **Positive PBS**: Indicates population-specific divergence, potentially due to selection
-- **High PBS values**: Regions with strong population-specific selection
-- **Negative PBS**: Indicates shared ancestry or gene flow
-- Typically, PBS > 2-3 standard deviations above the mean are considered outliers
+- **Positive PBS**: Longer branch in pop1 than expected from the pop2–pop3 split; population-specific divergence
+- **High PBS**: Candidate regions for pop1-specific selection
+- **Negative PBS**: Shared variation or gene flow involving pop1
+- PBS scales with background FST, so raw PBS is harder to compare across the genome than PBE
 
 ### PBE (Population Branch Excess)
 
-- **PBE is a Z-score**: Values are normalized to have mean=0 and sd=1
-- **PBE > 2 or 3**: Strong outliers, likely under selection in the target population
-- **PBE < -2 or -3**: Regions with unusually low divergence
-- **Advantage over PBS**: Easier to compare across different genomic regions and identify consistent outliers
+- **Not a Z-score.** PBE = PBS − T23 × median(PBS) / median(T23), with medians genome-wide or per chromosome
+- Positive PBE: more pop1 branch length than that background relationship predicts
+- Negative PBE: less pop1-specific divergence than expected given T23
+- Downstream outlier calling (`identify_outliers.sh`) uses the collated PBE quantiles, not a fixed ±2 cutoff
 
 ## Notes
 
@@ -575,11 +476,11 @@ For large genomes:
 - Process chromosomes separately
 - Increase Java heap size: `export JAVA_OPTS="-Xmx8g"`
 
-### PBS Calculation Errors
+### PBS/PBE errors
 
-- Ensure all three Fst files are generated successfully
-- Check that population indices match your sync file structure
-- Verify windows are aligned across all three Fst files
+- `Could not find FST columns for all three pairs`: names must match the FST header (`Echo:Kjer.fst`). Use the `sample_name` values from `sample_info.csv`
+- `--fst-dir` sees no files: `calculate_fst.sh` writes `fst_w{W}_s{S}.{csv|tsv}` or `fst_single.{csv|tsv}` in that directory
+- Collate missing PBE: pass `--pbe-dir` to the directory of `*_pbe.tsv` (not the HDF5 from `--output-format hdf5`)
 
 ## Citation
 

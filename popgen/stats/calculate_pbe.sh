@@ -84,13 +84,14 @@ Optional:
   --dry-run                   Preview only, do not run
   -h, --help                  Show this help
 
-Output files (format depends on --output-format):
-  - With --fst-file: {output_dir}/{prefix_}pbs.{tsv|csv}, {prefix_}pbe.{tsv|csv}
-    (prefix derived from filename, e.g. w1000_s500 or single)
-  - With --fst-dir: one PBS/PBE set per discovered FST file, e.g. {output_dir}/{prefix_}w1000_s500_pbs.{tsv|csv}
-  - With --pbe-comparisons: prefix includes label and pop names, e.g. {output_dir}/{prefix_}w1000_s500_Echo_Kjer_Cheney_pbe.{tsv|csv}
-  - hdf5:    {output_dir}/{prefix_}pbe.h5 (single file with PBS and PBE)
-  - Logs: {output_dir}/log/{prefix_}calculate_pbe_YYYYmmdd_HHMMSS.log
+Output files (format depends on --output-format). Each FST file x trio writes:
+  {output_dir}/{file-prefix_}{label}_{pop1}_{pop2}_{pop3}_pbs.{tsv|csv}
+  {output_dir}/{file-prefix_}{label}_{pop1}_{pop2}_{pop3}_pbe.{tsv|csv}
+  where label is w{W}_s{S} or single (from the FST filename). Columns include chr, pos,
+  start, end (when the FST table has window bounds), the three FST pairs, T12, T13, T23,
+  PBS, PBE, and pop1/pop2/pop3. Collate discovers *_pbe.{tsv|csv}.
+  hdf5: {output_dir}/{file-prefix_}{label}_{pop1}_{pop2}_{pop3}_pbs_pbe.h5
+  Logs: {output_dir}/log/{file-prefix_}calculate_pbe_YYYYmmdd_HHMMSS.log
 
 Examples:
 
@@ -118,7 +119,7 @@ log() {
     local message="${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
     echo -e "$message"
     # Also write directly to log file (without colors) if LOG_FILE is set and redirection is not active
-    if [[ -n "$LOG_FILE" ]] && [[ -n "$1" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
         local clean_message="[$(date +'%Y-%m-%d %H:%M:%S')] $1"
         echo "$clean_message" >> "$LOG_FILE"
     fi
@@ -128,7 +129,7 @@ log_error() {
     local message="${RED}[ERROR]${NC} $1"
     echo -e "$message" >&2
     # Also write directly to log file if redirection is not active
-    if [[ -n "$LOG_FILE" ]] && [[ -n "$1" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
         local clean_message="[ERROR] $1"
         echo "$clean_message" >> "$LOG_FILE"
     fi
@@ -138,7 +139,7 @@ log_warn() {
     local message="${YELLOW}[WARN]${NC} $1"
     echo -e "$message"
     # Also write directly to log file if redirection is not active
-    if [[ -n "$LOG_FILE" ]] && [[ -n "$1" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
         local clean_message="[WARN] $1"
         echo "$clean_message" >> "$LOG_FILE"
     fi
@@ -147,8 +148,8 @@ log_warn() {
 log_dry_run() {
     local message="${YELLOW}[DRY-RUN]${NC} $1"
     echo -e "$message"
-    # Also write directly to log file if redirection is not active
-    if [[ -n "$LOG_FILE" ]] && [[ -n "$1" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+    # Directories are not created in dry-run, so only append when the log already exists
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
         local clean_message="[DRY-RUN] $1"
         echo "$clean_message" >> "$LOG_FILE"
     fi
@@ -216,7 +217,7 @@ discover_fst_files() {
         FST_LABELS+=("$label")
     done < <(find "$dir" -maxdepth 1 \( -name "*fst*.tsv" -o -name "*fst*.csv" \) -print0 2>/dev/null)
     # Sort: single first, then by label
-    local i j tmp li lj
+    local i j tmp li lj swap
     for (( i=0; i < ${#FST_FILES[@]}; i++ )); do
         for (( j=i+1; j < ${#FST_FILES[@]}; j++ )); do
             li="${FST_LABELS[$i]}"; lj="${FST_LABELS[$j]}"
@@ -393,7 +394,7 @@ if [[ -n "$PBE_COMPARISONS_FILE" ]]; then
     # Optional: validate names against sample_info
     if [[ -n "$SAMPLE_INFO_CSV" ]] && [[ -f "$SAMPLE_INFO_CSV" ]] && [[ "$DRY_RUN" == false ]]; then
         declare -A VALID_NAMES
-        local saw_header=false
+        saw_header=false
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             if [[ "$saw_header" == false ]]; then
@@ -405,7 +406,9 @@ if [[ -n "$PBE_COMPARISONS_FILE" ]]; then
             [[ -n "$sn" ]] && VALID_NAMES[$sn]=1
         done < "$SAMPLE_INFO_CSV"
         for i in "${!COMPARISON_POP1[@]}"; do
-            local p1="${COMPARISON_POP1[$i]}" p2="${COMPARISON_POP2[$i]}" p3="${COMPARISON_POP3[$i]}"
+            p1="${COMPARISON_POP1[$i]}"
+            p2="${COMPARISON_POP2[$i]}"
+            p3="${COMPARISON_POP3[$i]}"
             [[ -z "${VALID_NAMES[$p1]:-}" ]] && log_warn "pop1 '$p1' not in sample_info sample_name column"
             [[ -z "${VALID_NAMES[$p2]:-}" ]] && log_warn "pop2 '$p2' not in sample_info sample_name column"
             [[ -z "${VALID_NAMES[$p3]:-}" ]] && log_warn "pop3 '$p3' not in sample_info sample_name column"

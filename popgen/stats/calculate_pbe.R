@@ -35,16 +35,21 @@ detect_delimiter <- function(path) {
 }
 
 #' Find FST column names for three population pairs.
-#' Grenedalf uses columns ending in .fst or _fst containing both sample names.
+#' Grenedalf uses columns ending in .fst or _fst containing both sample names
+#' (e.g. Echo:Kjer.fst). Prefer a pair separator (: _ .) so a short name is not
+#' a substring of another (Ann vs Anne).
 find_fst_columns <- function(header_names, pop1, pop2, pop3) {
     is_fst_col <- function(name, a, b) {
-        n <- tolower(name)
-        if (!grepl("(\\.fst|_fst)$", n, ignore.case = TRUE)) return(FALSE)
-        (grepl(a, name, fixed = TRUE) && grepl(b, name, fixed = TRUE))
+        if (!grepl("(\\.fst|_fst)$", name, ignore.case = TRUE)) return(FALSE)
+        core <- sub("(\\.fst|_fst)$", "", name, ignore.case = TRUE)
+        if (grepl(":", core, fixed = TRUE)) {
+            parts <- strsplit(core, ":", fixed = TRUE)[[1L]]
+            return(length(parts) == 2L && setequal(parts, c(a, b)))
+        }
+        core == paste(a, b, sep = "_") || core == paste(b, a, sep = "_")
     }
     col_12 <- col_13 <- col_23 <- NULL
-    for (i in seq_along(header_names)) {
-        nm <- header_names[i]
+    for (nm in header_names) {
         if (is.null(col_12) && is_fst_col(nm, pop1, pop2)) col_12 <- nm
         if (is.null(col_13) && is_fst_col(nm, pop1, pop3)) col_13 <- nm
         if (is.null(col_23) && is_fst_col(nm, pop2, pop3)) col_23 <- nm
@@ -52,7 +57,15 @@ find_fst_columns <- function(header_names, pop1, pop2, pop3) {
     list(col_12 = col_12, col_13 = col_13, col_23 = col_23)
 }
 
-#' Read FST file and return a tibble with chr, pos, fst_12, fst_13, fst_23.
+first_named <- function(d, candidates) {
+    lo <- tolower(names(d))
+    hit <- match(candidates, lo)
+    hit <- hit[!is.na(hit)]
+    if (length(hit) == 0L) return(NA_character_)
+    names(d)[hit[1L]]
+}
+
+#' Read FST file and return a tibble with chr, pos, optional start/end, fst_12/13/23.
 #' Handles csv/tsv and standard NA/nan string representations.
 read_fst_for_pbs <- function(path, pop1, pop2, pop3) {
     delim <- detect_delimiter(path)
@@ -68,23 +81,25 @@ read_fst_for_pbs <- function(path, pop1, pop2, pop3) {
         stop("Could not find FST columns for all three pairs. Header: ",
              paste(header_names, collapse = " | "))
     }
-    chr_col <- names(raw)[1L]
-    pos_col <- names(raw)[2L]
-    if (is.null(chr_col) || is.null(pos_col)) {
-        chr_col <- header_names[1L]
-        pos_col <- header_names[2L]
+    chr_col <- first_named(raw, c("chr", "chromosome", "chrom"))
+    start_col <- first_named(raw, c("start", "begin"))
+    end_col <- first_named(raw, c("end", "stop"))
+    pos_col <- first_named(raw, c("position", "pos"))
+    if (is.na(pos_col)) pos_col <- start_col
+    if (is.na(chr_col) || is.na(pos_col)) {
+        stop("FST file needs a chromosome column and pos or start. Header: ",
+             paste(header_names, collapse = " | "))
     }
     out <- tibble(
-        chr = raw[[chr_col]],
+        chr = as.character(raw[[chr_col]]),
         pos = as.numeric(raw[[pos_col]]),
         fst_12 = as.numeric(raw[[cols$col_12]]),
         fst_13 = as.numeric(raw[[cols$col_13]]),
         fst_23 = as.numeric(raw[[cols$col_23]])
     )
-    # Windowed FST (chrom, start, end, ...): keep the window bounds so PBE rows join on the shared grid
-    if (all(c("start", "end") %in% tolower(header_names))) {
-        out$start <- as.numeric(raw[[header_names[tolower(header_names) == "start"][1L]]])
-        out$end <- as.numeric(raw[[header_names[tolower(header_names) == "end"][1L]]])
+    if (!is.na(start_col) && !is.na(end_col)) {
+        out$start <- as.numeric(raw[[start_col]])
+        out$end <- as.numeric(raw[[end_col]])
         out <- out %>% relocate("start", "end", .after = "pos")
     }
     out
@@ -152,6 +167,9 @@ write_hdf5 <- function(dat, path) {
     grp[["pos"]] <- dat$pos
     if ("start" %in% names(dat)) grp[["start"]] <- dat$start
     if ("end" %in% names(dat)) grp[["end"]] <- dat$end
+    if ("pop1" %in% names(dat)) grp[["pop1"]] <- as.character(dat$pop1)
+    if ("pop2" %in% names(dat)) grp[["pop2"]] <- as.character(dat$pop2)
+    if ("pop3" %in% names(dat)) grp[["pop3"]] <- as.character(dat$pop3)
     grp[["fst_12"]] <- dat$fst_12
     grp[["fst_13"]] <- dat$fst_13
     grp[["fst_23"]] <- dat$fst_23
@@ -238,6 +256,9 @@ dat$T12 <- fst_to_branch(dat$fst_12)
 dat$T13 <- fst_to_branch(dat$fst_13)
 dat$T23 <- fst_to_branch(dat$fst_23)
 dat$PBS <- compute_pbs(dat$fst_12, dat$fst_13, dat$fst_23)
+dat$pop1 <- opts$`pop1-name`
+dat$pop2 <- opts$`pop2-name`
+dat$pop3 <- opts$`pop3-name`
 
 # PBE1 = PBS1 - (T23 * median(PBS1)) / median(T23); medians genome-wide or per-chromosome
 if (median_scope == "genome") {
@@ -267,7 +288,8 @@ if (fmt == "hdf5") {
     names(out_names)[names(out_names) == "fst_23"] <- paste0("Fst_", opts$`pop2-name`, "_", opts$`pop3-name`)
     pbs_path <- file.path(opts$`output-dir`, paste0(prefix, "pbs.", fmt))
     pbe_path <- file.path(opts$`output-dir`, paste0(prefix, "pbe.", fmt))
-    pbs_cols <- c("chr", "pos", intersect(c("start", "end"), names(out_names)), paste0("Fst_", opts$`pop1-name`, "_", opts$`pop2-name`),
+    pbs_cols <- c("chr", "pos", intersect(c("start", "end"), names(out_names)), "pop1", "pop2", "pop3",
+                  paste0("Fst_", opts$`pop1-name`, "_", opts$`pop2-name`),
                   paste0("Fst_", opts$`pop1-name`, "_", opts$`pop3-name`),
                   paste0("Fst_", opts$`pop2-name`, "_", opts$`pop3-name`),
                   "T12", "T13", "T23", "PBS")
