@@ -97,7 +97,8 @@ Filtering options:
   --min-total-read-depth N   Minimum total read depth across all samples (default: 10)
   --filter-total-only-biallelic-snps  Filter to only biallelic SNPs (default: false)
   --filter-mask-total-fasta FILE  FASTA mask file for masking regions (vcftools format, optional)
-  --filter-mask-total-bed FILE    BED file for masking regions (optional)
+  --filter-mask-total-bed FILE    BED file for masking regions (optional).
+                              Rewritten into .fai order; chromosomes with no interval get a 1-bp pad.
 
 Comparison options:
   --comparand SAMPLE          Compute FST between this sample and all others (optional)
@@ -638,28 +639,47 @@ if [[ -n "$REFERENCE_GENOME" ]] && [[ "$DRY_RUN" == false ]] && [[ ! -f "$REFERE
     exit 1
 fi
 
-# grenedalf 0.6.3 segfaults once the data reach a chromosome that has no interval in a BED
-# mask, so every such chromosome gets a 1-bp interval on its last base.
+# Grenedalf requires a BED mask in reference (.fai) dictionary order. 0.6.3 also
+# segfaults on a chromosome with no interval, so those get a 1-bp pad on the last base.
+# Missing chromosomes used to be appended, which made later scaffolds appear before
+# earlier ones (e.g. scaffold_171 then scaffold_170) and aborted with "Invalid sorting order".
 pad_mask_bed() {
     local bed="$1" ref="$2" out="$3"
-    local lengths
-    if [[ -f "${ref}.fai" ]]; then
-        lengths=$(cut -f1,2 "${ref}.fai")
-    else
-        lengths=$(awk '/^>/ { if (n != "") print n "\t" l; n = substr($1, 2); l = 0; next } { l += length($0) } END { if (n != "") print n "\t" l }' "$ref")
+    local fai="${ref}.fai"
+    local fai_tmp=""
+    if [[ ! -f "$fai" ]]; then
+        fai_tmp=$(mktemp)
+        awk '/^>/ { if (n != "") print n "\t" l; n = substr($1, 2); l = 0; next } { l += length($0) } END { if (n != "") print n "\t" l }' "$ref" > "$fai_tmp"
+        fai="$fai_tmp"
     fi
     awk -F'\t' -v OFS='\t' '
-        NR == FNR { if ($0 !~ /^(#|track|browser)/ && NF >= 3) { seen[$1] = 1; print $1, $2, $3 }; next }
-        !($1 in seen) && $2 > 0 { print $1, $2 - 1, $2 }' "$bed" <(printf '%s\n' "$lengths") > "$out"
+        NR == FNR { ord[$1] = NR; len[$1] = $2 + 0; name[NR] = $1; n = NR; next }
+        /^(#|track|browser)/ || NF < 3 { next }
+        ($1 in ord) {
+            s = $2 + 0; e = $3 + 0
+            if (s < 0) s = 0
+            if (e > len[$1]) e = len[$1]
+            if (e > s) { seen[$1] = 1; print ord[$1], $1, s, e }
+        }
+        END {
+            for (i = 1; i <= n; i++)
+                if (!(name[i] in seen) && len[name[i]] > 0)
+                    print i, name[i], len[name[i]] - 1, len[name[i]]
+        }' "$fai" "$bed" \
+    | sort -t$'\t' -k1,1n -k3,3n -k4,4n \
+    | cut -f2-4 > "$out"
+    [[ -n "$fai_tmp" ]] && rm -f "$fai_tmp"
 }
 if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -z "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
     padded_mask="${OUTPUT_DIR}/.mask_all_chromosomes.bed"
     pad_mask_bed "$FILTER_MASK_TOTAL_BED" "$REFERENCE_GENOME" "$padded_mask"
-    n_orig=$(awk '$0 !~ /^(#|track|browser)/ && NF >= 3 { n++ } END { print n+0 }' "$FILTER_MASK_TOTAL_BED")
-    n_padded=$(( $(wc -l < "$padded_mask") - n_orig ))
+    n_orig_chr=$(awk '$0 !~ /^(#|track|browser)/ && NF >= 3 { c[$1] = 1 } END { print length(c)+0 }' "$FILTER_MASK_TOTAL_BED")
+    n_out_chr=$(awk '{ c[$1] = 1 } END { print length(c)+0 }' "$padded_mask")
+    n_padded=$(( n_out_chr - n_orig_chr ))
+    FILTER_MASK_TOTAL_BED="$padded_mask"
+    log "Rewrote mask in reference (.fai) order for grenedalf: $padded_mask"
     if (( n_padded > 0 )); then
-        log "Mask has no interval on $n_padded chromosome(s); masking their last base so grenedalf accepts the mask ($padded_mask)"
-        FILTER_MASK_TOTAL_BED="$padded_mask"
+        log "Mask had no interval on $n_padded chromosome(s); masked their last base so grenedalf accepts the mask"
     fi
 fi
 

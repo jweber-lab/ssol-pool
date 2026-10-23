@@ -65,6 +65,8 @@ After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked
 
 Masked positions count as missing in grenedalf, so they are removed from the valid-loci denominator instead of being treated as invariant. Collate keeps grenedalf's `total.masked` as **`n_masked`** (masked bp per window) in the diversity and FST HDF5, so windows that are mostly masked can be filtered downstream.
 
+Grenedalf expects the BED mask in **reference (`.fai`) order**. `calculate_pi_theta.sh`, `calculate_fst.sh` and `snp_call.sh` rewrite `--filter-mask-total-bed` into that order and add a 1 bp interval on chromosomes that have none (grenedalf 0.6.3 otherwise segfaults). Tiny leftover scaffolds often have no repeat or seq-qual interval, so they used to be appended after the last masked chromosome and abort with `Invalid sorting order` (for example `scaffold_171` then `scaffold_170`).
+
 ### Window boundaries
 
 Every windowed table must use the same `(chr, start, end)` so collate's exact joins line up. All scripts use grenedalf's interval grid: start = 1 + k·step, with the last window being the first whose end reaches the chromosome end (the end is not clipped).
