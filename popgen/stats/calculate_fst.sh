@@ -33,7 +33,9 @@ MIN_COVERAGE=10
 MAX_COVERAGE=1000
 MIN_COUNT=2
 MIN_TOTAL_READ_DEPTH=10
-FILTER_TOTAL_ONLY_BIALLELIC_SNPS=false
+FILTER_TOTAL_ONLY_BIALLELIC_SNPS=true
+NO_NAN_WINDOWS=true
+NO_EXTRA_COLUMNS=false
 FILTER_MASK_TOTAL_FASTA=""
 FILTER_MASK_TOTAL_BED=""
 POOL_SIZE=50
@@ -95,7 +97,16 @@ Filtering options:
   --max-coverage N            Maximum coverage per site per sample (default: 1000)
   --min-count N               Minimum allele count per sample (default: 2)
   --min-total-read-depth N   Minimum total read depth across all samples (default: 10)
-  --filter-total-only-biallelic-snps  Filter to only biallelic SNPs (default: false)
+  --filter-total-only-biallelic-snps
+                              Keep only biallelic SNPs (default: on). Passed to grenedalf.
+  --no-filter-total-only-biallelic-snps
+                              Include non-biallelic / invariant sites that pass other filters
+  --no-nan-windows            Do not write windows/sites where every value is NA (default: on).
+                              Strongly recommended for --window-type single; otherwise a reference
+                              plus mask can emit a row per genome base.
+  --keep-nan-windows          Write all-NA windows/sites (turns off --no-nan-windows)
+  --no-extra-columns          Drop grenedalf's per-pair filter-count columns (default: off)
+  --extra-columns             Keep those count columns (grenedalf default)
   --filter-mask-total-fasta FILE  FASTA mask file for masking regions (vcftools format, optional)
   --filter-mask-total-bed FILE    BED file for masking regions (optional).
                               Rewritten into .fai order; chromosomes with no interval get a 1-bp pad.
@@ -156,7 +167,8 @@ Examples:
     --reference-genome /path/to/reference.fa
 
 Output files:
-  - {output_dir}/fst_single.{csv|tsv}: Per-locus FST values for each sample pair (when --window-type single)
+  - {output_dir}/fst_single.{csv|tsv}: Per-locus FST values for each sample pair (when --window-type single).
+    By default this is biallelic SNPs only, with all-NA sites omitted.
     (Grenedalf writes .csv; when --separator-char tab, we rename to .tsv)
   - {output_dir}/fst_w{WINDOW}_s{STEP}.{csv|tsv}: Windowed FST values for each sample pair
     (e.g., fst_w10000_s5000.tsv for window=10000, step=5000)
@@ -352,6 +364,26 @@ while [[ $# -gt 0 ]]; do
             ;;
         --filter-total-only-biallelic-snps)
             FILTER_TOTAL_ONLY_BIALLELIC_SNPS=true
+            shift
+            ;;
+        --no-filter-total-only-biallelic-snps)
+            FILTER_TOTAL_ONLY_BIALLELIC_SNPS=false
+            shift
+            ;;
+        --no-nan-windows)
+            NO_NAN_WINDOWS=true
+            shift
+            ;;
+        --keep-nan-windows)
+            NO_NAN_WINDOWS=false
+            shift
+            ;;
+        --no-extra-columns)
+            NO_EXTRA_COLUMNS=true
+            shift
+            ;;
+        --extra-columns)
+            NO_EXTRA_COLUMNS=false
             shift
             ;;
         --filter-mask-total-fasta)
@@ -683,6 +715,20 @@ pad_mask_bed() {
     fi
     return 0
 }
+
+# Pass optional grenedalf fst output/site filters (appended to GRENEDALF_CMD).
+append_grenedalf_output_filters() {
+    if [[ "$FILTER_TOTAL_ONLY_BIALLELIC_SNPS" == true ]]; then
+        GRENEDALF_CMD+=(--filter-total-only-biallelic-snps)
+    fi
+    if [[ "$NO_NAN_WINDOWS" == true ]]; then
+        GRENEDALF_CMD+=(--no-nan-windows)
+    fi
+    if [[ "$NO_EXTRA_COLUMNS" == true ]]; then
+        GRENEDALF_CMD+=(--no-extra-columns)
+    fi
+}
+
 if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -z "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
     padded_mask="${OUTPUT_DIR}/.mask_all_chromosomes.bed"
     log "Rewriting mask into reference (.fai) order for grenedalf..."
@@ -802,9 +848,9 @@ if [[ "$DRY_RUN" == true ]]; then
     log_dry_run "Max coverage per sample: $MAX_COVERAGE"
     log_dry_run "Min allele count per sample: $MIN_COUNT"
     log_dry_run "Min total read depth: $MIN_TOTAL_READ_DEPTH"
-    if [[ "$FILTER_TOTAL_ONLY_BIALLELIC_SNPS" == true ]]; then
-        log_dry_run "Filtering to biallelic SNPs only: enabled"
-    fi
+    log_dry_run "Biallelic SNP filter: $FILTER_TOTAL_ONLY_BIALLELIC_SNPS"
+    log_dry_run "Omit all-NA windows/sites: $NO_NAN_WINDOWS"
+    log_dry_run "Omit extra count columns: $NO_EXTRA_COLUMNS"
     if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]]; then
         log_dry_run "FASTA mask file: $FILTER_MASK_TOTAL_FASTA"
     fi
@@ -825,9 +871,9 @@ log "Min coverage per sample: $MIN_COVERAGE"
 log "Max coverage per sample: $MAX_COVERAGE"
 log "Min allele count per sample: $MIN_COUNT"
 log "Min total read depth: $MIN_TOTAL_READ_DEPTH"
-if [[ "$FILTER_TOTAL_ONLY_BIALLELIC_SNPS" == true ]]; then
-    log "Filtering to biallelic SNPs only: enabled"
-fi
+log "Biallelic SNP filter: $FILTER_TOTAL_ONLY_BIALLELIC_SNPS"
+log "Omit all-NA windows/sites: $NO_NAN_WINDOWS"
+log "Omit extra count columns: $NO_EXTRA_COLUMNS"
 if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]]; then
     log "FASTA mask file: $FILTER_MASK_TOTAL_FASTA"
 fi
@@ -1049,10 +1095,7 @@ if [[ "$WINDOW_TYPE" == "interval" ]]; then
             GRENEDALF_CMD+=(--filter-total-min-read-depth "$MIN_TOTAL_READ_DEPTH")
         fi
         
-        # Add biallelic SNP filter
-        if [[ "$FILTER_TOTAL_ONLY_BIALLELIC_SNPS" == true ]]; then
-            GRENEDALF_CMD+=(--filter-total-only-biallelic-snps)
-        fi
+        append_grenedalf_output_filters
         
         # Add mask files if provided
         if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ -f "$FILTER_MASK_TOTAL_FASTA" ]]; then
@@ -1209,11 +1252,7 @@ else
         log "Using min total read depth filter: $MIN_TOTAL_READ_DEPTH"
     fi
     
-    # Add biallelic SNP filter
-    if [[ "$FILTER_TOTAL_ONLY_BIALLELIC_SNPS" == true ]]; then
-        GRENEDALF_CMD+=(--filter-total-only-biallelic-snps)
-        log "Filtering to biallelic SNPs only"
-    fi
+    append_grenedalf_output_filters
     
     # Add mask files if provided
     if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ -f "$FILTER_MASK_TOTAL_FASTA" ]]; then

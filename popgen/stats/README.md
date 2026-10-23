@@ -56,7 +56,7 @@ After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked
 
 1. **Alignment** ([`process_poolseq.sh`](../alignment/process_poolseq.sh)): use the **unmasked** reference. Optionally apply **`--bam-min-mapq 20 --bam-primary-only`** so the BAMs passed to stats exclude low-MAPQ and non-primary alignments.
 2. **Diversity (π, θ, Tajima's D)** (`calculate_pi_theta.sh`): BAM input; exclude masked positions with **`--filter-mask-total-bed`** (same BED as below). Use the combined `mask.bed` from [`build_mask.sh`](../alignment/README.md#combined-mask-build_masksh) (repeats plus poorly mapping windows), or a plain RepeatMasker BED.
-3. **FST** (`calculate_fst.sh`): same **`--filter-mask-total-bed`** (or `--filter-mask-total-fasta`) as diversity.
+3. **FST** (`calculate_fst.sh`): same **`--filter-mask-total-bed`** (or `--filter-mask-total-fasta`) as diversity. Per-locus (`--window-type single`) and windowed FST keep **biallelic SNPs** and drop all-NA windows/sites by default (`--filter-total-only-biallelic-snps`, `--no-nan-windows`). Turn those off with `--no-filter-total-only-biallelic-snps` / `--keep-nan-windows`. **`--no-extra-columns`** drops grenedalf's per-pair filter-count columns.
 4. **Variants** ([`snp_call.sh`](../variants/README.md#snp_callsh) for SNPs, [`indel_call.sh`](../variants/README.md#indel_callsh) for indels): **same unmasked** reference as alignment; same **`--filter-mask-total-bed`** as diversity/FST.
 5. **Functional annotation** ([`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr)): **`--reference` must be the unmasked assembly that matches your GFF** (not hard-masked). Run csq on a BCF that still has the same `chr`/`pos` as that assembly.
 
@@ -242,7 +242,7 @@ Computes Population Branch Statistic (PBS) and Population Branch Excess (PBE) fr
 
 **PBE = PBS − T23 × median(PBS) / median(T23)**. Medians are genome-wide (`--median-scope genome`, default) or per chromosome. This is an excess relative to the sister-pair branch, not a Z-score.
 
-Windows are whatever the FST file used: `start` / `end` are copied when present so collate can join on the shared grid. Run FST with the same `--reference-genome`, `--window-size`, and `--step-size` as diversity.
+Windows are whatever the FST file used: `start` / `end` are copied when present so collate can join on the shared grid. Run FST with the same `--reference-genome`, `--window-size`, and `--step-size` as diversity. Per-locus `fst_single` is biallelic SNPs with all-NA sites omitted by default in `calculate_fst.sh` (add `--no-extra-columns` there if you also want to drop per-pair count columns).
 
 #### Usage
 
