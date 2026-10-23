@@ -4,10 +4,12 @@
 # variant_csq_windows.R
 #
 # Aggregate annotated variant sites (variant_csq.R output) into per-window counts.
-# Windows: grenedalf's interval grid built from the reference .fai (--reference with
-# --window-size / --step-size, or scales taken from template file names), so they match
-# diversity, FST, PBE and seq_qual windows exactly; or, without --reference, the windows
-# listed in template grenedalf TSVs.
+# Windows: the same (chr, start, end) as masked diversity / FST when --template-dir
+# (or --template-tsv) points at those tables; otherwise grenedalf's interval grid from
+# the reference .fai (--reference with --window-size / --step-size). Templates are used
+# even when --reference is also given, so chromosomes grenedalf omitted (no data) and
+# all-NA windows dropped by --no-nan-windows stay aligned for collate. --filter-mask-
+# total-bed / --filter-mask-total-fasta exclude sites in the same mask as the stats.
 #
 # Outputs variant_features_w{W}_s{S}.tsv with n_sites, n_sites_<type> (snp/indel),
 # n_csq_*, n_region_*, n_effect_*, and genes / genes_protein_altering (semicolon-separated).
@@ -79,6 +81,116 @@ extract_windows_template <- function(path) {
     mutate(chr = as.character(.data$chr), start = as.numeric(.data$start), end = as.numeric(.data$end)) %>%
     distinct(.data$chr, .data$start, .data$end) %>%
     filter(!is.na(.data$chr), !is.na(.data$start), !is.na(.data$end))
+}
+
+#' Union of (chr, start, end) from stats TSVs (diversity / FST / PBE).
+extract_windows_templates <- function(files) {
+  distinct(bind_rows(lapply(files, extract_windows_template)), .data$chr, .data$start, .data$end)
+}
+
+#' Prefer the windows written by masked diversity/FST; fall back to the .fai grid.
+windows_for_scale <- function(scale, z, fai) {
+  tpl <- if (length(z$files) > 0L) extract_windows_templates(z$files) else NULL
+  grid <- if (!is.null(fai)) grid_windows(fai, z$w, z$s) else NULL
+  if (!is.null(tpl) && !is.null(grid)) {
+    off <- anti_join(tpl, grid, by = c("chr", "start", "end"))
+    if (nrow(off) > 0L) {
+      i <- 1L
+      message("WARNING ", scale, ": ", nrow(off), " template window(s) are off the reference grid (e.g. ",
+              off$chr[i], ":", off$start[i], "-", off$end[i], "). Re-run stats with the same --reference-genome.")
+    }
+    extra <- nrow(anti_join(grid, tpl, by = c("chr", "start", "end")))
+    message(scale, ": using ", nrow(tpl), " windows from stats templates",
+            if (extra > 0L) paste0(" (omitted ", extra, " reference-grid window(s) not in those tables; typically chromosomes with no data, or all-NA windows dropped by --no-nan-windows)") else "")
+    return(tpl)
+  }
+  if (!is.null(tpl)) {
+    message(scale, ": using ", nrow(tpl), " windows from stats templates (no --reference to check the grid)")
+    return(tpl)
+  }
+  if (!is.null(grid)) return(grid)
+  stop("No windows for ", scale, ": give --reference or a template TSV with start/end")
+}
+
+read_mask_bed <- function(path) {
+  raw <- readLines(path, warn = FALSE)
+  raw <- raw[!grepl("^(#|track|browser)", raw, ignore.case = TRUE)]
+  raw <- raw[nzchar(trimws(raw))]
+  if (length(raw) == 0L) return(tibble(chr = character(), start0 = numeric(), end = numeric()))
+  parts <- strsplit(raw, "\t", fixed = TRUE)
+  n3 <- vapply(parts, function(p) length(p) >= 3L, logical(1L))
+  parts <- parts[n3]
+  tibble(
+    chr = vapply(parts, `[[`, character(1L), 1L),
+    start0 = as.numeric(vapply(parts, `[[`, character(1L), 2L)),
+    end = as.numeric(vapply(parts, `[[`, character(1L), 3L))
+  ) %>%
+    filter(!is.na(.data$start0), !is.na(.data$end), .data$end > .data$start0)
+}
+
+#' vcftools-style mask FASTA: N/n/X/x/1 are masked (0-based half-open intervals).
+read_mask_fasta <- function(path) {
+  lines <- readLines(path, warn = FALSE)
+  if (length(lines) == 0L) return(tibble(chr = character(), start0 = numeric(), end = numeric()))
+  hdr <- grepl("^>", lines)
+  if (!any(hdr)) stop("Mask FASTA has no '>' headers: ", path)
+  idx <- which(hdr)
+  chr <- sub("^>(\\S+).*", "\\1", lines[idx])
+  end_line <- c(idx[-1L] - 1L, length(lines))
+  out_chr <- character(); out_s <- numeric(); out_e <- numeric()
+  for (i in seq_along(idx)) {
+    from <- idx[i] + 1L
+    to <- end_line[i]
+    if (from > to) next
+    seq <- paste(lines[from:to], collapse = "")
+    hits <- gregexpr("[NnXx1]+", seq, perl = TRUE)[[1L]]
+    if (hits[1L] == -1L) next
+    len <- attr(hits, "match.length")
+    out_chr <- c(out_chr, rep(chr[i], length(hits)))
+    out_s <- c(out_s, hits - 1L)
+    out_e <- c(out_e, hits - 1L + len)
+  }
+  tibble(chr = out_chr, start0 = as.numeric(out_s), end = as.numeric(out_e))
+}
+
+merge_intervals <- function(start0, end) {
+  if (length(start0) == 0L) return(list(start0 = start0, end = end))
+  o <- order(start0, end)
+  start0 <- start0[o]
+  end <- end[o]
+  cs <- start0[1L]
+  ce <- end[1L]
+  out_s <- numeric()
+  out_e <- numeric()
+  for (i in seq_along(start0)) {
+    if (start0[i] <= ce) {
+      ce <- max(ce, end[i])
+    } else {
+      out_s <- c(out_s, cs)
+      out_e <- c(out_e, ce)
+      cs <- start0[i]
+      ce <- end[i]
+    }
+  }
+  list(start0 = c(out_s, cs), end = c(out_e, ce))
+}
+
+#' 1-based pos is masked when it falls in a 0-based half-open BED interval.
+sites_in_mask <- function(sites, bed) {
+  masked <- logical(nrow(sites))
+  if (nrow(sites) == 0L || nrow(bed) == 0L) return(masked)
+  bi <- split(seq_len(nrow(bed)), bed$chr)
+  si <- split(seq_len(nrow(sites)), sites$chr)
+  for (chr in intersect(names(si), names(bi))) {
+    iv <- merge_intervals(bed$start0[bi[[chr]]], bed$end[bi[[chr]]])
+    pos <- sites$pos[si[[chr]]]
+    i <- findInterval(pos - 1, iv$start0)
+    hit <- logical(length(pos))
+    ok <- !is.na(i) & i > 0L
+    hit[ok] <- (pos[ok] - 1) < iv$end[i[ok]]
+    masked[si[[chr]]] <- hit
+  }
+  masked
 }
 
 #' (site, window) index pairs for sites inside windows. Windows of one chromosome must have
@@ -170,8 +282,12 @@ main <- function() {
     make_option(c("--reference"), type = "character", default = NULL, help = "Reference FASTA (with .fai) or .fai: windows are built on the grenedalf interval grid from chromosome lengths"),
     make_option(c("--window-size"), type = "character", default = NULL, help = "Window size(s), comma-separated (with --reference)"),
     make_option(c("--step-size"), type = "character", default = NULL, help = "Step size(s), comma-separated and paired with --window-size [default: window/2]"),
-    make_option(c("--template-dir"), type = "character", default = NULL, help = "Directory with *fst*w*_s*.tsv or similar window TSVs (scales from file names; windows from them only without --reference)"),
-    make_option(c("--template-tsv"), type = "character", default = NULL, help = "Single template TSV (if only one scale)")
+    make_option(c("--template-dir"), type = "character", default = NULL, help = "Directory with windowed diversity / FST / PBE tables (scales from file names; their (chr,start,end) are used even with --reference, so windows match masked stats)"),
+    make_option(c("--template-tsv"), type = "character", default = NULL, help = "Single template TSV (if only one scale)"),
+    make_option(c("--filter-mask-total-bed"), type = "character", default = NULL, help = "Same BED mask as calculate_pi_theta.sh / calculate_fst.sh; sites inside it are omitted from window counts"),
+    make_option(c("--filter-mask-total-fasta"), type = "character", default = NULL, help = "vcftools-style mask FASTA (N/n/X/x/1 masked); use instead of --filter-mask-total-bed"),
+    make_option(c("--no-nan-windows"), action = "store_true", default = TRUE, help = "When building from --reference, omit windows with n_sites=0 [default]"),
+    make_option(c("--keep-nan-windows"), action = "store_true", default = FALSE, help = "Write empty reference-grid windows")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
   sites_paths <- if (is.null(opt$`sites-tsv`)) character(0) else trimws(strsplit(opt$`sites-tsv`, ",", fixed = TRUE)[[1L]])
@@ -185,43 +301,88 @@ main <- function() {
   if (length(ss) == 0L) ss <- ws / 2
   if (length(ws) != length(ss)) stop("--window-size and --step-size need the same number of values")
   if (any(ws <= 0 | ss <= 0 | ws %% 1 != 0 | ss %% 1 != 0)) stop("window and step sizes must be positive integers")
+  if (!is.null(opt$`filter-mask-total-bed`) && !is.null(opt$`filter-mask-total-fasta`)) {
+    stop("Use only one of --filter-mask-total-bed and --filter-mask-total-fasta")
+  }
+  mask_bed <- NULL
+  if (!is.null(opt$`filter-mask-total-bed`)) {
+    if (!file.exists(opt$`filter-mask-total-bed`)) stop("Mask BED not found: ", opt$`filter-mask-total-bed`)
+    mask_bed <- read_mask_bed(opt$`filter-mask-total-bed`)
+  } else if (!is.null(opt$`filter-mask-total-fasta`)) {
+    if (!file.exists(opt$`filter-mask-total-fasta`)) stop("Mask FASTA not found: ", opt$`filter-mask-total-fasta`)
+    mask_bed <- read_mask_fasta(opt$`filter-mask-total-fasta`)
+  }
+
   template_files <- character(0)
   if (!is.null(opt$`template-tsv`)) template_files <- opt$`template-tsv`
   if (!is.null(opt$`template-dir`)) {
-    template_files <- c(template_files, list.files(opt$`template-dir`, pattern = ".*(fst|diversity|pi|theta).*w[0-9]+_s[0-9]+.*\\.(tsv|csv)$",
-                                                   full.names = TRUE, ignore.case = TRUE))
+    if (!dir.exists(opt$`template-dir`)) stop("Template directory not found: ", opt$`template-dir`)
+    template_files <- c(template_files, list.files(
+      opt$`template-dir`,
+      pattern = ".*(fst|diversity|pi|theta|pbe).*w[0-9]+_s[0-9]+.*\\.(tsv|csv)$",
+      full.names = TRUE, recursive = TRUE, ignore.case = TRUE
+    ))
+    template_files <- template_files[!grepl("(^|/)\\.", basename(template_files))]
   }
+  template_files <- unique(template_files)
   scales <- list()
   for (i in seq_along(ws)) scales[[sprintf("w%d_s%d", as.integer(ws[i]), as.integer(ss[i]))]] <- list(w = ws[i], s = ss[i], files = character(0))
+  unnamed <- character(0)
   for (f in template_files) {
     inf <- parse_window_step_name(basename(f))
-    if (is.na(inf$scale)) next
+    if (is.na(inf$scale)) {
+      unnamed <- c(unnamed, f)
+      next
+    }
     if (is.null(scales[[inf$scale]])) scales[[inf$scale]] <- list(w = inf$window_size, s = inf$step_size, files = character(0))
-    scales[[inf$scale]]$files <- c(scales[[inf$scale]]$files, f)
+    scales[[inf$scale]]$files <- unique(c(scales[[inf$scale]]$files, f))
+  }
+  if (length(unnamed) > 0L) {
+    if (length(scales) == 1L) {
+      scales[[1L]]$files <- unique(c(scales[[1L]]$files, unnamed))
+    } else {
+      message("Ignoring template file(s) with no w*_s* in the name (pass a single --window-size/--step-size to use them): ",
+              paste(basename(unnamed), collapse = ", "))
+    }
   }
   if (length(scales) == 0L) stop("Give --reference with --window-size [--step-size], or --template-dir / --template-tsv with w*_s* file names")
   fai <- if (!is.null(opt$reference)) read_fai(opt$reference) else NULL
   if (is.null(fai)) {
     no_tpl <- names(scales)[vapply(scales, function(z) length(z$files) == 0L, logical(1L))]
     if (length(no_tpl) > 0L) stop("--reference is required for scales without template files: ", paste(no_tpl, collapse = ", "))
-    message("No --reference: using windows listed in templates (chromosomes or windows grenedalf did not write are missing)")
   }
 
   sites <- prepare_sites(bind_rows(lapply(sites_paths, function(p) read_tab(p) %>% mutate(across(everything(), as.character)))) %>% readr::type_convert(col_types = readr::cols()))
   if (!is.null(fai)) {
     unknown <- setdiff(unique(sites$chr), fai$chr)
     if (length(unknown) > 0L) message("Sites on ", length(unknown), " sequence(s) not in the reference index are skipped (e.g. ", paste(head(unknown, 3), collapse = ", "), ")")
+    sites <- sites %>% filter(.data$chr %in% fai$chr)
   }
+  if (!is.null(mask_bed) && nrow(mask_bed) > 0L) {
+    n_before <- nrow(sites)
+    sites <- sites[!sites_in_mask(sites, mask_bed), , drop = FALSE]
+    n_drop <- n_before - nrow(sites)
+    if (n_drop > 0L) message("Mask: omitted ", n_drop, " site(s) overlapping --filter-mask-total-bed/fasta (", nrow(sites), " remaining)")
+  }
+
+  no_nan_windows <- isTRUE(opt$`no-nan-windows`) && !isTRUE(opt$`keep-nan-windows`)
 
   dir.create(opt$`output-dir`, showWarnings = FALSE, recursive = TRUE)
   for (sc in names(scales)) {
     z <- scales[[sc]]
-    win <- if (!is.null(fai)) {
-      grid_windows(fai, z$w, z$s)
-    } else {
-      distinct(bind_rows(lapply(z$files, extract_windows_template)), .data$chr, .data$start, .data$end)
-    }
+    used_template <- length(z$files) > 0L
+    win <- windows_for_scale(sc, z, fai)
     agg <- aggregate_hits(sites, win)
+    # Match grenedalf --no-nan-windows on the reference grid. Template windows
+    # already follow the stats tables (including their --no-nan-windows gaps).
+    if (no_nan_windows && !used_template && nrow(agg) > 0L && "n_sites" %in% names(agg)) {
+      keep <- !is.na(agg$n_sites) & agg$n_sites > 0
+      n_drop <- sum(!keep)
+      if (n_drop > 0L) {
+        message(sc, ": --no-nan-windows dropped ", n_drop, " empty window(s) (n_sites=0)")
+      }
+      agg <- agg[keep, , drop = FALSE]
+    }
     out_name <- file.path(opt$`output-dir`, sprintf("variant_features_%s.tsv", sc))
     readr::write_tsv(agg, out_name, na = "")
     message("Wrote ", out_name, " (rows=", nrow(agg), ", scale=", sc, ")")

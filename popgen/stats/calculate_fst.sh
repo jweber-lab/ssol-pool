@@ -370,7 +370,7 @@ while [[ $# -gt 0 ]]; do
             FILTER_TOTAL_ONLY_BIALLELIC_SNPS=false
             shift
             ;;
-        --no-nan-windows)
+        --no-nan-windows|--non-nan-windows)
             NO_NAN_WINDOWS=true
             shift
             ;;

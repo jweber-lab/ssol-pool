@@ -42,10 +42,11 @@ These scripts follow the repository-wide repeat-masking policy described in [pop
 ./variant_csq.sh --bcf indels_out/indel_sites.bcf --reference ref.unmasked.fa \
   --gff annotation.gff3 --output-dir csq_indels
 
-# Windowed variant features from both tables, on the same grid as FST/diversity (for collate)
+# Windowed variant features from both tables, on the same windows as masked FST/diversity
 ./variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv \
   --sites-tsv csq_indels/variants_csq.tsv --reference ref.unmasked.fa \
-  -w 1000 --step-size 500 --output-dir variant_features
+  -w 1000 --step-size 500 --template-dir pi_out \
+  --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 ```
 
 ### Into collate and outliers
@@ -139,12 +140,13 @@ Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suit
 
 ### variant_csq_windows.sh / variant_csq_windows.R
 
-Aggregates annotated sites into **per-window count tables** on grenedalf's interval grid ([Window boundaries](../stats/README.md#window-boundaries)). Preferred: **`--reference`** (FASTA or `.fai`, the same one given to diversity/FST) with **`-w` / `--step-size`** (repeatable, paired; step defaults to window/2). The grid is built from chromosome lengths, so every window is written, including those without sites. Alternatively, **`--template-dir`** (or **`--template-tsv`**) takes existing windowed FST or diversity TSVs whose names include `w{W}_s{S}` (e.g. `fst_w1000_s500.tsv`): with `--reference` the grid is built for those scales; without it the template's own windows are reused, which inherits any gaps in that table. Sites are assigned to windows by interval search per chromosome, so memory stays flat on large scaffolds. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, **`n_sites_snp`** / **`n_sites_indel`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns, plus **`genes`** / **`genes_protein_altering`** (sorted, semicolon-separated union over the window's sites), suitable for joining in collate. `--sites-tsv` can be repeated to combine the SNP and indel csq tables.
+Aggregates annotated sites into **per-window count tables** on grenedalf's interval grid ([Window boundaries](../stats/README.md#window-boundaries)). **`--reference`** (FASTA or `.fai`, the same one given to diversity/FST) with **`-w` / `--step-size`** (repeatable, paired; step defaults to window/2) builds the grid from chromosome lengths. Empty windows (`n_sites=0`) are omitted by default (`--no-nan-windows`; `--keep-nan-windows` writes them). **`--template-dir`** (or **`--template-tsv`**) takes existing windowed FST or diversity tables whose names include `w{W}_s{S}` (searched recursively; e.g. `fst_w1000_s500.tsv`, `diversity_w1000_s500_sampleEcho.csv`). Those tables' `(chr, start, end)` are used **even when `--reference` is also given**, so the feature file matches masked stats (including `--no-nan-windows` gaps). `--reference` still checks that those windows sit on the interval grid, and fills in any `-w` scale that has no template. **`--filter-mask-total-bed`** / **`--filter-mask-total-fasta`** are the same mask files as diversity/FST; sites overlapping the mask are not counted. Sites are assigned to windows by interval search per chromosome, so memory stays flat on large scaffolds. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, **`n_sites_snp`** / **`n_sites_indel`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns, plus **`genes`** / **`genes_protein_altering`** (sorted, semicolon-separated union over the window's sites), suitable for joining in collate. `--sites-tsv` can be repeated to combine the SNP and indel csq tables.
 
 **Example:**
 ```bash
 ./variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \
-  --reference ref.unmasked.fa -w 1000 --step-size 500 -w 10000 --step-size 5000 --output-dir variant_features
+  --reference ref.unmasked.fa -w 1000 --step-size 500 --template-dir pi_out \
+  --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 ```
 
 The output directory can be passed to `collate.sh --variant-feature-dir` in [popgen/stats/](../stats/README.md#collatesh--collater), which left-joins these columns onto the diversity, FST and PBE windows.

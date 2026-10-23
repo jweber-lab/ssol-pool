@@ -4,8 +4,8 @@
 # variant_csq_windows.sh
 #
 # Wrapper for variant_csq_windows.R: aggregate annotated sites into
-# variant_features_wW_sS.tsv on grenedalf's interval window grid (built from the reference
-# .fai), or on windows listed in FST/diversity template files.
+# variant_features_wW_sS.tsv on the same windows as masked diversity / FST (via
+# --template-dir), or on grenedalf's interval grid from the reference .fai.
 ###############################################################################
 
 set -euo pipefail
@@ -16,9 +16,12 @@ WINDOW_SIZES=()
 STEP_SIZES=()
 TEMPLATE_DIR=""
 TEMPLATE_TSV=""
+FILTER_MASK_TOTAL_BED=""
+FILTER_MASK_TOTAL_FASTA=""
 OUTPUT_DIR="."
 RSCRIPT="Rscript"
 DRY_RUN=false
+NO_NAN_WINDOWS=true
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
 log_error() { echo "[ERROR] $1" >&2; }
@@ -30,16 +33,24 @@ Usage: $0 [OPTIONS]
 Required:
   --sites-tsv FILE          Annotated TSV from variant_csq.R; repeat to combine SNP and indel outputs
 
-Windows (recommended: reference grid, identical to diversity / FST / PBE / seq_qual windows):
-  --reference FILE          Reference FASTA (with .fai) or .fai; windows from chromosome lengths
+Windows (use a stats template so rows match masked diversity / FST for collate):
+  --reference FILE          Reference FASTA (with .fai) or .fai; builds the interval grid when a
+                            scale has no template, and checks template windows against that grid
   -w, --window-size N       Window size (repeatable; paired with --step-size)
   --step-size N             Step size (repeatable; default: window/2)
-
-Or / additionally:
-  --template-dir DIR        Directory with *fst*w*_s*.tsv (or diversity window TSVs); scales come
-                            from file names. Without --reference, only the windows in these files
-                            are used (chromosomes grenedalf skipped are missing).
+  --template-dir DIR        Directory of windowed diversity / FST / PBE tables (searched
+                            recursively). Their (chr, start, end) are used even with --reference,
+                            so omitted chromosomes and --no-nan-windows gaps match the stats.
   --template-tsv FILE       Single template TSV
+
+Mask (same files as calculate_pi_theta.sh / calculate_fst.sh; sites inside are not counted):
+  --filter-mask-total-bed FILE    Repeat / combined mask BED
+  --filter-mask-total-fasta FILE  vcftools-style mask FASTA (use one of BED or FASTA)
+
+  --no-nan-windows            When building from --reference, omit windows with n_sites=0
+                              (default: on; same idea as grenedalf --no-nan-windows).
+                              Template windows are kept as listed in the stats tables.
+  --keep-nan-windows          Write empty reference-grid windows (turns off --no-nan-windows)
 
 Optional:
   --output-dir DIR          Where to write variant_features_wW_sS.tsv [default: .]
@@ -49,7 +60,8 @@ Optional:
 
 Example:
   $0 --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \\
-     --reference ref.unmasked.fa -w 1000 --step-size 500 -w 10000 --step-size 5000 --output-dir vf_out
+     --reference ref.unmasked.fa -w 1000 --step-size 500 --template-dir pi_out \\
+     --filter-mask-total-bed mask/mask.bed --output-dir vf_out
 EOF
 }
 
@@ -61,6 +73,10 @@ while [[ $# -gt 0 ]]; do
         --step-size) STEP_SIZES+=("$2"); shift 2 ;;
         --template-dir) TEMPLATE_DIR="$2"; shift 2 ;;
         --template-tsv) TEMPLATE_TSV="$2"; shift 2 ;;
+        --filter-mask-total-bed) FILTER_MASK_TOTAL_BED="$2"; shift 2 ;;
+        --filter-mask-total-fasta) FILTER_MASK_TOTAL_FASTA="$2"; shift 2 ;;
+        --no-nan-windows|--non-nan-windows) NO_NAN_WINDOWS=true; shift ;;
+        --keep-nan-windows) NO_NAN_WINDOWS=false; shift ;;
         --output-dir|-o) OUTPUT_DIR="$2"; shift 2 ;;
         --rscript) RSCRIPT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
@@ -101,6 +117,26 @@ if [[ ${#STEP_SIZES[@]} -gt 0 && ${#STEP_SIZES[@]} -ne ${#WINDOW_SIZES[@]} ]]; t
     log_error "--step-size must be given once per --window-size (or omitted for window/2)"
     exit 1
 fi
+if [[ -n "$FILTER_MASK_TOTAL_BED" && -n "$FILTER_MASK_TOTAL_FASTA" ]]; then
+    log_error "Use only one of --filter-mask-total-bed and --filter-mask-total-fasta"
+    exit 1
+fi
+if [[ -n "$FILTER_MASK_TOTAL_BED" && ! -f "$FILTER_MASK_TOTAL_BED" ]]; then
+    log_error "Mask BED not found: $FILTER_MASK_TOTAL_BED"
+    exit 1
+fi
+if [[ -n "$FILTER_MASK_TOTAL_FASTA" && ! -f "$FILTER_MASK_TOTAL_FASTA" ]]; then
+    log_error "Mask FASTA not found: $FILTER_MASK_TOTAL_FASTA"
+    exit 1
+fi
+if [[ -n "$TEMPLATE_DIR" && ! -d "$TEMPLATE_DIR" ]]; then
+    log_error "Template directory not found: $TEMPLATE_DIR"
+    exit 1
+fi
+if [[ -n "$TEMPLATE_TSV" && ! -f "$TEMPLATE_TSV" ]]; then
+    log_error "Template TSV not found: $TEMPLATE_TSV"
+    exit 1
+fi
 
 ARGS=(--sites-tsv "$SITES_TSV" --output-dir "$OUTPUT_DIR")
 [[ -n "$REFERENCE" ]] && ARGS+=(--reference "$REFERENCE")
@@ -108,6 +144,13 @@ ARGS=(--sites-tsv "$SITES_TSV" --output-dir "$OUTPUT_DIR")
 [[ ${#STEP_SIZES[@]} -gt 0 ]] && ARGS+=(--step-size "$(IFS=,; echo "${STEP_SIZES[*]}")")
 [[ -n "$TEMPLATE_DIR" ]] && ARGS+=(--template-dir "$TEMPLATE_DIR")
 [[ -n "$TEMPLATE_TSV" ]] && ARGS+=(--template-tsv "$TEMPLATE_TSV")
+[[ -n "$FILTER_MASK_TOTAL_BED" ]] && ARGS+=(--filter-mask-total-bed "$FILTER_MASK_TOTAL_BED")
+[[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && ARGS+=(--filter-mask-total-fasta "$FILTER_MASK_TOTAL_FASTA")
+if [[ "$NO_NAN_WINDOWS" == true ]]; then
+    ARGS+=(--no-nan-windows)
+else
+    ARGS+=(--keep-nan-windows)
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "Would run: $RSCRIPT $WIN_R ${ARGS[*]}"

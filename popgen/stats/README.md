@@ -70,10 +70,10 @@ Grenedalf expects the BED mask in **reference (`.fai`) order**. `calculate_pi_th
 
 Every windowed table must use the same `(chr, start, end)` so collate's exact joins line up. All scripts use grenedalf's interval grid: start = 1 + k·step, with the last window being the first whose end reaches the chromosome end (the end is not clipped).
 
-- **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Fully masked or empty windows are written as `nan`, and chromosomes with no data at all are omitted.
+- **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Chromosomes with no data at all are omitted. Fully masked or empty windows are dropped by default (`--no-nan-windows` in `calculate_pi_theta.sh` and `calculate_fst.sh`); `--keep-nan-windows` writes them as `nan`.
 - **PBE** keeps FST's `start` / `end`. Older PBE files with only `pos` get `end = start + window - 1` in collate.
 - **`seq_qual_metrics.sh`** builds the same grid from the `.fai` and fails if BAM lengths differ from it.
-- **`variant_csq_windows.sh`** builds the grid from `--reference` and `-w` / `--step-size`, so windows without sites are included.
+- **`variant_csq_windows.sh`** builds the same grid from `--reference` and `-w` / `--step-size`, and by default omits windows with no sites (`--no-nan-windows`). Pass **`--template-dir`** (diversity or FST output) so the rows are exactly the masked-stat windows. **`--filter-mask-total-bed`** is the same mask as diversity/FST; sites inside it are not counted.
 - **Collate** checks each table against the grid and against the first table at the same scale (on shared chromosomes), and prints `Window check ... matches ...` or a `WARNING window check` naming the off-grid or unmatched windows. For `--seq-qual-dir` and `--variant-feature-dir`, an exact `w{W}_s{S}` table is used when present; otherwise collate keeps the analysis-grid windows from a finer same-window table when the analysis step is a multiple of the source step (e.g. `seq_qual_metrics_w1000_s250.tsv` supplies the 500 bp starts for diversity `w1000_s500`).
 
 Use the same reference FASTA (or its `.fai`) and the same window width for every script. Analysis step sizes should match, or be an integer multiple of, the seq_qual / variant-feature step.
@@ -113,7 +113,8 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
 # 6. Windowed variant features on the same grid, then collate
 ../variants/variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv \
   --sites-tsv csq_indels/variants_csq.tsv --reference ref.unmasked.fa \
-  -w 1000 --step-size 500 --output-dir variant_features
+  -w 1000 --step-size 500 --template-dir pi_out \
+  --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
 ./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --seq-qual-dir seq_qual_mask \
   --variant-tsv-dir sites --variant-csq csq_snps --variant-csq csq_indels \
@@ -194,6 +195,7 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
 - `--reference-genome FILE`: Reference FASTA (required with grenedalf); fixes the window grid across samples (see [Window boundaries](#window-boundaries))
 - `--filter-mask-total-bed FILE`: Exclude intervals in BED from windowed diversity (`mask.bed` from `build_mask.sh`, or a RepeatMasker `*.out.bed`)
 - `--filter-mask-total-fasta FILE`: Alternative grenedalf mask FASTA (use one of BED or FASTA)
+- `--no-nan-windows`: Omit windows where every value is NA (default: on). `--keep-nan-windows` writes those rows.
 - `-t, --threads N`: Number of threads (default: 1)
 - `--dry-run`: Preview commands without executing (dry-run mode)
 

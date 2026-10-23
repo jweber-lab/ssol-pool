@@ -40,6 +40,7 @@ PARALLEL_WINDOWS=false  # Run multiple window/step combinations in parallel
 PARALLEL_MAX_JOBS=0     # Maximum concurrent window jobs (0 = number of CPU cores)
 OUTPUT_SEPARATOR="comma"  # Output separator for grenedalf (comma -> .csv, tab -> .tsv)
 OVERWRITE_OUTPUT=false  # Allow grenedalf to overwrite existing output files
+NO_NAN_WINDOWS=true     # Pass --no-nan-windows to grenedalf (skip all-NA windows)
 
 # Colors for output
 RED='\033[0;31m'
@@ -86,6 +87,10 @@ Optional options:
   --filter-mask-total-fasta FILE  Grenedalf mask FASTA (vcftools-style; optional; exclude repeats from windows)
   --filter-mask-total-bed FILE    RepeatMasker BED (or other) for grenedalf to skip masked intervals (optional).
                               Rewritten into .fai order; chromosomes with no interval get a 1-bp pad.
+  --no-nan-windows            Do not write windows where every value is NA (default: on).
+                              Same flag as calculate_fst.sh; with a reference plus mask this drops
+                              fully masked / empty windows instead of emitting nan rows.
+  --keep-nan-windows          Write all-NA windows (turns off --no-nan-windows)
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
   --separator-char SEP        Output separator: comma, tab, space, semicolon (default: comma)
   --overwrite-output          Allow overwriting existing output files (default: false)
@@ -384,6 +389,14 @@ while [[ $# -gt 0 ]]; do
         --filter-mask-total-bed)
             FILTER_MASK_TOTAL_BED="$2"
             shift 2
+            ;;
+        --no-nan-windows|--non-nan-windows)
+            NO_NAN_WINDOWS=true
+            shift
+            ;;
+        --keep-nan-windows)
+            NO_NAN_WINDOWS=false
+            shift
             ;;
         --file-prefix)
             FILE_PREFIX="$2"
@@ -749,6 +762,7 @@ fi
 
 # Output separator
 log "Output separator: $OUTPUT_SEPARATOR (.$OUTPUT_EXTENSION)"
+log "Omit all-NA windows: $NO_NAN_WINDOWS"
 if [[ "$OVERWRITE_OUTPUT" == true ]]; then
     log_warn "Overwriting enabled: existing outputs may be replaced"
 else
@@ -890,6 +904,10 @@ for i in "${!SAMPLE_BAMS[@]}"; do
             GRENEDALF_CMD+=(--filter-mask-total-fasta "$FILTER_MASK_TOTAL_FASTA")
         elif [[ -n "$FILTER_MASK_TOTAL_BED" ]]; then
             GRENEDALF_CMD+=(--filter-mask-total-bed "$FILTER_MASK_TOTAL_BED")
+        fi
+
+        if [[ "$NO_NAN_WINDOWS" == true ]]; then
+            GRENEDALF_CMD+=(--no-nan-windows)
         fi
         
         # Add file prefix if provided (goes before "diversity" base name)
