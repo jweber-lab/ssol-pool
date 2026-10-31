@@ -40,7 +40,7 @@ PARALLEL_WINDOWS=false  # Run multiple window/step combinations in parallel
 PARALLEL_MAX_JOBS=0     # Maximum concurrent window jobs (0 = number of CPU cores)
 OUTPUT_SEPARATOR="comma"  # Output separator for grenedalf (comma -> .csv, tab -> .tsv)
 OVERWRITE_OUTPUT=false  # Allow grenedalf to overwrite existing output files
-NO_NAN_WINDOWS=true     # Pass --no-nan-windows to grenedalf (skip all-NA windows)
+NO_NAN_WINDOWS=true     # Drop all-NA windows from the diversity table (grenedalf diversity has no --no-nan-windows)
 
 # Colors for output
 RED='\033[0;31m'
@@ -87,10 +87,10 @@ Optional options:
   --filter-mask-total-fasta FILE  Grenedalf mask FASTA (vcftools-style; optional; exclude repeats from windows)
   --filter-mask-total-bed FILE    RepeatMasker BED (or other) for grenedalf to skip masked intervals (optional).
                               Rewritten into .fai order; chromosomes with no interval get a 1-bp pad.
-  --no-nan-windows            Do not write windows where every value is NA (default: on).
-                              Same flag as calculate_fst.sh; with a reference plus mask this drops
-                              fully masked / empty windows instead of emitting nan rows.
-  --keep-nan-windows          Write all-NA windows (turns off --no-nan-windows)
+  --no-nan-windows            Drop windows where theta pi, theta Watterson, and Tajima's D
+                              are all NA (default: on). Applied to the output table: grenedalf
+                              diversity does not accept this flag (it is fst-only).
+  --keep-nan-windows          Keep all-NA windows (turns off --no-nan-windows)
   --file-prefix PREFIX        Optional prefix for output files (default: no prefix)
   --separator-char SEP        Output separator: comma, tab, space, semicolon (default: comma)
   --overwrite-output          Allow overwriting existing output files (default: false)
@@ -278,6 +278,50 @@ add_sample_column() {
     ' "$output_file" > "$temp_file" && mv "$temp_file" "$output_file"
     
     return $?
+}
+
+# grenedalf diversity has no --no-nan-windows (that flag is fst-only). Drop rows whose
+# theta_pi, theta_watterson, and Tajima's D are all missing. A window with pi/theta
+# present and only Tajima's D missing is kept. Prints the number of rows removed.
+drop_all_na_windows() {
+    local output_file="$1"
+    local separator="$2"
+    local sep_char=","
+    if [[ "$separator" == "tab" ]]; then
+        sep_char=$'\t'
+    elif [[ "$separator" == "semicolon" ]]; then
+        sep_char=";"
+    elif [[ "$separator" == "space" ]]; then
+        sep_char=" "
+    fi
+    local temp_file count_file n_drop
+    temp_file="${output_file}.tmp"
+    count_file=$(mktemp)
+    awk -v OFS="$sep_char" -v FS="$sep_char" -v count_file="$count_file" '
+        function is_na(v) {
+            return v == "" || tolower(v) == "nan" || v == "NA" || v == "na" || v == "."
+        }
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                h = tolower($i)
+                if (h ~ /(theta_pi|theta_watterson|tajimas?_d)$/) stat[++nstat] = i
+            }
+            print
+            next
+        }
+        {
+            if (nstat == 0) { print; next }
+            all_na = 1
+            for (j = 1; j <= nstat; j++) if (!is_na($(stat[j]))) all_na = 0
+            if (all_na) dropped++
+            else print
+        }
+        END { print dropped + 0 > count_file; close(count_file) }
+    ' "$output_file" > "$temp_file" && mv "$temp_file" "$output_file"
+    n_drop=$(cat "$count_file")
+    rm -f "$count_file"
+    echo "${n_drop:-0}"
+    return 0
 }
 
 # Function to resolve path relative to CSV file location
@@ -906,10 +950,6 @@ for i in "${!SAMPLE_BAMS[@]}"; do
             GRENEDALF_CMD+=(--filter-mask-total-bed "$FILTER_MASK_TOTAL_BED")
         fi
 
-        if [[ "$NO_NAN_WINDOWS" == true ]]; then
-            GRENEDALF_CMD+=(--no-nan-windows)
-        fi
-        
         # Add file prefix if provided (goes before "diversity" base name)
         if [[ -n "$FILE_PREFIX" ]]; then
             GRENEDALF_CMD+=(--file-prefix "$FILE_PREFIX")
@@ -947,6 +987,12 @@ for i in "${!SAMPLE_BAMS[@]}"; do
                 if [[ -n "$output_file" ]] && [[ -f "$output_file" ]]; then
                     log "  Diversity calculation complete for window=$window_size, step=$step_size"
                     log "    Output: $output_file"
+                    if [[ "$NO_NAN_WINDOWS" == true ]]; then
+                        n_drop=$(drop_all_na_windows "$output_file" "$OUTPUT_SEPARATOR")
+                        if [[ "${n_drop:-0}" -gt 0 ]]; then
+                            log "  Dropped $n_drop all-NA window(s)"
+                        fi
+                    fi
                     
                     # Add sample, window_size, and step_size columns to output file if not already present
                     if ! head -1 "$output_file" | grep -q "^sample"; then
@@ -1018,6 +1064,12 @@ if [[ "$PARALLEL_WINDOWS" == true ]] && [[ "$DRY_RUN" == false ]]; then
             
             if [[ -n "$output_file" ]] && [[ -f "$output_file" ]]; then
                 log "  Verified output for $sample_name (window=$window_size, step=$step_size): $output_file"
+                if [[ "$NO_NAN_WINDOWS" == true ]]; then
+                    n_drop=$(drop_all_na_windows "$output_file" "$OUTPUT_SEPARATOR")
+                    if [[ "${n_drop:-0}" -gt 0 ]]; then
+                        log "  Dropped $n_drop all-NA window(s)"
+                    fi
+                fi
                 
                 # Add sample, window_size, and step_size columns if not already present
                 if ! head -1 "$output_file" | grep -q "^sample"; then

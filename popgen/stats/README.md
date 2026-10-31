@@ -70,7 +70,7 @@ Grenedalf expects the BED mask in **reference (`.fai`) order**. `calculate_pi_th
 
 Every windowed table must use the same `(chr, start, end)` so collate's exact joins line up. All scripts use grenedalf's interval grid: start = 1 + k·step, with the last window being the first whose end reaches the chromosome end (the end is not clipped).
 
-- **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Chromosomes with no data at all are omitted. Fully masked or empty windows are dropped by default (`--no-nan-windows` in `calculate_pi_theta.sh` and `calculate_fst.sh`); `--keep-nan-windows` writes them as `nan`.
+- **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Chromosomes with no data at all are omitted. Fully masked or empty windows are dropped by default. FST passes grenedalf `--no-nan-windows`. Diversity does not: that flag is fst-only, so `calculate_pi_theta.sh` removes rows whose pi, theta, and Tajima's D are all NA after grenedalf writes the table. `--keep-nan-windows` keeps those rows.
 - **PBE** keeps FST's `start` / `end`. Older PBE files with only `pos` get `end = start + window - 1` in collate.
 - **`seq_qual_metrics.sh`** builds the same grid from the `.fai` and fails if BAM lengths differ from it.
 - **`variant_csq_windows.sh`** builds the same grid from `--reference` and `-w` / `--step-size`, and by default omits windows with no sites (`--no-nan-windows`). Pass **`--template-dir`** (diversity or FST output) so the rows are exactly the masked-stat windows. **`--filter-mask-total-bed`** is the same mask as diversity/FST; sites inside it are not counted.
@@ -196,7 +196,7 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
 - `--reference-genome FILE`: Reference FASTA (required with grenedalf); fixes the window grid across samples (see [Window boundaries](#window-boundaries))
 - `--filter-mask-total-bed FILE`: Exclude intervals in BED from windowed diversity (`mask.bed` from `build_mask.sh`, or a RepeatMasker `*.out.bed`)
 - `--filter-mask-total-fasta FILE`: Alternative grenedalf mask FASTA (use one of BED or FASTA)
-- `--no-nan-windows`: Omit windows where every value is NA (default: on). `--keep-nan-windows` writes those rows.
+- `--no-nan-windows`: Drop windows where pi, theta, and Tajima's D are all NA (default: on). Filtered in this script; `grenedalf diversity` does not accept the flag. `--keep-nan-windows` keeps those rows.
 - `-t, --threads N`: Number of threads (default: 1)
 - `--dry-run`: Preview commands without executing (dry-run mode)
 
