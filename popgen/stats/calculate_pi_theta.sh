@@ -87,7 +87,10 @@ Optional options:
                               shared by all samples, FST, seq_qual and variant feature windows
   --filter-mask-total-fasta FILE  Grenedalf mask FASTA (vcftools-style; optional; exclude repeats from windows)
   --filter-mask-total-bed FILE    RepeatMasker BED (or other) for grenedalf to skip masked intervals (optional).
-                              Rewritten into .fai order; chromosomes with no interval get a 1-bp pad.
+                              Rewritten into reference FASTA order; chromosomes with no interval get a 1-bp pad.
+                              Chromosomes with no mapped reads in a sample are then dropped from that
+                              sample's mask. Grenedalf would otherwise append them after the BAM in
+                              hash order and abort with Invalid sorting order.
   --no-nan-windows            Drop windows where theta pi, theta Watterson, and Tajima's D
                               are all NA (default: on). Applied to the output table: grenedalf
                               diversity does not accept this flag (it is fst-only).
@@ -850,6 +853,41 @@ log_verbose_orders() {
     cat "$report"
     return 0
 }
+
+# A BED mask makes grenedalf walk chromosomes that have reads in BAM order, then append
+# every other mask chromosome in unordered_map order. That append is the scaffold_171:808
+# to scaffold_170:1 abort. Keep only chromosomes idxstats says have mapped reads, in the
+# mask's existing order, so nothing is left to append.
+mask_bed_for_bam() {
+    local bam="$1" mask="$2" out="$3"
+    local counts n_keep n_mask n_drop dropped
+    if [[ ! -f "${bam}.bai" && ! -f "${bam%.bam}.bai" ]]; then
+        log_error "Indexed BAM required so zero-read chromosomes can be dropped from the mask: $bam"
+        log_error "Index it with: samtools index $bam"
+        return 1
+    fi
+    counts=$(mktemp)
+    if ! samtools idxstats "$bam" | awk -F'\t' '$1 != "*" && ($3 + 0) > 0 { print $1 }' > "$counts"; then
+        rm -f "$counts"
+        log_error "samtools idxstats failed for $bam"
+        return 1
+    fi
+    awk -F'\t' 'NR == FNR { keep[$1] = 1; next } ($1 in keep) { print }' "$counts" "$mask" > "$out"
+    n_keep=$(wc -l < "$counts" | tr -d ' ')
+    n_mask=$(awk -F'\t' 'NF >= 3 && !seen[$1]++ { n++ } END { print n + 0 }' "$mask")
+    n_drop=$((n_mask - $(awk -F'\t' 'NF >= 3 && !seen[$1]++ { n++ } END { print n + 0 }' "$out")))
+    dropped=$(awk -F'\t' 'NR == FNR { keep[$1] = 1; next } NF >= 3 && !($1 in keep) && !seen[$1]++ { print $1 }' "$counts" "$mask")
+    rm -f "$counts"
+    log "Mask for $(basename "$bam"): ${n_keep} chromosome(s) with reads, ${n_drop} with none omitted"
+    if [[ -n "$dropped" ]]; then
+        log "  Omitted: $(echo "$dropped" | paste -sd, -)"
+    fi
+    if [[ "$n_keep" -eq 0 ]]; then
+        log_error "No mapped reads in $bam"
+        return 1
+    fi
+    return 0
+}
 if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -z "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
     padded_mask="${OUTPUT_DIR}/.mask_all_chromosomes.bed"
     log "Rewriting mask into reference FASTA order for grenedalf..."
@@ -1122,6 +1160,17 @@ for i in "${!SAMPLE_BAMS[@]}"; do
         sample_name="${sample_name%_All_seq.dedup}"  # Remove _All_seq.dedup suffix if present
         sample_name="${sample_name%.dedup}"  # Remove .dedup if still present
     fi
+
+    # Per-sample mask: drop chromosomes this BAM does not cover. See mask_bed_for_bam.
+    sample_mask="$FILTER_MASK_TOTAL_BED"
+    if [[ -n "$FILTER_MASK_TOTAL_BED" && -z "$FILTER_MASK_TOTAL_FASTA" ]]; then
+        sample_mask="${OUTPUT_DIR}/.mask_${sample_name}.bed"
+        if [[ "$DRY_RUN" == true && ! -f "$bam_file" ]]; then
+            log_dry_run "Would drop zero-read chromosomes from the mask for $sample_name"
+        elif ! mask_bed_for_bam "$bam_file" "$FILTER_MASK_TOTAL_BED" "$sample_mask"; then
+            exit 1
+        fi
+    fi
     
     # Process each window/step combination for this sample
     for scale_idx in "${!WINDOW_SIZE_ARRAY[@]}"; do
@@ -1217,8 +1266,8 @@ for i in "${!SAMPLE_BAMS[@]}"; do
 
         if [[ -n "$FILTER_MASK_TOTAL_FASTA" ]]; then
             GRENEDALF_CMD+=(--filter-mask-total-fasta "$FILTER_MASK_TOTAL_FASTA")
-        elif [[ -n "$FILTER_MASK_TOTAL_BED" ]]; then
-            GRENEDALF_CMD+=(--filter-mask-total-bed "$FILTER_MASK_TOTAL_BED")
+        elif [[ -n "$sample_mask" ]]; then
+            GRENEDALF_CMD+=(--filter-mask-total-bed "$sample_mask")
         fi
 
         # Add file prefix if provided (goes before "diversity" base name)
