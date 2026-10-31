@@ -41,6 +41,7 @@ PARALLEL_MAX_JOBS=0     # Maximum concurrent window jobs (0 = number of CPU core
 OUTPUT_SEPARATOR="comma"  # Output separator for grenedalf (comma -> .csv, tab -> .tsv)
 OVERWRITE_OUTPUT=false  # Allow grenedalf to overwrite existing output files
 NO_NAN_WINDOWS=true     # Drop all-NA windows from the diversity table (grenedalf diversity has no --no-nan-windows)
+VERBOSE=false           # Log reference, BAM @SQ, and mask chromosome orders; pass --verbose to grenedalf
 
 # Colors for output
 RED='\033[0;31m'
@@ -98,6 +99,10 @@ Optional options:
   --parallel-windows          Run multiple window/step combinations in parallel (default: false)
   --parallel-max-jobs N       Maximum concurrent window jobs when using --parallel-windows (default: number of CPU cores)
   --dry-run                   Preview commands without executing (dry-run mode)
+  --verbose                   Log the chromosome orders grenedalf compares, and pass --verbose
+                              to grenedalf. Writes {output-dir}/log/verbose/:
+                              reference FASTA order, each BAM @HD/@SQ header (with idxstats
+                              counts when the BAM is indexed), and mask chromosome order.
   -h, --help                  Show this help message
 
 Examples:
@@ -470,6 +475,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -702,6 +711,145 @@ check_bams_match_reference() {
     log "BAM chromosome order matches the reference"
     return 0
 }
+
+# Write the orders grenedalf compares: reference FASTA (the sequence dictionary the
+# sort check uses), each BAM @SQ header, and the mask chromosomes in file order.
+# With a BED mask, grenedalf 0.6.3 then walks chromosomes in unordered_map order, not
+# this file order, and rejects a step that goes backwards in the FASTA dictionary.
+log_verbose_orders() {
+    [[ "$VERBOSE" == true ]] || return 0
+    local ref="$1"
+    shift
+    local vdir report ref_nl nref
+    vdir="${OUTPUT_DIR}/log/verbose"
+    report="${vdir}/chromosome_orders.txt"
+    mkdir -p "$vdir"
+    if [[ ! -f "$ref" ]]; then
+        log_warn "Verbose: reference not found, skipping chromosome-order report: $ref"
+        return 0
+    fi
+    ref_nl=$(mktemp)
+    reference_chromosomes "$ref" "$ref_nl"
+    awk 'BEGIN { OFS = "\t"; print "index", "name", "length" } { print NR, $1, $2 }' \
+        "$ref_nl" > "${vdir}/reference_order.tsv"
+    nref=$(wc -l < "$ref_nl" | tr -d ' ')
+    {
+        echo "Reference FASTA: $ref"
+        echo "Sequences: $nref"
+        echo "This is the dictionary grenedalf's sort check uses with --reference-genome-fasta."
+        echo "index	name	length"
+        awk '{ print NR "\t" $1 "\t" $2 }' "$ref_nl"
+        echo
+    } > "$report"
+
+    if ! check_command samtools; then
+        echo "samtools not found; BAM @SQ headers were not read." >> "$report"
+    else
+        local i=0 bam base hdr sq
+        for bam in "$@"; do
+            [[ -f "$bam" ]] || { echo "BAM not found: $bam" >> "$report"; continue; }
+            i=$((i + 1))
+            base=$(basename "$bam" .bam)
+            hdr="${vdir}/bam_${i}_${base}.header.txt"
+            sq="${vdir}/bam_${i}_${base}.sq.tsv"
+            samtools view -H "$bam" > "$hdr"
+            {
+                echo "BAM: $bam"
+                awk -F'\t' '/^@HD/ { print; exit }' "$hdr"
+            } >> "$report"
+            awk -F'\t' -v OFS='\t' '
+                NR == FNR { ord[$1] = NR; rlen[$1] = $2; next }
+                /^@SQ/ {
+                    sn = ""; ln = ""
+                    for (i = 1; i <= NF; i++) {
+                        if ($i ~ /^SN:/) sn = substr($i, 4)
+                        if ($i ~ /^LN:/) ln = substr($i, 4)
+                    }
+                    k++
+                    ridx = (sn in ord) ? ord[sn] : "NA"
+                    rl = (sn in rlen) ? rlen[sn] : ""
+                    print k, sn, ln, ridx, rl
+                }
+            ' "$ref_nl" "$hdr" > "$sq"
+            echo "sq_index	name	bam_length	ref_index	ref_length" >> "$report"
+            cat "$sq" >> "$report"
+            awk -F'\t' '
+                {
+                    if ($4 == "NA") {
+                        printf "  not in reference: %s\n", $2
+                        next
+                    }
+                    if ($5 != "" && $3 != $5) printf "  length differs: %s BAM %s reference %s\n", $2, $3, $5
+                    if (prev_set && $4 + 0 < prev) printf "  header goes backwards: %s (ref %d) then %s (ref %s)\n", prev_name, prev, $2, $4
+                    prev = $4 + 0
+                    prev_name = $2
+                    prev_set = 1
+                }
+            ' "$sq" >> "$report"
+            if [[ -f "${bam}.bai" ]] || [[ -f "${bam%.bam}.bai" ]]; then
+                echo "idxstats (name	mapped	unmapped), header order:" >> "$report"
+                if ! samtools idxstats "$bam" | awk -F'\t' 'BEGIN { OFS = "\t" } $1 != "*" { print $1, $3, $4 }' \
+                    >> "$report"; then
+                    echo "idxstats failed for $bam" >> "$report"
+                fi
+            else
+                echo "No BAM index; mapped-read counts were not read." >> "$report"
+            fi
+            echo >> "$report"
+        done
+    fi
+
+    if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -f "$FILTER_MASK_TOTAL_BED" ]]; then
+        local mask_tsv="${vdir}/mask_bed_order.tsv"
+        echo "Mask BED: $FILTER_MASK_TOTAL_BED" >> "$report"
+        echo "Chromosomes in file order. Grenedalf 0.6.3 does not walk a BED mask in this order: the gapless stream iterates an unordered_map of chromosome names, then the sort check requires each step to follow the reference FASTA above. A file ordered like the FASTA can still be walked from scaffold_171 to scaffold_170." >> "$report"
+        echo "file_index	name	ref_index	first_start	first_end	n_intervals" >> "$report"
+        awk -F'\t' -v OFS='\t' '
+            NR == FNR { ord[$1] = NR; next }
+            /^(#|track|browser)/ || NF < 3 { next }
+            {
+                if (!($1 in seen)) {
+                    seen[$1] = 1
+                    order[++n] = $1
+                    start[$1] = $2
+                    end[$1] = $3
+                }
+                nint[$1]++
+            }
+            END {
+                for (i = 1; i <= n; i++) {
+                    c = order[i]
+                    ridx = (c in ord) ? ord[c] : "NA"
+                    print i, c, ridx, start[c], end[c], nint[c]
+                }
+            }
+        ' "$ref_nl" "$FILTER_MASK_TOTAL_BED" > "$mask_tsv"
+        cat "$mask_tsv" >> "$report"
+        awk -F'\t' '
+            $3 != "NA" {
+                if (prev_set && $3 + 0 < prev) printf "  file order goes backwards: %s (ref %d) then %s (ref %s)\n", prev_name, prev, $2, $3
+                prev = $3 + 0
+                prev_name = $2
+                prev_set = 1
+            }
+        ' "$mask_tsv" >> "$report"
+        echo >> "$report"
+    elif [[ -n "$FILTER_MASK_TOTAL_FASTA" ]] && [[ -f "$FILTER_MASK_TOTAL_FASTA" ]]; then
+        echo "Mask FASTA: $FILTER_MASK_TOTAL_FASTA" >> "$report"
+        echo "Header order. Grenedalf stores mask chromosomes in an unordered_map, so this header order is not the gapless walk order." >> "$report"
+        awk '/^>/ { print ++n "\t" substr($1, 2) }' "$FILTER_MASK_TOTAL_FASTA" \
+            | tee "${vdir}/mask_fasta_order.tsv" >> "$report"
+        echo >> "$report"
+    else
+        echo "No mask file." >> "$report"
+    fi
+
+    rm -f "$ref_nl"
+    log "Verbose: chromosome orders written to $report"
+    log "Verbose: grenedalf --verbose will also list the reference dictionary it checks"
+    cat "$report"
+    return 0
+}
 if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -z "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
     padded_mask="${OUTPUT_DIR}/.mask_all_chromosomes.bed"
     log "Rewriting mask into reference FASTA order for grenedalf..."
@@ -917,6 +1065,9 @@ else
     exit 1
 fi
 
+if [[ "$VERBOSE" == true ]]; then
+    log_verbose_orders "$REFERENCE_GENOME" "${SAMPLE_BAMS[@]}"
+fi
 if [[ "$DRY_RUN" == false ]]; then
     if ! check_bams_match_reference "$REFERENCE_GENOME" "${SAMPLE_BAMS[@]}"; then
         log_error "BAM chromosome order does not match the reference (see the message above)"
@@ -1073,6 +1224,10 @@ for i in "${!SAMPLE_BAMS[@]}"; do
         # Add file prefix if provided (goes before "diversity" base name)
         if [[ -n "$FILE_PREFIX" ]]; then
             GRENEDALF_CMD+=(--file-prefix "$FILE_PREFIX")
+        fi
+        # Grenedalf prints the reference sequence dictionary only at message level 2.
+        if [[ "$VERBOSE" == true ]]; then
+            GRENEDALF_CMD+=(--verbose)
         fi
         
         # Run grenedalf (in parallel or sequential)
