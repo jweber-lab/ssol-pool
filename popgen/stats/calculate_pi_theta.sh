@@ -543,24 +543,68 @@ else
     log_dry_run "Would create log file: $LOG_FILE"
 fi
 
-# Grenedalf requires a BED mask in reference (.fai) dictionary order. 0.6.3 also
-# segfaults on a chromosome with no interval, so those get a 1-bp pad on the last base.
-# Missing chromosomes used to be appended, which made later scaffolds appear before
-# earlier ones (e.g. scaffold_171 then scaffold_170) and aborted with "Invalid sorting order".
+# Chromosome name and length in FASTA header order, which is the sequence dictionary
+# grenedalf uses with --reference-genome-fasta. Lengths come from the .fai. A .fai whose
+# line order differs is reported; the FASTA order is still what is written.
+reference_chromosomes() {
+    local ref="$1" out="$2"
+    local fai="${ref}.fai"
+    local warn="${out}.warn"
+    : > "$warn"
+    if [[ ! -f "$fai" ]]; then
+        awk '/^>/ { if (n != "") print n "\t" l; n = substr($1, 2); l = 0; next } { l += length($0) } END { if (n != "") print n "\t" l }' "$ref" > "$out"
+        rm -f "$warn"
+        return 0
+    fi
+    awk -v fai="$fai" -v warn="$warn" '
+        BEGIN {
+            while ((getline line < fai) > 0) {
+                split(line, a, "\t")
+                if (a[1] == "") continue
+                len[a[1]] = a[2] + 0
+                fai_name[++nfai] = a[1]
+            }
+            close(fai)
+        }
+        /^>/ {
+            name = substr($1, 2)
+            if (!(name in len)) {
+                printf "FASTA sequence %s has no length in %s\n", name, fai > "/dev/stderr"
+                exit 2
+            }
+            fasta_name[++nfasta] = name
+            print name "\t" len[name]
+        }
+        END {
+            if (nfai != nfasta) {
+                printf ".fai has %d sequence(s) and the FASTA has %d; mask and BAM checks follow the FASTA\n", nfai, nfasta > warn
+            } else {
+                for (i = 1; i <= nfasta; i++) if (fai_name[i] != fasta_name[i]) {
+                    printf ".fai order differs from the FASTA at %s vs %s. Using FASTA order, which is what grenedalf reads.\n", fai_name[i], fasta_name[i] > warn
+                    break
+                }
+            }
+        }' "$ref" > "$out"
+    if [[ -s "$warn" ]]; then
+        log_warn "$(cat "$warn")"
+    fi
+    rm -f "$warn"
+}
+
+# Grenedalf requires a BED mask in reference FASTA order. 0.6.3 also segfaults on a
+# chromosome with no interval, so those get a 1-bp pad on the last base. Missing
+# chromosomes used to be appended, which made later scaffolds appear before earlier
+# ones and aborted with "Invalid sorting order". The written BED is checked against
+# FASTA order before grenedalf sees it.
 # Do this before stdout is teed: a failure after exec >(tee) can kill tee before the
 # error reaches the terminal. Count pads in the END loop (mawk 1.3.3 rejects length(array)).
 pad_mask_bed() {
     local bed="$1" ref="$2" out="$3"
-    local fai="${ref}.fai"
-    local fai_tmp=""
-    local count_file
+    local order count_file
     PAD_MASK_N_PADDED=0
+    order=$(mktemp)
     count_file=$(mktemp)
-    if [[ ! -f "$fai" ]]; then
-        fai_tmp=$(mktemp)
-        awk '/^>/ { if (n != "") print n "\t" l; n = substr($1, 2); l = 0; next } { l += length($0) } END { if (n != "") print n "\t" l }' "$ref" > "$fai_tmp"
-        fai="$fai_tmp"
-    fi
+    reference_chromosomes "$ref" "$order"
     awk -F'\t' -v OFS='\t' -v count_file="$count_file" '
         NR == FNR { ord[$1] = NR; clen[$1] = $2 + 0; name[NR] = $1; n = NR; next }
         /^(#|track|browser)/ || NF < 3 { next }
@@ -579,19 +623,88 @@ pad_mask_bed() {
                 }
             print n_pad + 0 > count_file
             close(count_file)
-        }' "$fai" "$bed" \
+        }' "$order" "$bed" \
     | sort -t$'\t' -k1,1n -k3,3n -k4,4n \
     | cut -f2-4 > "$out"
     PAD_MASK_N_PADDED=$(cat "$count_file")
     rm -f "$count_file"
-    if [[ -n "$fai_tmp" ]]; then
-        rm -f "$fai_tmp"
+    if ! awk -F'\t' '
+        NR == FNR { ord[$1] = NR; next }
+        {
+            if (!($1 in ord)) {
+                printf "Mask chromosome %s is not in the reference\n", $1 > "/dev/stderr"
+                bad = 1
+                next
+            }
+            if (prev_set && ord[$1] < prev) {
+                printf "Mask chromosome order goes from %s to %s, but %s comes first in the reference FASTA\n", prev_name, $1, $1 > "/dev/stderr"
+                bad = 1
+                next
+            }
+            prev = ord[$1]
+            prev_name = $1
+            prev_set = 1
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$order" "$out"; then
+        rm -f "$order"
+        return 1
     fi
+    rm -f "$order"
+    return 0
+}
+
+# Grenedalf walks each BAM in its @SQ order and requires that to follow the reference
+# FASTA. A header that lists scaffold_171 before scaffold_170 aborts with
+# "Invalid sorting order ... scaffold_171:808 to scaffold_170:1" when the FASTA has
+# scaffold_170 first. The mask rewrite does not catch this.
+check_bams_match_reference() {
+    local ref="$1"
+    shift
+    local order bam sn_file
+    if ! check_command samtools; then
+        log_warn "samtools not found; not checking that BAM chromosome order matches the reference"
+        return 0
+    fi
+    order=$(mktemp)
+    reference_chromosomes "$ref" "$order"
+    for bam in "$@"; do
+        [[ -f "$bam" ]] || continue
+        sn_file=$(mktemp)
+        samtools view -H "$bam" | awk -F'\t' '/^@SQ/ {
+            for (i = 1; i <= NF; i++) if ($i ~ /^SN:/) { print substr($i, 4); break }
+        }' > "$sn_file"
+        if ! awk -F'\t' -v bam="$bam" '
+            NR == FNR { ord[$1] = NR; next }
+            {
+                if (!($1 in ord)) {
+                    printf "BAM %s has chromosome %s, which is not in the reference\n", bam, $1 > "/dev/stderr"
+                    bad = 1
+                    next
+                }
+                if (prev_set && ord[$1] < prev) {
+                    printf "BAM %s is not in reference chromosome order: header goes from %s to %s, but %s comes first in the reference FASTA. Grenedalf reads the BAM in header order and aborts with Invalid sorting order. Reorder the BAM to the reference sequence dictionary (samtools reheader, then samtools sort).\n", bam, prev_name, $1, $1 > "/dev/stderr"
+                    bad = 1
+                    next
+                }
+                prev = ord[$1]
+                prev_name = $1
+                prev_set = 1
+            }
+            END { exit bad ? 1 : 0 }
+        ' "$order" "$sn_file"; then
+            rm -f "$sn_file" "$order"
+            return 1
+        fi
+        rm -f "$sn_file"
+    done
+    rm -f "$order"
+    log "BAM chromosome order matches the reference"
     return 0
 }
 if [[ -n "$FILTER_MASK_TOTAL_BED" ]] && [[ -z "$FILTER_MASK_TOTAL_FASTA" ]] && [[ "$DRY_RUN" == false ]]; then
     padded_mask="${OUTPUT_DIR}/.mask_all_chromosomes.bed"
-    log "Rewriting mask into reference (.fai) order for grenedalf..."
+    log "Rewriting mask into reference FASTA order for grenedalf..."
     if ! pad_mask_bed "$FILTER_MASK_TOTAL_BED" "$REFERENCE_GENOME" "$padded_mask"; then
         log_error "Failed to rewrite mask into reference order (see awk/sort errors above)"
         exit 1
@@ -802,6 +915,13 @@ else
     log_error "Must provide either BAM file(s) with --bam or sample info CSV with --sample-info"
     usage
     exit 1
+fi
+
+if [[ "$DRY_RUN" == false ]]; then
+    if ! check_bams_match_reference "$REFERENCE_GENOME" "${SAMPLE_BAMS[@]}"; then
+        log_error "BAM chromosome order does not match the reference (see the message above)"
+        exit 1
+    fi
 fi
 
 # Output separator
