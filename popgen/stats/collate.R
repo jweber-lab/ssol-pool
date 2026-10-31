@@ -21,9 +21,10 @@
 #     seq_qual_metrics_w{W}_s{S}.tsv is preferred; otherwise a finer step for the same window is
 #     kept on the analysis grid when S is a multiple of the source step (e.g. s250 -> s500).
 #     optional n_sites / n_sites_snp / n_sites_indel / n_csq_* / n_region_* / n_effect_* counts and
-#     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set
-#     (the same window columns are joined into fst_w*.h5 and pbe_w*.h5; variant_features_wW_sS.tsv
-#     uses the same exact-then-finer-step lookup as seq_qual)
+#     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set.
+#     Those window columns are also joined into fst_w*.h5 and pbe_w*.h5, and not into
+#     fst_single / pbe_single / single_position. variant_features_wW_sS.tsv uses the same
+#     exact-then-finer-step lookup as seq_qual.
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
 #   fst_w{W}_s{S}.h5  (or fst_single.h5)
@@ -39,13 +40,16 @@
 #   variants.h5  Group /sites: one row per site from --variant-tsv-dir (snp_sites.tsv and
 #     indel_sites.tsv): chr, pos, start, end, ref, alt, variant_type (snp/indel), dp, alt_freq,
 #     indel_len, <sample>_AD, <sample>_alt_freq, plus bcsq, csq_consequences, region_category,
-#     coding_effect, genes, genes_protein_altering from variants_csq.tsv (--variant-csq or the
-#     same directory), joined on chr, pos, ref, alt
+#     coding_effect, genes, genes_protein_altering from a site csq TSV (--variant-csq, or a
+#     *csq*.tsv in the same directory; *_long.tsv ignored), joined on chr, pos, ref, alt.
+#     These columns are not added to window HDF5.
 #   single_position.h5  (when --single-position-merged; replaces fst_single, pbe_single and
-#     variants.h5) One group /sites: the variants.h5 table plus FST/PBE in wide form on SNP rows:
+#     variants.h5; window HDF5 are unchanged) One group /sites: the variants.h5 table plus
+#     FST/PBE in wide form on SNP rows:
 #     Sample1:Sample2.fst, Sample1:Sample2.fst_rank, Sample1:Sample2.fst_quantile;
 #     Sample1:Sample2:Sample3.pbe, .pbe_rank, .pbe_quantile. Indel rows have no FST/PBE.
-#     single_position_summary.tsv summarizes all numeric columns.
+#     Window feature counts are not in this file. single_position_summary.tsv summarizes
+#     all numeric columns.
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -909,7 +913,7 @@ VF_GENE_COLS <- c("genes", "genes_protein_altering")
 
 # *_long.tsv (variant_csq.sh --output-long-tsv) has one row per BCSQ record, not per site
 find_variant_tsv <- function(variant_dir) {
-  f <- list.files(variant_dir, pattern = ".*(variant|sites|calls).*\\.(tsv|csv)$", full.names = TRUE, ignore.case = TRUE)
+  f <- list.files(variant_dir, pattern = ".*(variant|sites|calls|csq).*\\.(tsv|csv)$", full.names = TRUE, ignore.case = TRUE)
   f[!grepl("_long\\.(tsv|csv)$", basename(f), ignore.case = TRUE)]
 }
 
@@ -1164,11 +1168,11 @@ option_list <- list(
   make_option(c("--fst-dir"), type = "character", default = NULL, help = "Directory containing FST TSV/CSV"),
   make_option(c("--pbe-dir"), type = "character", default = NULL, help = "Directory containing PBE TSV/CSV"),
   make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV (exact wW_sS, or a finer same-window step when the analysis step is a multiple of the source step)"),
-  make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with site TSVs (snp_sites.tsv / indel_sites.tsv from snp_call.sh / indel_call.sh); variants_csq.tsv files here are joined as annotation"),
-  make_option(c("--variant-csq"), type = "character", default = NULL, help = "Optional: comma-separated variants_csq.tsv files or directories (variant_csq.sh output) to join onto the sites by chr, pos, ref, alt"),
-  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv from variant_csq_windows.R (exact scale, or a finer same-window step as for --seq-qual-dir)"),
+  make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with site TSVs (snp_sites.tsv / indel_sites.tsv); a *csq*.tsv here is joined as annotation, not stacked as sites"),
+  make_option(c("--variant-csq"), type = "character", default = NULL, help = "Optional: comma-separated site csq TSV(s) or directories (variant_csq.sh; names containing csq/variant/sites/calls, not *_long.tsv) joined onto sites by chr, pos, ref, alt. Not applied to window HDF5"),
+  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv; left-joined onto windowed diversity/FST/PBE only (not fst_single or single_position)"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
-  make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Merge per-locus FST, PBE, and variant TSV into single_position.h5"),
+  make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Replace fst_single.h5, pbe_single.h5, and variants.h5 with single_position.h5 (site csq plus per-locus FST/PBE on SNP rows). Window HDF5 are still written."),
   make_option(c("--no-summary"), action = "store_true", default = FALSE, help = "Do not write companion *_summary.tsv files"),
   make_option(c("--drop-all-na"), action = "store_true", default = FALSE, help = "Drop rows/sites where every statistic value (FST or PBE) is NA before ranking and collation"),
   make_option(c("--verbose"), action = "store_true", default = FALSE, help = "Verbose")

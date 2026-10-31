@@ -8,8 +8,9 @@
 # combined HDF5 plus *_summary.tsv to OUTPUT_DIR. Optional: --seq-qual-dir
 # for mean_coverage/mean_mapping_quality (exact wW_sS, or a finer same-window
 # step when the analysis step is a multiple of the source step),
-# --variant-tsv-dir (+ --variant-csq) for variants.h5, --variant-feature-dir
-# for variant_features_wW_sS.tsv joins (same scale fallback). Missing/empty FST or PBE dirs are skipped.
+# --variant-tsv-dir and --variant-csq are per site (variants.h5, or single_position.h5).
+# --variant-feature-dir is per window (diversity_w / fst_w / pbe_w only; not fst_single).
+# Missing/empty FST or PBE dirs are skipped.
 # For full output file list and variable naming (HDF5 groups, TSV columns),
 # see the header of collate.R.
 # Usage: See below or --help
@@ -46,28 +47,40 @@ Input (at least one required):
   --fst-dir DIR          Directory containing FST TSV/CSV (output of calculate_fst.sh)
   --pbe-dir DIR          Directory containing PBE TSV/CSV (output of calculate_pbe)
 
-Optional:
+Optional (windows; not applied to fst_single / pbe_single / variants.h5):
   --seq-qual-dir DIR     Directory with seq_qual_metrics TSV (from seq_qual_metrics.sh). Exact
                          w{W}_s{S} is preferred; otherwise a finer same-window step is kept on the
                          analysis grid when S is a multiple of the source step (e.g. s250 -> s500)
-  --variant-tsv-dir DIR  Directory with site TSVs (snp_sites.tsv, indel_sites.tsv from snp_call.sh / indel_call.sh)
-  --variant-csq PATH     variants_csq.tsv file or directory from variant_csq.sh (repeatable); consequence and
-                         gene columns are joined onto the sites by chr, pos, ref, alt
-  --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh);
-                         same exact-then-finer-step lookup as --seq-qual-dir
+  --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh).
+                         Left-joined on (chr, start, end) into diversity_w*, fst_w*, and pbe_w* only
+                         (same exact-then-finer-step lookup as --seq-qual-dir). Not used for per-locus
+                         FST/PBE or single_position.h5.
+
+Optional (sites; not applied to window HDF5):
+  --variant-tsv-dir DIR  Directory with site TSVs (snp_sites.tsv, indel_sites.tsv). A csq TSV in this
+                         directory is annotation, not an extra site row.
+  --variant-csq PATH     Site TSV from variant_csq.sh, or a directory of them (repeatable). Names
+                         containing variant, sites, calls, or csq are used (e.g. variants_csq.tsv,
+                         snps_csq.tsv); *_long.tsv is ignored. Columns are joined onto sites by
+                         chr, pos, ref, alt. With no site TSV, the csq table is the site table.
+  --single-position-merged  Do not write fst_single.h5, pbe_single.h5, or variants.h5. Write
+                         single_position.h5 instead: one row per site (or per FST position if there
+                         is no site table), with site csq columns and per-locus FST/PBE on SNP rows.
+                         Window HDF5 files are still written, including --variant-feature-dir columns.
+
+Other:
   --output-dir DIR       Output directory for HDF5 files [default: ./collated]
   --rscript PATH         Path to Rscript [default: Rscript]
-  --single-position-merged  Merge per-locus FST, PBE, and variant TSV into single_position.h5
   --no-summary           Do not write companion *_summary.tsv files
   --drop-all-na          Drop rows/sites where every statistic value (FST or PBE) is NA before ranking and collation
   --verbose              Verbose diagnostics (rank/quantile NA checks, distinct-value checks)
   --dry-run              Preview only
   -h, --help             Show this help
 
-Output naming: diversity_w{W}_s{S}.h5, fst_w{W}_s{S}.h5, fst_single.h5, pbe_w{W}_s{S}.h5, pbe_single.h5,
-  optional variants.h5. With --single-position-merged, fst_single/pbe_single/variants are replaced by
-  single_position.h5 (/sites: one row per SNP or indel, with FST/PBE columns on SNP rows).
-  Companion *_summary.tsv (unless --no-summary): mean, median, variance, skew, q01, q05, q95, q99, n.
+Output naming: diversity_w{W}_s{S}.h5, fst_w{W}_s{S}.h5, pbe_w{W}_s{S}.h5 (group /windows),
+  fst_single.h5, pbe_single.h5, variants.h5 (group /sites) unless --single-position-merged,
+  then single_position.h5. Companion *_summary.tsv (unless --no-summary): mean, median,
+  variance, skew, q01, q05, q95, q99, n.
 
 Example:
   $0 --diversity-dir pi_theta_out --fst-dir fst_out --pbe-dir pbe_out -o collated
