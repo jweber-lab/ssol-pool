@@ -74,7 +74,7 @@ Every windowed table must use the same `(chr, start, end)` so collate's exact jo
 
 - **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Grenedalf walks each BAM in its `@SQ` header order and requires that order to follow the reference FASTA. `calculate_pi_theta.sh` checks this before calling grenedalf. A header that lists `scaffold_171` before `scaffold_170` while the FASTA has the opposite aborts with `Invalid sorting order ... scaffold_171 to scaffold_170`. Reorder that BAM to the reference dictionary (`samtools reheader`, then `samtools sort`). With a BED mask, grenedalf then appends chromosomes that have no reads, in hash order rather than FASTA order, and that append is the same abort (`scaffold_171:808` to `scaffold_170:1` when both have zero reads). `calculate_pi_theta.sh` drops those chromosomes from that sample's mask. The resulting windows are absent rather than all-NA; the default all-NA filter would have removed them anyway. Chromosomes with no data at all are omitted. Fully masked or empty windows are dropped by default. FST passes grenedalf `--no-nan-windows`. Diversity does not: that flag is fst-only, so `calculate_pi_theta.sh` removes rows whose pi, theta, and Tajima's D are all NA after grenedalf writes the table. `--keep-nan-windows` keeps those rows.
 - **PBE** keeps FST's `start` / `end`. Older PBE files with only `pos` get `end = start + window - 1` in collate.
-- **QIBE** also keeps FST's `start` / `end`. Collate does not read QIBE tables.
+- **QIBE** keeps FST's `start` / `end`, the same way PBE does. Collate joins those rows on `(chr, start, end)`.
 - **`seq_qual_metrics.sh`** builds the same grid from the `.fai` and fails if BAM lengths differ from it.
 - **`variant_csq_windows.sh`** builds the same grid from `--reference` and `-w` / `--step-size`, and by default omits windows with no sites (`--no-nan-windows`). Pass **`--template-dir`** (diversity or FST output) so the rows are exactly the masked-stat windows. **`--filter-mask-total-bed`** is the same mask as diversity/FST; sites inside it are not counted.
 - **Collate** checks each table against the grid and against the first table at the same scale (on shared chromosomes). `Window check ... matches ...` means the same rows. `Window check ... share the grid` means both use start = 1 + k·step, but one table omits windows the other kept (diversity drops all-NA windows and chromosomes with no reads, per sample). Collate keeps each table's own rows and left-joins on `(chr, start, end)`. `WARNING window check` is only for windows off that grid. For `--seq-qual-dir` and `--variant-feature-dir`, an exact `w{W}_s{S}` table is used when present; otherwise collate keeps the analysis-grid windows from a finer same-window table when the analysis step is a multiple of the source step (e.g. `seq_qual_metrics_w1000_s250.tsv` supplies the 500 bp starts for diversity `w1000_s500`).
@@ -121,7 +121,7 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
   -w 1000 --step-size 500 --template-dir pi_out \
   --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
-./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --seq-qual-dir seq_qual_mask \
+./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --qibe-dir qibe_out --seq-qual-dir seq_qual_mask \
   --variant-tsv-dir sites --variant-csq csq_snps --variant-csq csq_indels \
   --variant-feature-dir variant_features -o collated
 ```
@@ -136,18 +136,18 @@ mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
 
 ### collate.sh / collate.R
 
-Collates diversity, FST, and PBE TSV/CSV into **HDF5** with `/windows` group(s). Computes integer rank (1..N) and 0–1 quantile per stat within (sample, window_size) for diversity, and within window for FST/PBE.
+Collates diversity, FST, PBE, and QIBE TSV/CSV into **HDF5** with `/windows` group(s). Computes integer rank (1..N) and 0–1 quantile per stat within (sample, window_size) for diversity, within window for FST, and within each trio or quartet file for PBE and QIBE.
 
-- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, `--variant-csq`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`).
-- **Scale matching**: diversity / FST / PBE are grouped by exact `w{W}_s{S}`. Seq-qual and variant-feature tables prefer that exact filename; if it is missing, collate uses a finer same-window table whose step divides the analysis step and keeps rows with `(start - 1) %% S == 0` (and `end - start + 1 == W`). So `seq_qual_metrics_w1000_s250.tsv` can fill `diversity_w1000_s500`. A different window width, or a step that is not a multiple of the source step, is not used.
-- **Output**: In `--output-dir`: `diversity_w{W}_s{S}.h5`, `fst_w{W}_s{S}.h5`, `pbe_w{W}_s{S}.h5` (group `/windows`) and, unless `--single-position-merged`, `fst_single.h5` / `pbe_single.h5` (group `/sites`). Columns are chr, start, end, sample or pairs (pop1, pop2, pop3 for PBE), stat values, and `*_rank`, `*_quantile`.
-- **Window consequences** (`--variant-feature-dir` only): matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` into **windowed** diversity, FST, and PBE, adding `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*`, and `genes` / `genes_protein_altering`. They are not added to `fst_single.h5`, `pbe_single.h5`, or `single_position.h5`. Build the feature tables with the same windows as the stats (`variant_csq_windows.sh --template-dir`, and `--no-nan-windows` on by default in diversity and FST); a left join still runs if a window is missing, and that row's counts are NA. Collate's window check names the mismatch.
+- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir`, `--qibe-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, `--variant-csq`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`). `--qibe-dir` is the `calculate_qibe.sh` output; collate reads `*_qibe.tsv` (not `*_qibs.tsv`).
+- **Scale matching**: diversity / FST / PBE / QIBE are grouped by exact `w{W}_s{S}`. Seq-qual and variant-feature tables prefer that exact filename; if it is missing, collate uses a finer same-window table whose step divides the analysis step and keeps rows with `(start - 1) %% S == 0` (and `end - start + 1 == W`). So `seq_qual_metrics_w1000_s250.tsv` can fill `diversity_w1000_s500`. A different window width, or a step that is not a multiple of the source step, is not used.
+- **Output**: In `--output-dir`: `diversity_w{W}_s{S}.h5`, `fst_w{W}_s{S}.h5`, `pbe_w{W}_s{S}.h5`, `qibe_w{W}_s{S}.h5` (group `/windows`) and, unless `--single-position-merged`, `fst_single.h5` / `pbe_single.h5` / `qibe_single.h5` (group `/sites`). Columns are chr, start, end, sample or pairs (pop1, pop2, pop3 for PBE; pop1–pop4 for QIBE), stat values, and `*_rank`, `*_quantile`.
+- **Window consequences** (`--variant-feature-dir` only): matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` into **windowed** diversity, FST, PBE, and QIBE, adding `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*`, and `genes` / `genes_protein_altering`. They are not added to `fst_single.h5`, `pbe_single.h5`, `qibe_single.h5`, or `single_position.h5`. Build the feature tables with the same windows as the stats (`variant_csq_windows.sh --template-dir`, and `--no-nan-windows` on by default in diversity and FST); a left join still runs if a window is missing, and that row's counts are NA. Collate's window check names the mismatch.
 - **Site consequences** (`variants.h5`, group `/sites`): `--variant-tsv-dir` and `--variant-csq` do not touch window HDF5. `--variant-tsv-dir` is a directory with `snp_sites.tsv` and/or `indel_sites.tsv` ([`snp_call.sh`](../variants/README.md#snp_callsh) / [`indel_call.sh`](../variants/README.md#indel_callsh)). Rows are stacked, one per site and ALT allele, with `variant_type` (`snp` or `indel`), `ref`, `alt`, `dp`, `alt_freq`, `indel_len` (indels) and per-pool `<sample>_AD` (`ref,alt`) and `<sample>_alt_freq`. `--variant-csq` (repeatable in `collate.sh`; comma-separated in `collate.R`) is a site TSV from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr) or a directory of them. A file path is used as given. A directory contributes TSVs whose names contain `variant`, `sites`, `calls`, or `csq` (so `variants_csq.tsv` and `snps_csq.tsv` both match); `*_long.tsv` is ignored. Tables with a `bcsq` or `csq_consequences` column are annotation: `bcsq`, `csq_consequences`, `region_category`, `coding_effect`, `genes`, and `genes_protein_altering` are joined onto the sites by `chr`, `pos`, `ref`, `alt` (by `chr`, `pos` only if `ref`/`alt` are absent). The same discovery applies inside `--variant-tsv-dir`. With no site TSV, the csq table is the site table.
-- **`--single-position-merged`**: window HDF5 files are unchanged (and still receive `--variant-feature-dir`). `fst_single.h5`, `pbe_single.h5`, and `variants.h5` are replaced by one `single_position.h5` (`/sites`): the site table, including csq columns, with per-locus FST and PBE as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, with `_rank` / `_quantile`) on SNP rows only. An indel at the same position as a SNP does not inherit the SNP's values. Per-locus FST positions that are not in the site table are dropped when a site table is present. With no site or csq table, the rows are the per-locus FST (or PBE) positions and have no consequence columns.
+- **`--single-position-merged`**: window HDF5 files are unchanged (and still receive `--variant-feature-dir`). `fst_single.h5`, `pbe_single.h5`, `qibe_single.h5`, and `variants.h5` are replaced by one `single_position.h5` (`/sites`): the site table, including csq columns, with per-locus FST, PBE, and QIBE as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, `Pop1:Pop2:Pop3:Pop4.qibe`, with `_rank` / `_quantile`) on SNP rows only. An indel at the same position as a SNP does not inherit the SNP's values. Per-locus FST positions that are not in the site table are dropped when a site table is present. With no site or csq table, the rows are the per-locus FST (or PBE or QIBE) positions and have no consequence columns.
 - **Masking and windows**: diversity and FST windows carry **`n_masked`** (masked bp, from grenedalf `total.masked`). Every windowed input is checked against the shared grid; see [Window boundaries](#window-boundaries).
-- **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE) is NA/NaN before ranking and collation.
+- **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE, or QIBE) is NA/NaN before ranking and collation.
 - **Sample names** keep their case from the input (FST pairs such as `Echo:Kjer`, `<sample>_AD` columns); standard column names (`chr`, `pos`, `ref`, ...) are lowercased.
-- **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out -o collated`
+- **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --qibe-dir qibe_out -o collated`
 
 ### calculate_pi_theta.sh
 
@@ -351,7 +351,7 @@ For each FST file × quartet (label is `w{W}_s{S}` or `single` from the FST name
 - `--output-format hdf5`: `{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibs_qibe.h5`
 - Logs: `{output_dir}/log/calculate_qibe_YYYYmmdd_HHMMSS.log`
 
-The FST table must contain all six pairs. Population names keep their case. The four names must be different. Collate reads `*_pbe.tsv` only; it does not read these QIBE files.
+The FST table must contain all six pairs. Population names keep their case. The four names must be different. Collate reads `*_qibe.tsv` from `--qibe-dir` the same way it reads `*_pbe.tsv` (`qibe_w{W}_s{S}.h5`, and `Pop1:Pop2:Pop3:Pop4.qibe` on `single_position.h5`). It does not read `*_qibs.tsv`.
 
 ## Workflow Example
 
@@ -528,7 +528,7 @@ This is particularly useful for:
 - **Not a Z-score.** QIBE = QIBS − (QEBS / median(QEBS)) × median(QIBS), with **QEBS = T12 + T34** and medians genome-wide or per chromosome
 - Positive QIBE: a longer internal branch than that external-branch relationship predicts
 - Negative QIBE: a shorter internal branch than expected given QEBS
-- Collate does not rank QIBE. Outlier calling uses the collated PBE quantiles
+- Collate ranks QIBE within each quartet file, the same way it ranks PBE within each trio. `identify_outliers.sh --statistics` must list `qibe` to use those quantiles
 
 ## Notes
 
@@ -576,7 +576,7 @@ For large genomes:
 - `Could not find FST columns`: the table needs all six pairs among the four populations (`Echo:Kjer.fst` and the other five). Names must be the `sample_name` values from `sample_info.csv`
 - `Quartet needs four different populations`: a name was repeated
 - A skipped quartet in the log is the same two sister pairs as an earlier row. Pass `--compute-dup-comps` to write it again
-- QIBE output is `*_qibe.tsv`. Collate's `--pbe-dir` does not read those files
+- QIBE output is `*_qibe.tsv`. Pass that directory as `--qibe-dir`. `--pbe-dir` does not read those files. The HDF5 from `--output-format hdf5` is not what collate reads
 
 ## Citation
 

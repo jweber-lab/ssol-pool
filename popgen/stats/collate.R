@@ -3,11 +3,11 @@
 ###############################################################################
 # collate.R
 #
-# Purpose: Collate diversity, FST, PBE, and optional variant TSV into HDF5.
+# Purpose: Collate diversity, FST, PBE, QIBE, and optional variant TSV into HDF5.
 # Uses (window, step) for grouping; combines multiple inputs per scale with
-# sample/pop1,pop2/pop1,pop2,pop3 as columns. Missing or empty FST/PBE input
-# dirs are skipped without failing.
-# Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR]
+# sample/pop1,pop2/pop1,pop2,pop3/pop1..pop4 as columns. Missing or empty
+# FST/PBE/QIBE input dirs are skipped without failing.
+# Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR] [--qibe-dir DIR]
 #        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [--variant-csq PATHS]
 #        [--variant-feature-dir DIR] [options]
 # Options: --drop-all-na  Drop rows/sites where every statistic value is NA before ranking/collation.
@@ -22,8 +22,8 @@
 #     kept on the analysis grid when S is a multiple of the source step (e.g. s250 -> s500).
 #     optional n_sites / n_sites_snp / n_sites_indel / n_csq_* / n_region_* / n_effect_* counts and
 #     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set.
-#     Those window columns are also joined into fst_w*.h5 and pbe_w*.h5, and not into
-#     fst_single / pbe_single / single_position. variant_features_wW_sS.tsv uses the same
+#     Those window columns are also joined into fst_w*.h5, pbe_w*.h5, and qibe_w*.h5, and not into
+#     fst_single / pbe_single / qibe_single / single_position. variant_features_wW_sS.tsv uses the same
 #     exact-then-finer-step lookup as seq_qual.
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
@@ -36,6 +36,11 @@
 #     Group /windows or /sites: chr, start, end, pos, pop1, pop2, pop3, pbe,
 #     pbe_rank, pbe_quantile (optional)
 #   pbe_*_summary.tsv  Companion summary by pop1, pop2, pop3
+#   qibe_w{W}_s{S}.h5  (or qibe_single.h5)
+#     Group /windows or /sites: chr, start, end, pos, pop1, pop2, pop3, pop4, qibe,
+#     qibe_rank, qibe_quantile (optional). Same layout as PBE, with the quartet
+#     ((pop1, pop2), (pop3, pop4)).
+#   qibe_*_summary.tsv  Companion summary by pop1, pop2, pop3, pop4
 #
 #   variants.h5  Group /sites: one row per site from --variant-tsv-dir (snp_sites.tsv and
 #     indel_sites.tsv): chr, pos, start, end, ref, alt, variant_type (snp/indel), dp, alt_freq,
@@ -45,9 +50,11 @@
 #     These columns are not added to window HDF5.
 #   single_position.h5  (when --single-position-merged; replaces fst_single, pbe_single and
 #     variants.h5; window HDF5 are unchanged) One group /sites: the variants.h5 table plus
-#     FST/PBE in wide form on SNP rows:
+#     FST/PBE/QIBE in wide form on SNP rows:
 #     Sample1:Sample2.fst, Sample1:Sample2.fst_rank, Sample1:Sample2.fst_quantile;
-#     Sample1:Sample2:Sample3.pbe, .pbe_rank, .pbe_quantile. Indel rows have no FST/PBE.
+#     Sample1:Sample2:Sample3.pbe, .pbe_rank, .pbe_quantile;
+#     Sample1:Sample2:Sample3:Sample4.qibe, .qibe_rank, .qibe_quantile.
+#     Indel rows have no FST/PBE/QIBE.
 #     Window feature counts are not in this file. single_position_summary.tsv summarizes
 #     all numeric columns.
 ###############################################################################
@@ -82,7 +89,7 @@ STD_COLS <- c(
   "chr", "chrom", "chromosome", "contig", "pos", "position", "start", "end", "begin", "stop",
   "ref", "alt", "dp", "qual", "filter", "alt_freq", "indel_len", "variant_type",
   "bcsq", "csq_consequences", "region_category", "coding_effect", "genes", "genes_protein_altering",
-  "total.passed", "total_passed", "total.invariant", "total_invariant", "sample", "pbe", "n_snps"
+  "total.passed", "total_passed", "total.invariant", "total_invariant", "sample", "pbe", "qibe", "n_snps"
 )
 lower_std_names <- function(d) {
   lo <- tolower(names(d))
@@ -759,13 +766,13 @@ collate_fst <- function(fst_dir, output_dir, single_position_merged = FALSE, wri
 
 # ---- PBE ----
 # PBE filenames: w1000_s500_Echo_Kjer_Cheney_pbe.tsv or single_Echo_Kjer_Cheney_pbe.tsv or pbe_Echo_Kjer_Cheney.tsv
-find_pbe_files <- function(pbe_dir) {
-  files <- list.files(pbe_dir, pattern = ".*pbe\\.(tsv|csv)$", full.names = TRUE, ignore.case = TRUE)
+find_pbe_files <- function(pbe_dir, suffix = "pbe") {
+  files <- list.files(pbe_dir, pattern = paste0(".*", suffix, "\\.(tsv|csv)$"), full.names = TRUE, ignore.case = TRUE)
   out <- list()
   for (i in seq_along(files)) {
     f <- files[i]
     base <- tools::file_path_sans_ext(basename(f))
-    base <- sub("_pbe$", "", base, ignore.case = TRUE)
+    base <- sub(paste0("_", suffix, "$"), "", base, ignore.case = TRUE)
     from_filename_single <- grepl("^single[_\\-]|_single$", base, ignore.case = TRUE)
     ps <- parse_window_step(paste0(basename(f)))
     has_window_in_name <- !is.na(ps$window_size) && !is.na(ps$step_size)
@@ -789,10 +796,10 @@ find_pbe_files <- function(pbe_dir) {
       trio_name <- sub("^w[0-9]+_s[0-9]+[_\\-](.+)$", "\\1", trio_name, ignore.case = TRUE)
     } else if (grepl("^single[_\\-](.+)$", trio_name, ignore.case = TRUE)) {
       trio_name <- sub("^single[_\\-](.+)$", "\\1", trio_name, ignore.case = TRUE)
-    } else if (grepl("^pbe[_\\-](.+)$", trio_name, ignore.case = TRUE)) {
-      trio_name <- sub("^pbe[_\\-](.+)$", "\\1", trio_name, ignore.case = TRUE)
+    } else if (grepl(paste0("^", suffix, "[_\\-](.+)$"), trio_name, ignore.case = TRUE)) {
+      trio_name <- sub(paste0("^", suffix, "[_\\-](.+)$"), "\\1", trio_name, ignore.case = TRUE)
     } else if (nchar(trio_name) == 0 || !grepl("[A-Za-z]", trio_name)) {
-      trio_name <- paste0("trio_", i)
+      trio_name <- paste0(if (identical(suffix, "pbe")) "trio_" else paste0(suffix, "_"), i)
     }
     out[[length(out) + 1L]] <- list(path = f, window_size = window_size, step_size = step_size, scale = scale, trio_name = trio_name, is_single = is_single)
   }
@@ -800,16 +807,18 @@ find_pbe_files <- function(pbe_dir) {
 }
 
 # Parse trio name (e.g. "Echo_Kjer_Cheney" or "Echo-Kjer-Cheney") into pop1, pop2, pop3
-parse_trio_pops <- function(trio_name) {
+parse_trio_pops <- function(trio_name, n_pops = 3L) {
   parts <- strsplit(trio_name, "_|-")[[1]]
-  if (length(parts) >= 3) {
-    list(pop1 = parts[1], pop2 = parts[2], pop3 = parts[3])
-  } else {
-    list(pop1 = trio_name, pop2 = NA_character_, pop3 = NA_character_)
+  if (n_pops == 3L && length(parts) < 3L) {
+    return(list(pop1 = trio_name, pop2 = NA_character_, pop3 = NA_character_))
   }
+  out <- rep(NA_character_, n_pops)
+  n <- min(length(parts), n_pops)
+  if (n > 0L) out[seq_len(n)] <- parts[seq_len(n)]
+  setNames(as.list(out), paste0("pop", seq_len(n_pops)))
 }
 
-read_one_pbe <- function(path, trio_name, drop_all_na = FALSE, window_size = NA_real_) {
+read_one_pbe <- function(path, trio_name, drop_all_na = FALSE, window_size = NA_real_, stat = "pbe", n_pops = 3L) {
   d <- read_tab(path)
   d <- d %>% rename_all(tolower)
   chr_col <- intersect(c("chr", "chromosome"), names(d))[1L]
@@ -821,22 +830,19 @@ read_one_pbe <- function(path, trio_name, drop_all_na = FALSE, window_size = NA_
   if (!"start" %in% names(d)) d$start <- d$pos
   # PBE tables written before calculate_pbe.R kept window ends carry only the window start
   if (!"end" %in% names(d)) d$end <- if (!is.na(window_size)) d$start + window_size - 1 else d$pos
-  if (drop_all_na && "pbe" %in% names(d)) {
-    d <- d %>% filter(!is.na(.data$pbe))
+  pop_cols <- paste0("pop", seq_len(n_pops))
+  if (drop_all_na && stat %in% names(d)) {
+    d <- d %>% filter(!is.na(.data[[stat]]))
   }
-  if ("pbe" %in% names(d)) d <- add_rank_quantile(d, character(0), "pbe")
-  if (!all(c("pop1", "pop2", "pop3") %in% names(d))) {
-    pops <- parse_trio_pops(trio_name)
-    d$pop1 <- pops$pop1
-    d$pop2 <- pops$pop2
-    d$pop3 <- pops$pop3
+  if (stat %in% names(d)) d <- add_rank_quantile(d, character(0), stat)
+  if (!all(pop_cols %in% names(d))) {
+    pops <- parse_trio_pops(trio_name, n_pops)
+    for (pc in pop_cols) d[[pc]] <- pops[[pc]]
   } else {
-    d$pop1 <- as.character(d$pop1)
-    d$pop2 <- as.character(d$pop2)
-    d$pop3 <- as.character(d$pop3)
+    for (pc in pop_cols) d[[pc]] <- as.character(d[[pc]])
   }
   d$trio_name <- trio_name
-  d %>% select(any_of(c("chr", "pos", "start", "end", "pbe", "pbe_rank", "pbe_quantile", "pop1", "pop2", "pop3", "trio_name")))
+  d %>% select(any_of(c("chr", "pos", "start", "end", stat, paste0(stat, "_rank"), paste0(stat, "_quantile"), pop_cols, "trio_name")))
 }
 
 write_pbe_groups_h5 <- function(tbl_list, out_path, group_prefix = "windows_trio", sites = FALSE) {
@@ -856,12 +862,13 @@ write_pbe_groups_h5 <- function(tbl_list, out_path, group_prefix = "windows_trio
 }
 
 # Write PBE in long format: single /windows group with chr, start, end, pop1, pop2, pop3, pbe, pbe_rank, pbe_quantile
-write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites = FALSE) {
+write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites = FALSE, stat = "pbe", n_pops = 3L) {
   if (length(tbl_list) == 0) return(invisible(NULL))
   all_d <- bind_rows(lapply(tbl_list, function(x) x$data))
-  keep_cols <- c("chr", "start", "end", "pos", "pop1", "pop2", "pop3", "pbe")
-  if ("pbe_rank" %in% names(all_d)) keep_cols <- c(keep_cols, "pbe_rank")
-  if ("pbe_quantile" %in% names(all_d)) keep_cols <- c(keep_cols, "pbe_quantile")
+  pop_cols <- paste0("pop", seq_len(n_pops))
+  keep_cols <- c("chr", "start", "end", "pos", pop_cols, stat)
+  if (paste0(stat, "_rank") %in% names(all_d)) keep_cols <- c(keep_cols, paste0(stat, "_rank"))
+  if (paste0(stat, "_quantile") %in% names(all_d)) keep_cols <- c(keep_cols, paste0(stat, "_quantile"))
   vf_extra <- grep("^n_(csq|region|effect|sites)", names(all_d), value = TRUE, ignore.case = TRUE)
   keep_cols <- unique(c(keep_cols, vf_extra, intersect(VF_GENE_COLS, names(all_d))))
   keep_cols <- intersect(keep_cols, names(all_d))
@@ -875,21 +882,21 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   message("Wrote ", out_path)
 }
 
-collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_feature_dir = NULL, drop_all_na = FALSE, verbose = FALSE) {
-  infos <- find_pbe_files(pbe_dir)
+collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, write_summary = TRUE, single_position_data = NULL, variant_feature_dir = NULL, drop_all_na = FALSE, verbose = FALSE, stat = "pbe", n_pops = 3L) {
+  infos <- find_pbe_files(pbe_dir, suffix = stat)
   if (length(infos) == 0) return(invisible(NULL))
   by_scale <- split(infos, vapply(infos, function(x) x$scale, ""))
   for (scale in names(by_scale)) {
     scale_infos <- by_scale[[scale]]
     tbl_list <- lapply(scale_infos, function(x) {
-      d <- read_one_pbe(x$path, x$trio_name, drop_all_na = drop_all_na, window_size = x$window_size)
+      d <- read_one_pbe(x$path, x$trio_name, drop_all_na = drop_all_na, window_size = x$window_size, stat = stat, n_pops = n_pops)
       if (is.null(d)) return(NULL)
       list(trio_name = x$trio_name, data = d)
     })
     tbl_list <- tbl_list[!vapply(tbl_list, is.null, logical(1L))]
     if (length(tbl_list) == 0) next
     is_single <- scale == "single"
-    if (!is_single) for (x in tbl_list) register_windows(scale, paste("pbe", x$trio_name), x$data)
+    if (!is_single) for (x in tbl_list) register_windows(scale, paste(stat, x$trio_name), x$data)
     if (!is_single && !is.null(variant_feature_dir) && nzchar(variant_feature_dir) && dir.exists(variant_feature_dir)) {
       vf <- load_variant_features_tsv(variant_feature_dir, scale_infos[[1]]$window_size, scale_infos[[1]]$step_size)
       if (!is.null(vf)) {
@@ -903,21 +910,22 @@ collate_pbe <- function(pbe_dir, output_dir, single_position_merged = FALSE, wri
       }
     }
     if (is_single && single_position_merged && !is.null(single_position_data)) {
-      single_position_data$pbe <- tbl_list
+      single_position_data[[stat]] <- tbl_list
       next
     }
+    pop_cols <- paste0("pop", seq_len(n_pops))
     if (verbose && length(tbl_list) > 0) {
-      all_pbe <- bind_rows(lapply(tbl_list, function(x) x$data))
-      message("[verbose] PBE ", scale, " n_row=", nrow(all_pbe), " n_NA_pbe=", sum(is.na(all_pbe$pbe)), " (of ", length(all_pbe$pbe), ")")
-      diagnose_rank_quantile(all_pbe, "pbe", c("pop1", "pop2", "pop3"), label = paste0("pbe_", scale), verbose = verbose)
+      all_branch <- bind_rows(lapply(tbl_list, function(x) x$data))
+      message("[verbose] ", toupper(stat), " ", scale, " n_row=", nrow(all_branch), " n_NA_", stat, "=", sum(is.na(all_branch[[stat]])), " (of ", length(all_branch[[stat]]), ")")
+      diagnose_rank_quantile(all_branch, stat, pop_cols, label = paste0(stat, "_", scale), verbose = verbose)
     }
-    out_path <- file.path(output_dir, if (is_single) "pbe_single.h5" else paste0("pbe_", scale, ".h5"))
+    out_path <- file.path(output_dir, if (is_single) paste0(stat, "_single.h5") else paste0(stat, "_", scale, ".h5"))
     grp_name <- if (is_single) "sites" else "windows"
-    write_pbe_long_h5(tbl_list, out_path, grp_name, sites = is_single)
+    write_pbe_long_h5(tbl_list, out_path, grp_name, sites = is_single, stat = stat, n_pops = n_pops)
     h5_preview(out_path, grp_name)
     if (write_summary && length(tbl_list) > 0) {
       all_d <- bind_rows(lapply(tbl_list, function(x) x$data))
-      write_summary_companion(all_d, sub("\\.h5$", "_summary.tsv", out_path), stat_cols = "pbe", group_cols = c("pop1", "pop2", "pop3"))
+      write_summary_companion(all_d, sub("\\.h5$", "_summary.tsv", out_path), stat_cols = stat, group_cols = pop_cols)
     }
   }
   invisible(NULL)
@@ -1116,8 +1124,11 @@ single_position_base <- function(single_position_data) {
   if (!is.null(single_position_data$fst) && nrow(single_position_data$fst) > 0) {
     return(single_position_data$fst %>% distinct(.data$chr, .data$pos, .data$start, .data$end))
   }
-  if (!is.null(single_position_data$pbe) && length(single_position_data$pbe) > 0 && nrow(single_position_data$pbe[[1L]]$data) > 0) {
-    return(single_position_data$pbe[[1L]]$data %>% distinct(.data$chr, .data$pos, .data$start, .data$end))
+  for (key in c("pbe", "qibe")) {
+    grp <- single_position_data[[key]]
+    if (!is.null(grp) && length(grp) > 0 && nrow(grp[[1L]]$data) > 0) {
+      return(grp[[1L]]$data %>% distinct(.data$chr, .data$pos, .data$start, .data$end))
+    }
   }
   NULL
 }
@@ -1145,19 +1156,24 @@ write_single_position_merged <- function(single_position_data, output_dir, write
                   names_glue = "{pair}.{.value}")
     merged <- join_stats(merged, fst_wide)
   }
-  if (!is.null(single_position_data$pbe) && length(single_position_data$pbe) > 0) {
-    for (x in single_position_data$pbe) {
-      pbe_d <- x$data
-      if (!"pos" %in% names(pbe_d)) pbe_d$pos <- pbe_d$start
-      trio_id <- paste0(pbe_d$pop1[1L], ":", pbe_d$pop2[1L], ":", pbe_d$pop3[1L])
-      pbe_wide <- pbe_d %>%
-        select(all_of(c("chr", "pos", "pbe", "pbe_rank", "pbe_quantile"))) %>%
-        mutate(trio = trio_id) %>%
-        pivot_wider(names_from = "trio", values_from = c("pbe", "pbe_rank", "pbe_quantile"),
-                    names_glue = "{trio}.{.value}")
-      merged <- join_stats(merged, pbe_wide)
+  add_branch_wide <- function(merged, tbl_list, stat, n_pops) {
+    if (is.null(tbl_list) || length(tbl_list) == 0) return(merged)
+    pop_cols <- paste0("pop", seq_len(n_pops))
+    for (x in tbl_list) {
+      d <- x$data
+      if (!"pos" %in% names(d)) d$pos <- d$start
+      group_id <- paste(vapply(pop_cols, function(pc) as.character(d[[pc]][1L]), character(1)), collapse = ":")
+      value_cols <- intersect(c(stat, paste0(stat, "_rank"), paste0(stat, "_quantile")), names(d))
+      wide <- d %>%
+        select(all_of(c("chr", "pos", value_cols))) %>%
+        mutate(group = group_id) %>%
+        pivot_wider(names_from = "group", values_from = all_of(value_cols), names_glue = "{group}.{.value}")
+      merged <- join_stats(merged, wide)
     }
+    merged
   }
+  merged <- add_branch_wide(merged, single_position_data$pbe, "pbe", 3L)
+  merged <- add_branch_wide(merged, single_position_data$qibe, "qibe", 4L)
   merged$.row <- NULL
   h5_path <- file.path(output_dir, "single_position.h5")
   h5 <- hdf5r::H5File$new(h5_path, mode = "w")
@@ -1183,21 +1199,22 @@ option_list <- list(
   make_option(c("--diversity-dir"), type = "character", default = NULL, help = "Directory containing diversity TSV/CSV (e.g. output of calculate_pi_theta.sh)"),
   make_option(c("--fst-dir"), type = "character", default = NULL, help = "Directory containing FST TSV/CSV"),
   make_option(c("--pbe-dir"), type = "character", default = NULL, help = "Directory containing PBE TSV/CSV"),
+  make_option(c("--qibe-dir"), type = "character", default = NULL, help = "Directory containing QIBE TSV/CSV (calculate_qibe.sh *_qibe.tsv)"),
   make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV (exact wW_sS, or a finer same-window step when the analysis step is a multiple of the source step)"),
   make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with site TSVs (snp_sites.tsv / indel_sites.tsv); a *csq*.tsv here is joined as annotation, not stacked as sites"),
   make_option(c("--variant-csq"), type = "character", default = NULL, help = "Optional: comma-separated site csq TSV(s) or directories (variant_csq.sh; names containing csq/variant/sites/calls, not *_long.tsv) joined onto sites by chr, pos, ref, alt. Not applied to window HDF5"),
-  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv; left-joined onto windowed diversity/FST/PBE only (not fst_single or single_position)"),
+  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv; left-joined onto windowed diversity/FST/PBE/QIBE only (not fst_single, qibe_single, or single_position)"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
-  make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Replace fst_single.h5, pbe_single.h5, and variants.h5 with single_position.h5 (site csq plus per-locus FST/PBE on SNP rows). Window HDF5 are still written."),
+  make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Replace fst_single.h5, pbe_single.h5, qibe_single.h5, and variants.h5 with single_position.h5 (site csq plus per-locus FST/PBE/QIBE on SNP rows). Window HDF5 are still written."),
   make_option(c("--no-summary"), action = "store_true", default = FALSE, help = "Do not write companion *_summary.tsv files"),
-  make_option(c("--drop-all-na"), action = "store_true", default = FALSE, help = "Drop rows/sites where every statistic value (FST or PBE) is NA before ranking and collation"),
+  make_option(c("--drop-all-na"), action = "store_true", default = FALSE, help = "Drop rows/sites where every statistic value (FST, PBE, or QIBE) is NA before ranking and collation"),
   make_option(c("--verbose"), action = "store_true", default = FALSE, help = "Verbose")
 )
 parser <- OptionParser(usage = "usage: %prog [options]", option_list = option_list)
 opts <- parse_args(parser)
 
-if (is.null(opts$`diversity-dir`) && is.null(opts$`fst-dir`) && is.null(opts$`pbe-dir`)) {
-  stop("At least one of --diversity-dir, --fst-dir, --pbe-dir is required")
+if (is.null(opts$`diversity-dir`) && is.null(opts$`fst-dir`) && is.null(opts$`pbe-dir`) && is.null(opts$`qibe-dir`)) {
+  stop("At least one of --diversity-dir, --fst-dir, --pbe-dir, --qibe-dir is required")
 }
 
 dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
@@ -1214,13 +1231,17 @@ if (!is.null(opts$`fst-dir`) && dir.exists(opts$`fst-dir`)) {
   collate_fst(opts$`fst-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_tsv_dir = opts$`variant-tsv-dir`, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
 }
 if (!is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
-  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose)
+  collate_pbe(opts$`pbe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose, stat = "pbe", n_pops = 3L)
+}
+if (!is.null(opts$`qibe-dir`) && dir.exists(opts$`qibe-dir`)) {
+  collate_pbe(opts$`qibe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose, stat = "qibe", n_pops = 4L)
 }
 if ((!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) || !is.null(opts$`variant-csq`)) {
   collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_csq = opts$`variant-csq`)
 }
+has_branch <- function(key) !is.null(single_position_data[[key]]) && length(single_position_data[[key]]) > 0
 if (single_position_merged && !is.null(single_position_data) &&
-    (!is.null(single_position_data$fst) || (!is.null(single_position_data$pbe) && length(single_position_data$pbe) > 0) || !is.null(single_position_data$variants))) {
+    (!is.null(single_position_data$fst) || has_branch("pbe") || has_branch("qibe") || !is.null(single_position_data$variants))) {
   write_single_position_merged(single_position_data, opts$`output-dir`, write_summary = write_summary)
 }
 

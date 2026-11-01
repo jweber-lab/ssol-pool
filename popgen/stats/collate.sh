@@ -3,14 +3,14 @@
 ###############################################################################
 # collate.sh
 #
-# Wrapper for collate.R: discovers diversity, FST, and PBE TSV/CSV (from
-# calculate_pi_theta.sh, calculate_fst.sh, and PBE outputs) and writes
+# Wrapper for collate.R: discovers diversity, FST, PBE, and QIBE TSV/CSV (from
+# calculate_pi_theta.sh, calculate_fst.sh, calculate_pbe.sh, and calculate_qibe.sh) and writes
 # combined HDF5 plus *_summary.tsv to OUTPUT_DIR. Optional: --seq-qual-dir
 # for mean_coverage/mean_mapping_quality (exact wW_sS, or a finer same-window
 # step when the analysis step is a multiple of the source step),
 # --variant-tsv-dir and --variant-csq are per site (variants.h5, or single_position.h5).
-# --variant-feature-dir is per window (diversity_w / fst_w / pbe_w only; not fst_single).
-# Missing/empty FST or PBE dirs are skipped.
+# --variant-feature-dir is per window (diversity_w / fst_w / pbe_w / qibe_w only; not fst_single).
+# Missing/empty FST, PBE, or QIBE dirs are skipped.
 # For full output file list and variable naming (HDF5 groups, TSV columns),
 # see the header of collate.R.
 # Usage: See below or --help
@@ -21,6 +21,7 @@ set -euo pipefail
 DIVERSITY_DIR=""
 FST_DIR=""
 PBE_DIR=""
+QIBE_DIR=""
 SEQ_QUAL_DIR=""
 VARIANT_TSV_DIR=""
 VARIANT_CSQ=()
@@ -46,15 +47,16 @@ Input (at least one required):
   --diversity-dir DIR    Directory containing diversity TSV/CSV (e.g. output of calculate_pi_theta.sh)
   --fst-dir DIR          Directory containing FST TSV/CSV (output of calculate_fst.sh)
   --pbe-dir DIR          Directory containing PBE TSV/CSV (output of calculate_pbe)
+  --qibe-dir DIR         Directory containing QIBE TSV/CSV (output of calculate_qibe; *_qibe.tsv)
 
 Optional (windows; not applied to fst_single / pbe_single / variants.h5):
   --seq-qual-dir DIR     Directory with seq_qual_metrics TSV (from seq_qual_metrics.sh). Exact
                          w{W}_s{S} is preferred; otherwise a finer same-window step is kept on the
                          analysis grid when S is a multiple of the source step (e.g. s250 -> s500)
   --variant-feature-dir DIR  Directory with variant_features_wW_sS.tsv (from variant_csq_windows.sh).
-                         Left-joined on (chr, start, end) into diversity_w*, fst_w*, and pbe_w* only
+                         Left-joined on (chr, start, end) into diversity_w*, fst_w*, pbe_w*, and qibe_w* only
                          (same exact-then-finer-step lookup as --seq-qual-dir). Not used for per-locus
-                         FST/PBE or single_position.h5.
+                         FST/PBE/QIBE or single_position.h5.
 
 Optional (sites; not applied to window HDF5):
   --variant-tsv-dir DIR  Directory with site TSVs (snp_sites.tsv, indel_sites.tsv). A csq TSV in this
@@ -63,27 +65,29 @@ Optional (sites; not applied to window HDF5):
                          containing variant, sites, calls, or csq are used (e.g. variants_csq.tsv,
                          snps_csq.tsv); *_long.tsv is ignored. Columns are joined onto sites by
                          chr, pos, ref, alt. With no site TSV, the csq table is the site table.
-  --single-position-merged  Do not write fst_single.h5, pbe_single.h5, or variants.h5. Write
-                         single_position.h5 instead: one row per site (or per FST position if there
-                         is no site table), with site csq columns and per-locus FST/PBE on SNP rows.
+  --single-position-merged  Do not write fst_single.h5, pbe_single.h5, qibe_single.h5, or variants.h5.
+                         Write single_position.h5 instead: one row per site (or per FST position if there
+                         is no site table), with site csq columns and per-locus FST/PBE/QIBE on SNP rows.
                          Window HDF5 files are still written, including --variant-feature-dir columns.
 
 Other:
   --output-dir DIR       Output directory for HDF5 files [default: ./collated]
   --rscript PATH         Path to Rscript [default: Rscript]
   --no-summary           Do not write companion *_summary.tsv files
-  --drop-all-na          Drop rows/sites where every statistic value (FST or PBE) is NA before ranking and collation
+  --drop-all-na          Drop rows/sites where every statistic value (FST, PBE, or QIBE) is NA before ranking and collation
   --verbose              Verbose diagnostics (rank/quantile NA checks, distinct-value checks)
   --dry-run              Preview only
   -h, --help             Show this help
 
-Output naming: diversity_w{W}_s{S}.h5, fst_w{W}_s{S}.h5, pbe_w{W}_s{S}.h5 (group /windows),
-  fst_single.h5, pbe_single.h5, variants.h5 (group /sites) unless --single-position-merged,
-  then single_position.h5. Companion *_summary.tsv (unless --no-summary): mean, median,
+Output naming: diversity_w{W}_s{S}.h5, fst_w{W}_s{S}.h5, pbe_w{W}_s{S}.h5, qibe_w{W}_s{S}.h5
+  (group /windows), fst_single.h5, pbe_single.h5, qibe_single.h5, variants.h5 (group /sites)
+  unless --single-position-merged, then single_position.h5. QIBE columns are pop1–pop4 and
+  qibe / qibe_rank / qibe_quantile; wide single-position names are Pop1:Pop2:Pop3:Pop4.qibe.
+  Companion *_summary.tsv (unless --no-summary): mean, median,
   variance, skew, q01, q05, q95, q99, n.
 
 Example:
-  $0 --diversity-dir pi_theta_out --fst-dir fst_out --pbe-dir pbe_out -o collated
+  $0 --diversity-dir pi_theta_out --fst-dir fst_out --pbe-dir pbe_out --qibe-dir qibe_out -o collated
   $0 --diversity-dir stats_out --fst-dir stats_out --pbe-dir stats_out --seq-qual-dir stats_out --output-dir collated
   $0 --fst-dir fst_out --pbe-dir pbe_out --variant-tsv-dir sites \\
      --variant-csq csq_snps --variant-csq csq_indels --variant-feature-dir variant_features \\
@@ -101,6 +105,7 @@ while [[ $# -gt 0 ]]; do
         --diversity-dir) DIVERSITY_DIR="$2"; shift 2 ;;
         --fst-dir) FST_DIR="$2"; shift 2 ;;
         --pbe-dir) PBE_DIR="$2"; shift 2 ;;
+        --qibe-dir) QIBE_DIR="$2"; shift 2 ;;
         --seq-qual-dir) SEQ_QUAL_DIR="$2"; shift 2 ;;
         --variant-tsv-dir) VARIANT_TSV_DIR="$2"; shift 2 ;;
         --variant-csq) VARIANT_CSQ+=("$2"); shift 2 ;;
@@ -117,8 +122,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$DIVERSITY_DIR" && -z "$FST_DIR" && -z "$PBE_DIR" ]]; then
-    log_error "At least one of --diversity-dir, --fst-dir, --pbe-dir is required"
+if [[ -z "$DIVERSITY_DIR" && -z "$FST_DIR" && -z "$PBE_DIR" && -z "$QIBE_DIR" ]]; then
+    log_error "At least one of --diversity-dir, --fst-dir, --pbe-dir, --qibe-dir is required"
     usage
     exit 1
 fi
@@ -137,6 +142,7 @@ ARGS=()
 [[ -n "$DIVERSITY_DIR" ]] && ARGS+=(--diversity-dir "$DIVERSITY_DIR")
 [[ -n "$FST_DIR" ]] && ARGS+=(--fst-dir "$FST_DIR")
 [[ -n "$PBE_DIR" ]] && ARGS+=(--pbe-dir "$PBE_DIR")
+[[ -n "$QIBE_DIR" ]] && ARGS+=(--qibe-dir "$QIBE_DIR")
 [[ -n "$SEQ_QUAL_DIR" ]] && ARGS+=(--seq-qual-dir "$SEQ_QUAL_DIR")
 [[ -n "$VARIANT_TSV_DIR" ]] && ARGS+=(--variant-tsv-dir "$VARIANT_TSV_DIR")
 if [[ ${#VARIANT_CSQ[@]} -gt 0 ]]; then
