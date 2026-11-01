@@ -304,8 +304,15 @@ infer_scale_from_window_table <- function(path) {
 # ---- Window grid checks ----
 # All windowed inputs of one scale should share grenedalf's interval grid: start = 1 + k * step,
 # end = start + window - 1. The first table registered for a scale is the reference; later tables
-# are compared on the chromosomes both contain (grenedalf omits chromosomes without data).
+# are compared on the chromosomes both contain. Diversity drops all-NA windows and chromosomes
+# with no reads per sample, so the sets differ; that is not a shifted grid.
 WINDOW_SETS <- new.env()
+
+windows_on_grid <- function(w, ws) {
+  if (is.na(ws$window_size) || is.na(ws$step_size) || nrow(w) == 0L) return(TRUE)
+  off <- (w$start - 1) %% ws$step_size != 0 | (w$end - w$start + 1) != ws$window_size
+  !any(off, na.rm = TRUE)
+}
 
 register_windows <- function(scale, label, d) {
   if (is.null(d) || nrow(d) == 0L || !all(c("chr", "start", "end") %in% names(d))) return(invisible(NULL))
@@ -325,14 +332,23 @@ register_windows <- function(scale, label, d) {
     return(invisible(NULL))
   }
   shared <- intersect(unique(ref$w$chr), unique(w$chr))
-  a <- ref$w[ref$w$chr %in% shared, ]
-  b <- w[w$chr %in% shared, ]
+  a <- ref$w[ref$w$chr %in% shared, , drop = FALSE]
+  b <- w[w$chr %in% shared, , drop = FALSE]
   only_new <- nrow(anti_join(b, a, by = c("chr", "start", "end")))
   only_ref <- nrow(anti_join(a, b, by = c("chr", "start", "end")))
-  if (only_new + only_ref > 0L) {
+  only_chr_new <- length(setdiff(unique(w$chr), unique(ref$w$chr)))
+  only_chr_ref <- length(setdiff(unique(ref$w$chr), unique(w$chr)))
+  chr_note <- if (only_chr_new + only_chr_ref > 0L) {
+    paste0(" ", only_chr_new, " chromosome(s) only in ", label, ", ", only_chr_ref, " only in ", ref$label, ".")
+  } else ""
+  if (only_new + only_ref > 0L && !(windows_on_grid(a, ws) && windows_on_grid(b, ws))) {
     message("WARNING window check ", scale, ": ", label, " vs ", ref$label, ": ", only_new, " window(s) only in ", label,
             ", ", only_ref, " only in ", ref$label, " (", length(shared), " shared chromosome(s)). ",
-            "Re-run with the same --reference-genome and window/step sizes so boundaries match.")
+            "Re-run with the same --reference-genome and window/step sizes so boundaries match.", chr_note)
+  } else if (only_new + only_ref > 0L || nzchar(chr_note)) {
+    message("Window check ", scale, ": ", label, " and ", ref$label, " share the grid; ",
+            only_ref, " window(s) only in ", ref$label, ", ", only_new, " only in ", label,
+            " (", length(shared), " shared chromosome(s)). Each table keeps its own rows.", chr_note)
   } else {
     message("Window check ", scale, ": ", label, " matches ", ref$label, " (", nrow(b), " windows on ", length(shared), " shared chromosome(s))")
   }

@@ -453,9 +453,21 @@ process_one_sample() {
     # ("failed to create or write index"), which is the usual case for a shared BAM store.
     if [[ ! -f "${bam}.bai" && ! -f "${bam%.bam}.bai" && ! -f "${bam}.csi" ]]; then
         local idx="${sample_out}/$(basename "$bam").bai"
+        # Absolute path: region queries open bam##idx##<path> from whatever the
+        # working directory is, and a relative path that does not resolve is
+        # reported as a failed index load.
+        idx="$(cd "$(dirname "$idx")" && pwd)/$(basename "$idx")"
         log "No index beside $(basename "$bam"); writing $idx"
         if ! samtools index -@ "$THREADS" -o "$idx" "$bam"; then
             log_error "samtools index failed for $bam (index path: $idx)"
+            return 1
+        fi
+        # htslib prints "Could not load local index file '<bai>'" with no reason
+        # when the file exists but has no index header (empty or truncated).
+        local idx_bytes
+        idx_bytes=$(wc -c < "$idx" | tr -d ' ')
+        if [[ "${idx_bytes:-0}" -eq 0 ]]; then
+            log_error "Index is empty (0 bytes): $idx"
             return 1
         fi
         bam_query="${bam}##idx##${idx}"
