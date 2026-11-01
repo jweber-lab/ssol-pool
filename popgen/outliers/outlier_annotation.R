@@ -3,8 +3,10 @@
 ###############################################################################
 # outlier_annotation.R
 #
-# Annotate outlier regions in two independent ways (either or both):
-#   1. Consequence calls (--variant-csq, --gff): sites inside each region from variant_csq.sh
+# Annotate outlier intervals in two independent ways (either or both).
+# --regions is outlier_regions*.csv (region_start/region_end) or outlier_windows*.csv
+# (start/end; each window is one interval).
+#   1. Consequence calls (--variant-csq, --gff): sites inside each interval from variant_csq.sh
 #      tables (variants_csq.tsv) or collate variants.h5 / single_position.h5, with their
 #      bcftools csq consequences and genes, plus assembly GFF genes overlapping the region.
 #      Same assembly coordinates as the regions, so no BLAST is involved.
@@ -25,8 +27,9 @@
 #   outlier_csq_background_<suffix>.csv: genome-wide counts per (set, variant_type,
 #     region_category, coding_effect) for set = all_sites and non_outlier (sites in no region).
 #
-# Regions file (e.g. from identify_outliers outlier_regions*.csv) may contain
-# extra columns; when present they are preserved in the output.
+# Interval file (identify_outliers outlier_regions*.csv or outlier_windows*.csv) may
+# contain extra columns; when present they are preserved in the output. A window
+# file has no n_windows column, so each row is given n_windows = 1.
 #
 # BLAST config: YAML or JSON with list of entries:
 #   - db_path: path to BLAST DB (or FASTA for makeblastdb)
@@ -82,23 +85,37 @@ read_blast_config <- function(path) {
   dbs
 }
 
-# Read regions file (CSV/TSV from identify_outliers: chr, region_start, region_end, ...).
-# Retains extra columns for pass-through to output (outlier_stat, n_windows, region_*, etc.).
+# Read an identify_outliers interval table. outlier_regions_*.csv has region_start/region_end.
+# outlier_windows_*.csv has start/end; each window is one interval and n_windows is 1.
+# Extra columns (outlier_stat, sample.stat, region_*, ...) are kept for pass-through.
 read_regions <- function(path) {
   first_line <- readLines(path, n = 1)
   if (length(first_line) == 0) stop("Regions file is empty: ", path)
   delim <- if (grepl("\t", first_line, fixed = TRUE)) "\t" else ","
   d <- if (delim == "\t") read_tsv(path, show_col_types = FALSE) else read_csv(path, show_col_types = FALSE)
   d <- d %>% rename_all(tolower)
-  start_col <- intersect(c("region_start", "start"), names(d))[1]
-  end_col <- intersect(c("region_end", "end"), names(d))[1]
+  from_windows <- FALSE
+  if (all(c("region_start", "region_end") %in% names(d))) {
+    start_col <- "region_start"
+    end_col <- "region_end"
+  } else if (all(c("start", "end") %in% names(d))) {
+    start_col <- "start"
+    end_col <- "end"
+    from_windows <- TRUE
+  } else {
+    stop("Interval file must have chr and either region_start/region_end or start/end")
+  }
   chr_col <- intersect(c("chr", "chrom", "chromosome"), names(d))[1]
-  if (is.na(chr_col) || is.na(start_col) || is.na(end_col))
-    stop("Regions file must have chr/chrom, region_start/start, region_end/end")
+  if (is.na(chr_col)) stop("Interval file must have a chr/chrom column")
   d <- d %>% rename(chr = !!chr_col, region_start = !!start_col, region_end = !!end_col)
   d$region_start <- as.numeric(d$region_start)
   d$region_end <- as.numeric(d$region_end)
-  d %>% filter(!is.na(.data$chr), !is.na(.data$region_start), !is.na(.data$region_end))
+  d <- d %>% filter(!is.na(.data$chr), !is.na(.data$region_start), !is.na(.data$region_end))
+  if (from_windows) {
+    if (!"n_windows" %in% names(d)) d$n_windows <- 1L
+    message("Reading ", nrow(d), " windows as intervals (chr, start, end); each window is annotated on its own")
+  }
+  d
 }
 
 # Write region FASTA using samtools faidx (reference must be indexed).
@@ -559,13 +576,22 @@ build_region_genes <- function(region_sites, regions, asm_genes) {
               coding_effects = effect_counts_string(.data$coding_effect), .groups = "drop")
   overlap_rows <- tibble(qseqid = character(), gene = character())
   if (!is.null(asm_genes) && nrow(asm_genes) > 0) {
-    ov <- list()
+    # Index genes by chromosome. A window table is one interval per outlier window, so a
+    # dplyr filter of the whole GFF inside that loop does not finish.
+    genes_by_chr <- split(seq_len(nrow(asm_genes)), asm_genes$seqid)
+    hits <- vector("list", nrow(regions))
+    n_hit <- 0L
     for (i in seq_len(nrow(regions))) {
-      g <- asm_genes %>% filter(.data$seqid == regions$chr[i], .data$gene_end >= regions$region_start[i],
-                                .data$gene_start <= regions$region_end[i])
-      if (nrow(g) > 0) ov[[length(ov) + 1L]] <- tibble(qseqid = regions$qseqid[i], gene = coalesce(g$csq_key, g$gene_id))
+      idx <- genes_by_chr[[as.character(regions$chr[i])]]
+      if (is.null(idx)) next
+      hit <- asm_genes$gene_end[idx] >= regions$region_start[i] &
+        asm_genes$gene_start[idx] <= regions$region_end[i]
+      if (!any(hit)) next
+      g <- asm_genes[idx[hit], , drop = FALSE]
+      n_hit <- n_hit + 1L
+      hits[[n_hit]] <- tibble(qseqid = rep(regions$qseqid[i], nrow(g)), gene = coalesce(g$csq_key, g$gene_id))
     }
-    if (length(ov) > 0) overlap_rows <- bind_rows(ov) %>% distinct()
+    if (n_hit > 0) overlap_rows <- bind_rows(hits[seq_len(n_hit)]) %>% distinct()
   }
   out <- full_join(csq_rows, overlap_rows %>% mutate(overlaps_region = TRUE), by = c("qseqid", "gene")) %>%
     mutate(n_sites = coalesce(.data$n_sites, 0L), n_protein_altering = coalesce(.data$n_protein_altering, 0L),
@@ -630,7 +656,7 @@ build_csq_background <- function(sites, outlier_rows) {
 
 # Main
 option_list <- list(
-  make_option(c("--regions"), type = "character", default = NULL, help = "Regions CSV/TSV (from identify_outliers outlier_regions*.csv). Extra columns (outlier_stat, n_windows, region_mean_*, etc.) are preserved in output when present."),
+  make_option(c("--regions"), type = "character", default = NULL, help = "Interval CSV/TSV from identify_outliers: outlier_regions*.csv (region_start/region_end) or outlier_windows*.csv (start/end; each window is one interval). Extra columns (outlier_stat, n_windows, region_mean_*, sample stats) are preserved when present."),
   make_option(c("--reference"), type = "character", default = NULL, help = "Reference genome FASTA (indexed with samtools faidx); required with --blast-config"),
   make_option(c("--blast-config"), type = "character", default = NULL, help = "BLAST config YAML/JSON (list of db_path, name, gff_path)"),
   make_option(c("--variant-csq"), type = "character", default = NULL,
@@ -665,7 +691,7 @@ dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
 
 # Output filename suffix from regions file and optional run parameters (so outputs are distinguishable).
 output_suffix <- tools::file_path_sans_ext(basename(opts$regions))
-output_suffix <- sub("^outlier_regions_?", "", output_suffix)
+output_suffix <- sub("^outlier_(regions|windows)_?", "", output_suffix)
 if (!nzchar(output_suffix)) output_suffix <- "regions"
 csq_suffix <- output_suffix
 if (!is.na(opts$`blast-task`) && nzchar(trimws(opts$`blast-task`)))

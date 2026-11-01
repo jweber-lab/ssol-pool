@@ -3,7 +3,7 @@
 ###############################################################################
 # outlier_annotation.sh
 #
-# Wrapper for outlier_annotation.R: annotate outlier regions from
+# Wrapper for outlier_annotation.R: annotate outlier regions or windows from
 #   - consequence calls (variant_csq.sh variants_csq.tsv, or collate variants.h5 /
 #     single_position.h5) and the assembly GFF: sites, consequences and genes per region.
 #     Output: outlier_csq_sites_<suffix>.csv, outlier_csq_genes_<suffix>.csv,
@@ -42,8 +42,10 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Required:
-  --regions FILE         Regions CSV/TSV (from identify_outliers: outlier_regions*.csv).
-                          Extra columns (e.g. outlier_stat, n_windows, region_mean_*) are preserved in output.
+  --regions FILE         Interval CSV/TSV from identify_outliers: outlier_regions*.csv
+                          (region_start/region_end) or outlier_windows*.csv (start/end;
+                          each window is annotated as its own interval).
+                          Extra columns (e.g. outlier_stat, n_windows, region_mean_*) are preserved.
   At least one of --variant-csq, --gff, --blast-config.
 
 Consequence calls (same assembly as the regions; no BLAST):
