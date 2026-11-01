@@ -35,6 +35,7 @@ Usage: $0 --hdf5-dir DIR [OPTIONS]
   --dpi N                   PNG DPI [default: 300]
   --plot-format FORMAT      png, pdf, svg, both, or all [default: png]
   --dry-run                 Print the command only
+  --verbose                 Print the command before running it
   -h, --help                Show this help
 
 Outputs: fst_csq_<cat>.png/.csv, fst_csq_manhattan_<cat>.png (with --manhattan)
@@ -46,10 +47,12 @@ EOF
 
 ARGS=()
 DRY_RUN=false
+VERBOSE=false
 for a in "$@"; do
     case "$a" in
         -h|--help) usage; exit 0 ;;
         --dry-run) DRY_RUN=true ;;
+        --verbose) VERBOSE=true ;;
         *) ARGS+=("$a") ;;
     esac
 done
@@ -61,4 +64,5 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "DRY-RUN: ${CMD[*]}"
     exit 0
 fi
+[[ "$VERBOSE" == true ]] && echo "Command: ${CMD[*]}"
 "${CMD[@]}"

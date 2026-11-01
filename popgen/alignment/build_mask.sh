@@ -40,6 +40,7 @@ MIN_WINDOW_VOTE=0.5
 MERGE_DISTANCE=0
 MIN_LENGTH=1
 DRY_RUN=false
+VERBOSE=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -88,6 +89,7 @@ Options:
   --merge-distance N          Merge intervals closer than N bp (default: $MERGE_DISTANCE = touching/overlapping only)
   --min-length N              Drop combined intervals shorter than N bp after merging (default: $MIN_LENGTH)
   --dry-run                   Show inputs and settings without writing
+  --verbose                   Log the reference, thresholds, and each input source
   -h, --help                  Show this help
 
 Example:
@@ -117,6 +119,7 @@ while [[ $# -gt 0 ]]; do
         --merge-distance) MERGE_DISTANCE="$2"; shift 2 ;;
         --min-length) MIN_LENGTH="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -139,6 +142,15 @@ done
 [[ "$MERGE_DISTANCE" =~ ^[0-9]+$ && "$MIN_LENGTH" =~ ^[0-9]+$ ]] || { log_error "--merge-distance and --min-length must be integers"; exit 1; }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+if [[ "$VERBOSE" == true ]]; then
+    log "Verbose: reference=$REFERENCE fai=$FAI output=$OUTPUT_DIR"
+    log "Verbose: thresholds frac_mapq0>$MAX_FRAC_MAPQ0 rel_coverage=$MIN_REL_COVERAGE-$MAX_REL_COVERAGE breadth<$MIN_BREADTH mapq<$MIN_MEAN_MAPQ"
+    log "Verbose: sample_fraction=$MIN_SAMPLE_FRACTION window_vote=$MIN_WINDOW_VOTE merge_distance=$MERGE_DISTANCE min_length=$MIN_LENGTH"
+    log "Verbose: seq_qual_dir=${SEQ_QUAL_DIR:-none} scale=${SEQ_QUAL_SCALE:-auto}"
+    for f in "${REPEAT_BEDS[@]}"; do log "Verbose: repeat BED $f"; done
+    for f in "${REPEATMASKER_OUTS[@]}"; do log "Verbose: RepeatMasker $f"; done
+    for f in "${SOFTMASK_FASTAS[@]}"; do log "Verbose: softmask FASTA $f"; done
+fi
 
 # Seq-qual inputs at one scale
 SQ_FILES=()

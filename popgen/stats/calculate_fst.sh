@@ -41,6 +41,7 @@ FILTER_MASK_TOTAL_BED=""
 POOL_SIZE=50
 THREADS=1
 DRY_RUN=false
+VERBOSE=false
 REFERENCE_GENOME=""
 FILE_PREFIX=""  # Optional prefix for output files (default: no prefix)
 COMPARAND=""
@@ -126,6 +127,7 @@ Other options:
   --parallel-windows          Run multiple window/step combinations in parallel (default: false)
   --parallel-max-jobs N       Maximum concurrent window jobs when using --parallel-windows (default: number of CPU cores)
   --dry-run                   Preview commands without executing (dry-run mode)
+  --verbose                   Log the command that is run and pass --verbose to grenedalf
   -h, --help                  Show this help message
 
 Examples:
@@ -230,9 +232,9 @@ dry_run_cmd() {
     if [[ "$DRY_RUN" == true ]]; then
         log_dry_run "Would execute: $*"
         return 0
-    else
-        "$@"
     fi
+    [[ "$VERBOSE" == true ]] && log "Command: $*"
+    "$@"
 }
 
 # Function to check if command exists
@@ -436,6 +438,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --verbose)
+            VERBOSE=true
             shift
             ;;
         -h|--help)
@@ -1133,10 +1139,12 @@ if [[ "$WINDOW_TYPE" == "interval" ]]; then
             fi
             GRENEDALF_CMD+=(--comparand-list "$COMPARAND_LIST")
         fi
+        [[ "$VERBOSE" == true ]] && GRENEDALF_CMD+=(--verbose)
         
         # Run grenedalf fst (in parallel or sequential)
         if [[ "$PARALLEL_WINDOWS" == true ]] && [[ "$DRY_RUN" == false ]]; then
             log "  Launching grenedalf fst for window=$window_size, step=$step_size (background job)..."
+            [[ "$VERBOSE" == true ]] && log "  Command: ${GRENEDALF_CMD[*]}"
             "${GRENEDALF_CMD[@]}" > "${OUTPUT_DIR}/.fst_w${window_size}_s${step_size}.log" 2>&1 &
             PID=$!
             PIDS+=("$PID")
@@ -1282,6 +1290,7 @@ else
     
     # Add file suffix for single SNP mode to distinguish from windowed mode
     GRENEDALF_CMD+=(--file-suffix "_single")
+    [[ "$VERBOSE" == true ]] && GRENEDALF_CMD+=(--verbose)
     
     # Add sample renaming if we have sample names from CSV
     if [[ -n "$RENAME_SAMPLES_FILE" ]] && [[ -f "$RENAME_SAMPLES_FILE" ]]; then

@@ -35,6 +35,7 @@ DPI=300
 PLOT_FORMAT="png"
 RSCRIPT=""
 DRY_RUN=false
+VERBOSE=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -77,6 +78,7 @@ Optional:
   --plot-format FORMAT       png, pdf, svg, both, or all (default: png)
   --rscript PATH             Path to plot_region.R (default: same directory as this script)
   --dry-run                  Preview commands without executing
+  --verbose                  Log each region and the R command
   -h, --help                 Show this help
 
 Output:
@@ -185,6 +187,10 @@ while [[ $# -gt 0 ]]; do
             RSCRIPT="$2"
             shift 2
             ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -265,6 +271,7 @@ run_one_region() {
         log "DRY-RUN: ${R_CMD[*]}"
     else
         log "Region: $line"
+        [[ "$VERBOSE" == true ]] && log "Command: ${R_CMD[*]}"
         "${R_CMD[@]}"
     fi
 }
@@ -298,6 +305,7 @@ else
         exit 0
     fi
 
+    [[ "$VERBOSE" == true ]] && log "Command: ${R_CMD[*]}"
     "${R_CMD[@]}"
     log "Done."
 fi

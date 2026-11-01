@@ -287,7 +287,8 @@ main <- function() {
     make_option(c("--filter-mask-total-bed"), type = "character", default = NULL, help = "Same BED mask as calculate_pi_theta.sh / calculate_fst.sh; sites inside it are omitted from window counts"),
     make_option(c("--filter-mask-total-fasta"), type = "character", default = NULL, help = "vcftools-style mask FASTA (N/n/X/x/1 masked); use instead of --filter-mask-total-bed"),
     make_option(c("--no-nan-windows"), action = "store_true", default = TRUE, help = "When building from --reference, omit windows with n_sites=0 [default]"),
-    make_option(c("--keep-nan-windows"), action = "store_true", default = FALSE, help = "Write empty reference-grid windows")
+    make_option(c("--keep-nan-windows"), action = "store_true", default = FALSE, help = "Write empty reference-grid windows"),
+    make_option(c("--verbose"), action = "store_true", default = FALSE, help = "Log site counts and which window source is used")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
   sites_paths <- if (is.null(opt$`sites-tsv`)) character(0) else trimws(strsplit(opt$`sites-tsv`, ",", fixed = TRUE)[[1L]])
@@ -346,6 +347,7 @@ main <- function() {
     }
   }
   if (length(scales) == 0L) stop("Give --reference with --window-size [--step-size], or --template-dir / --template-tsv with w*_s* file names")
+  if (isTRUE(opt$verbose)) message("Window scales: ", paste(names(scales), collapse = ", "))
   fai <- if (!is.null(opt$reference)) read_fai(opt$reference) else NULL
   if (is.null(fai)) {
     no_tpl <- names(scales)[vapply(scales, function(z) length(z$files) == 0L, logical(1L))]
@@ -353,6 +355,10 @@ main <- function() {
   }
 
   sites <- prepare_sites(bind_rows(lapply(sites_paths, function(p) read_tab(p) %>% mutate(across(everything(), as.character)))) %>% readr::type_convert(col_types = readr::cols()))
+  if (isTRUE(opt$verbose)) {
+    message("Sites in: ", nrow(sites), " on ", length(unique(sites$chr)), " sequence(s); ",
+            length(sites_paths), " table(s)")
+  }
   if (!is.null(fai)) {
     unknown <- setdiff(unique(sites$chr), fai$chr)
     if (length(unknown) > 0L) message("Sites on ", length(unknown), " sequence(s) not in the reference index are skipped (e.g. ", paste(head(unknown, 3), collapse = ", "), ")")

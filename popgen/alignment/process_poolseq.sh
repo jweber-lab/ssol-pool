@@ -46,6 +46,7 @@ MPILEUP_MIN_QUAL=20
 SKIP_SYNC=false
 WRITE_MPILEUP=false
 DRY_RUN=false
+VERBOSE=false
 PARALLEL=false
 PARALLEL_MAX_JOBS=0
 SAMPLE_INFO_CSV=""
@@ -110,6 +111,7 @@ Optional:
   --skip-sync                 Skip sync file generation (default: false; a sync file is only written
                               with --use-grenedalf-sync or --popoolation2)
   --dry-run                   Preview commands without executing (dry-run mode)
+  --verbose                   Log the resolved reference, threads, sample, and filters
   --parallel                  Enable parallel processing for multiple samples
   --sample-info FILE          CSV file with sample information (see sample_info.csv)
                               Columns: sample_name, read1_file, read2_file, pool_size
@@ -725,6 +727,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
         --parallel)
             PARALLEL=true
             shift
@@ -797,6 +803,12 @@ if [[ -n "$REFERENCE" ]]; then
     fi
 fi
 [[ -n "$POPOOLATION2_JAR" && "$USE_GRENEDALF_SYNC" == false && "$SKIP_SYNC" == false ]] && WRITE_MPILEUP=true
+
+if [[ "$VERBOSE" == true ]]; then
+    log "Verbose: reference=${REFERENCE:-none} threads=$THREADS sample=${SAMPLE_NAME:-none} sample_info=${SAMPLE_INFO_CSV:-none}"
+    log "Verbose: parallel=$PARALLEL max_jobs=$PARALLEL_MAX_JOBS bam_min_mapq=$BAM_MIN_MAPQ primary_only=$BAM_PRIMARY_ONLY"
+    log "Verbose: skip_sync=$SKIP_SYNC mpileup=$WRITE_MPILEUP mpileup_min_qual=$MPILEUP_MIN_QUAL"
+fi
 
 # Handle parallel processing mode
 if [[ "$PARALLEL" == true ]]; then

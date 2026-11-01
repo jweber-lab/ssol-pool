@@ -52,7 +52,7 @@ Optional:
   --include-non-outlier    Also list GFF genes that overlap no outlier region
   --output-dir DIR         Output directory [default: .]
   --rscript PATH           Rscript [default: Rscript]
-  --verbose
+  --verbose                Log which annotation files and how many GFF genes were read
   --dry-run
   -h, --help
 

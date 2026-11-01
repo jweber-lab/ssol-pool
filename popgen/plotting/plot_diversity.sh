@@ -35,6 +35,7 @@ PLOT_STYLE="line"
 OVERLAY_SAMPLES=false
 RSCRIPT=""
 DRY_RUN=false
+VERBOSE=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -72,6 +73,8 @@ Optional:
   --asinh-scale NUMBER        Scale factor for asinh transformation (default: use global standard deviation)
   --rscript PATH              Path to plot_diversity.R (default: same directory as this script)
   --dry-run                   Preview commands without executing (dry-run mode)
+  --verbose                   Log the R command and pass --verbose to plot_diversity.R
+                              (files read, columns mapped, rows kept)
   -h, --help                  Show this help message
 
 Examples:
@@ -247,6 +250,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -402,6 +409,7 @@ fi
 if [[ "$OVERLAY_SAMPLES" == true ]]; then
     R_CMD+=(--overlay-samples)
 fi
+[[ "$VERBOSE" == true ]] && R_CMD+=(--verbose)
 
 # Run R script
 if [[ "$DRY_RUN" == true ]]; then
@@ -459,6 +467,7 @@ else
         log "  Asinh scale: $ASINH_SCALE"
     fi
     
+    [[ "$VERBOSE" == true ]] && log "Command: ${R_CMD[*]}"
     "${R_CMD[@]}" || {
         log_error "R script failed"
         exit 1

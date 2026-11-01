@@ -199,7 +199,7 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
 - `--no-nan-windows`: Drop windows where pi, theta, and Tajima's D are all NA (default: on). Filtered in this script; `grenedalf diversity` does not accept the flag. `--keep-nan-windows` keeps those rows.
 - `-t, --threads N`: Number of threads (default: 1)
 - `--dry-run`: Preview commands without executing (dry-run mode)
-- `--verbose`: Before grenedalf runs, write the reference FASTA order, each BAM `@HD`/`@SQ` header (and `idxstats` counts when the BAM is indexed), and the mask chromosome order to the log and to `{output_dir}/log/verbose/`. Also passes `--verbose` to grenedalf, which logs the sequence dictionary its sort check uses. A BED mask is not walked in that file order: grenedalf 0.6.3 iterates mask chromosomes from an unordered map, then requires each step to follow the FASTA dictionary.
+- `--verbose`: Log the resolved reference, samples, windows, and mask, list chromosomes omitted from each sample's mask, print each command, and pass `--verbose` to grenedalf.
 
 #### Output Files
 

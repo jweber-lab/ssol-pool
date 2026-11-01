@@ -23,6 +23,7 @@ RSCRIPT="Rscript"
 THREADS=1
 CSQ_EXTRA=()   # extra args to bcftools csq (e.g. --nc)
 DRY_RUN=false
+VERBOSE=false
 OUTPUT_DIR=""
 
 RED='\033[0;31m'
@@ -59,6 +60,7 @@ Optional:
   -t, --threads N             Threads for bcftools csq [default: 1]
   --csq-arg ARG               Pass-through to bcftools csq (repeatable)
   --dry-run
+  --verbose                   Log the BCF, reference, GFF, and how many chromosomes they share
   -h, --help
 
 Example:
@@ -81,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         -t|--threads) THREADS="$2"; shift 2 ;;
         --csq-arg) CSQ_EXTRA+=("$2"); shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -173,6 +176,13 @@ cut -f1 "${CONTIG_TMP}/vcf.stats" | sort -u > "${CONTIG_TMP}/vcf"
 n_vcf=$(wc -l < "${CONTIG_TMP}/vcf")
 n_missing=$(comm -23 "${CONTIG_TMP}/vcf" "${CONTIG_TMP}/gff" | wc -l)
 n_shared=$(comm -12 "${CONTIG_TMP}/vcf" "${CONTIG_TMP}/gff" | wc -l)
+if [[ "$VERBOSE" == true ]]; then
+    log "Verbose: bcf=$BCF_FILE reference=$REFERENCE gff=$GFF threads=$THREADS"
+    log "Verbose: $n_vcf chromosome(s) in the VCF, $n_shared shared with the GFF, $n_missing without features"
+    if [[ ${#CSQ_EXTRA[@]} -gt 0 ]]; then
+        log "Verbose: extra csq args: ${CSQ_EXTRA[*]}"
+    fi
+fi
 
 if [[ "$n_shared" -eq 0 ]]; then
     log_error "No chromosome names shared between $BCF_FILE and $GFF (e.g. VCF: $(head -1 "${CONTIG_TMP}/vcf"), GFF: $(head -1 "${CONTIG_TMP}/gff")); check naming or use --csq-arg --unify-chr-names"

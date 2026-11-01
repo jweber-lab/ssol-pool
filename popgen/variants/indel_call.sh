@@ -42,6 +42,7 @@ MIN_BASEQ=0
 FILTER_MASK_TOTAL_BED=""
 KEEP_RAW=false
 DRY_RUN=false
+VERBOSE=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -87,6 +88,7 @@ Optional:
   --freebayes PATH            Path to freebayes (default: freebayes in PATH)
   --bcftools PATH             Path to bcftools (default: bcftools in PATH)
   --dry-run                   Preview commands without executing
+  --verbose                   Log pools, chunking, filters, and the freebayes command
   -h, --help                  Show this help
 
 Outputs (in --output-dir):
@@ -143,6 +145,7 @@ while [[ $# -gt 0 ]]; do
         --min-baseq) MIN_BASEQ="$2"; shift 2 ;;
         --keep-raw) KEEP_RAW=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -269,6 +272,16 @@ FB_CMD=(
 )
 # 0-based half-open chunks (freebayes --region uses BED-style coordinates)
 mapfile -t REGIONS < <(awk -F'\t' -v size="$CHUNK_SIZE" '{for (s = 0; s < $2; s += size) printf "%s:%d-%d\n", $1, s, (s + size < $2 ? s + size : $2)}' "${REFERENCE_FASTA}.fai")
+
+if [[ "$VERBOSE" == true ]]; then
+    log "Verbose: reference=$REFERENCE_FASTA chunk-size=$CHUNK_SIZE skip-coverage=$SKIP_COVERAGE"
+    log "Verbose: coverage ${MIN_COVERAGE}-${MAX_COVERAGE}, min-count=$MIN_COUNT, min-frequency=$MIN_FREQUENCY, min-mapq=$MIN_MAPQ"
+    log "Verbose: mask=${FILTER_MASK_TOTAL_BED:-none}; ${#REGIONS[@]} chunk(s), $THREADS in parallel"
+    for bam in "${BAM_FILES[@]}"; do
+        log "Verbose: BAM $bam"
+    done
+    log "Verbose: command: ${FB_CMD[*]}"
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     log_dry_run "Would run ${#REGIONS[@]} freebayes chunks, $THREADS at a time, e.g.:"

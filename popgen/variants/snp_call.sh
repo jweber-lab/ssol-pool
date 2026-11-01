@@ -47,6 +47,7 @@ BIALLELIC_ONLY=false
 FILTER_MASK_TOTAL_BED=""
 FILTER_MASK_TOTAL_FASTA=""
 DRY_RUN=false
+VERBOSE=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -91,6 +92,7 @@ Optional:
   --bcftools PATH             Path to bcftools (default: bcftools in PATH)
   -t, --threads N             Threads for grenedalf (default: 1)
   --dry-run                   Preview commands without executing
+  --verbose                   Log inputs, filters, and the grenedalf command; pass --verbose to grenedalf
   -h, --help                  Show this help
 
 Outputs (in --output-dir):
@@ -146,6 +148,7 @@ while [[ $# -gt 0 ]]; do
         --min-mapq) MIN_MAPQ="$2"; shift 2 ;;
         --min-baseq) MIN_BASEQ="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -301,6 +304,13 @@ if [[ ${#SAMPLE_NAMES[@]} -gt 0 ]]; then
     GRENEDALF_CMD+=(--rename-samples-list "${WORK_DIR}/rename_samples.csv")
 fi
 GRENEDALF_CMD+=(--out-dir "$WORK_DIR" --allow-file-overwriting --threads "$THREADS")
+[[ "$VERBOSE" == true ]] && GRENEDALF_CMD+=(--verbose)
+if [[ "$VERBOSE" == true ]]; then
+    log "Verbose: ${#BAM_FILES[@]} BAM(s), sync=${SYNC_FILE:-none}, reference=$REFERENCE_FASTA"
+    log "Verbose: coverage ${MIN_COVERAGE}-${MAX_COVERAGE}, min-count=$MIN_COUNT, min-frequency=$MIN_FREQUENCY, biallelic-only=$BIALLELIC_ONLY"
+    log "Verbose: mask bed=${FILTER_MASK_TOTAL_BED:-none} fasta=${FILTER_MASK_TOTAL_FASTA:-none}"
+    log "Verbose: command: ${GRENEDALF_CMD[*]}"
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     log_dry_run "Would execute: ${GRENEDALF_CMD[*]}"

@@ -21,6 +21,7 @@ FILTER_MASK_TOTAL_FASTA=""
 OUTPUT_DIR="."
 RSCRIPT="Rscript"
 DRY_RUN=false
+VERBOSE=false
 NO_NAN_WINDOWS=true
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
@@ -56,6 +57,7 @@ Optional:
   --output-dir DIR          Where to write variant_features_wW_sS.tsv [default: .]
   --rscript PATH            [default: Rscript]
   --dry-run
+  --verbose                 Log the R command, and in R the site count and window source
   -h, --help
 
 Example:
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         --output-dir|-o) OUTPUT_DIR="$2"; shift 2 ;;
         --rscript) RSCRIPT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -151,11 +154,13 @@ if [[ "$NO_NAN_WINDOWS" == true ]]; then
 else
     ARGS+=(--keep-nan-windows)
 fi
+[[ "$VERBOSE" == true ]] && ARGS+=(--verbose)
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "Would run: $RSCRIPT $WIN_R ${ARGS[*]}"
     exit 0
 fi
+[[ "$VERBOSE" == true ]] && log "Command: $RSCRIPT $WIN_R ${ARGS[*]}"
 
 log "Running variant_csq_windows.R"
 "$RSCRIPT" "$WIN_R" "${ARGS[@]}"

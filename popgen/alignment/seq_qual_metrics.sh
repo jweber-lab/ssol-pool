@@ -72,6 +72,8 @@ Optional:
   --no-unfiltered             Use the listed BAMs as given. By default, X.unfiltered.bam is used in place
                               of X.bam when it exists (kept by process_poolseq.sh --bam-min-mapq /
                               --bam-primary-only), since a MAPQ-filtered BAM has no MAPQ-0 reads to measure.
+                              A BAM with no index gets one under {output_dir}/{sample}/, so the BAM
+                              directory does not need to be writable.
   --dry-run                   Preview commands without executing
   --verbose                   Verbose diagnostics
   -h, --help                  Show this help
@@ -126,6 +128,34 @@ log_dry_run() {
 
 check_command() {
     command -v "$1" &>/dev/null || { log_error "$1 not found"; exit 1; }
+}
+
+# Sample processes launched after the log tee. Waited by pid so `wait` never collects tee.
+SAMPLE_PIDS=()
+TEE_PID=""
+
+# Kill any sample still running, close the log pipe, and let tee exit.
+close_log_tee() {
+    local pid
+    for pid in "${SAMPLE_PIDS[@]+"${SAMPLE_PIDS[@]}"}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            # Each sample was started under monitor mode, so -pid is its process group
+            # (the sample shell and the samtools processes it spawned).
+            kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in "${SAMPLE_PIDS[@]+"${SAMPLE_PIDS[@]}"}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    SAMPLE_PIDS=()
+    if [[ "${LOG_REDIRECT_ACTIVE:-false}" == true ]]; then
+        LOG_REDIRECT_ACTIVE=false
+        exec 1>&3 2>&4
+    fi
+    if [[ -n "${TEE_PID:-}" ]]; then
+        wait "$TEE_PID" 2>/dev/null || true
+        TEE_PID=""
+    fi
 }
 
 gcd() {
@@ -188,9 +218,14 @@ if [[ "$DRY_RUN" == false ]]; then
     } >> "$LOG_FILE"
     log "Log file: $LOG_FILE"
     exec 3>&1 4>&2
+    # $! is the tee from the process substitution. A bare `wait` later would wait for
+    # that tee as well, and tee waits for this shell to close stdout: the script hangs
+    # and a Ctrl-C leaves tee running. Sample jobs are waited by pid, then the pipe is closed.
     exec 1> >(tee -a "$LOG_FILE" >&3)
+    TEE_PID=$!
     exec 2>&1
     LOG_REDIRECT_ACTIVE=true
+    trap close_log_tee EXIT
 fi
 
 # Resolve BAMs and sample names from CSV if provided
@@ -271,6 +306,10 @@ WINDOWS_CSV=$(IFS=,; echo "${WINDOW_SIZE_ARRAY[*]}")
 STEPS_CSV=$(IFS=,; echo "${STEP_SIZE_ARRAY[*]}")
 log "Bin size: ${BIN} bp (gcd of window and step sizes); MAPQ threshold: ${MIN_MAPQ}; breadth depth: ${MIN_DEPTH}"
 log "Parallelism: ${THREADS} chunk(s) per sample, ${MAX_JOBS} sample(s) at a time"
+if [[ "$VERBOSE" == true ]]; then
+    log "Verbose: reference=${REFERENCE_GENOME:-none} sample_info=${SAMPLE_INFO_CSV:-none} prefer_unfiltered=$USE_UNFILTERED"
+    log "Verbose: ${#BAM_FILES[@]} BAM(s); scales=${WINDOWS_CSV} steps=${STEPS_CSV}"
+fi
 if (( BIN < 50 )); then
     log_warn "Bin size ${BIN} bp is small (window/step sizes share few factors); binning will use more memory and time"
 fi
@@ -381,7 +420,7 @@ EOF
 # Process one sample: index BAM if needed, compute bins over parallel chunks, build all scales.
 process_one_sample() {
     local bam="$1" sample_name="$2"
-    local sample_out tmp chroms total target n_chunks i j w s out_tsv median
+    local sample_out chroms total target n_chunks i j w s out_tsv median
     sample_out="${OUTPUT_DIR}/${sample_name}"
 
     if [[ "$DRY_RUN" == true ]]; then
@@ -396,11 +435,30 @@ process_one_sample() {
 
     mkdir -p "$sample_out"
     tmp=$(mktemp -d "${sample_out}/.tmp_seq_qual.XXXXXX")
-    trap 'kill $(jobs -rp) 2>/dev/null || true; rm -rf "'"$tmp"'"' EXIT
+    # tmp and chunk_pids stay global to this sample shell: the EXIT trap runs after
+    # this function returns, and locals would already have been discarded.
+    chunk_pids=()
+    local bam_query="$bam"
+    cleanup_sample() {
+        local pid
+        for pid in "${chunk_pids[@]+"${chunk_pids[@]}"}"; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+        rm -rf "$tmp"
+    }
+    trap cleanup_sample EXIT
 
+    # An index beside the BAM is used as-is. Otherwise write one under the sample
+    # directory: samtools index next to the BAM fails when that directory is not writable
+    # ("failed to create or write index"), which is the usual case for a shared BAM store.
     if [[ ! -f "${bam}.bai" && ! -f "${bam%.bam}.bai" && ! -f "${bam}.csi" ]]; then
-        log "Indexing BAM: $bam"
-        samtools index -@ "$THREADS" "$bam" || { log_error "samtools index failed for $bam"; return 1; }
+        local idx="${sample_out}/$(basename "$bam").bai"
+        log "No index beside $(basename "$bam"); writing $idx"
+        if ! samtools index -@ "$THREADS" -o "$idx" "$bam"; then
+            log_error "samtools index failed for $bam (index path: $idx)"
+            return 1
+        fi
+        bam_query="${bam}##idx##${idx}"
     fi
 
     # Chromosome table: idx, name, length (reference .fai order when given, else BAM header order)
@@ -444,10 +502,10 @@ process_one_sample() {
     run_chunk() {
         local reg="$1" base="${1%.regions}"
         while IFS=$'\t' read -r _ c s e; do
-            samtools view -F 0x704 "$bam" "{${c}}:${s}-${e}"
+            samtools view -F 0x704 "$bam_query" "{${c}}:${s}-${e}"
         done < "$reg" | awk -v g="$BIN" -v q="$MIN_MAPQ" "$AWK_VIEW" "$reg" - > "${base}.bins" || return 1
         while IFS=$'\t' read -r _ c s e; do
-            samtools depth -a -Q "$MIN_MAPQ" -r "{${c}}:${s}-${e}" "$bam"
+            samtools depth -a -Q "$MIN_MAPQ" -r "{${c}}:${s}-${e}" "$bam_query"
         done < "$reg" | awk -v g="$BIN" -v md="$MIN_DEPTH" "$AWK_DEPTH" "$reg" - >> "${base}.bins" || return 1
     }
 
@@ -457,8 +515,10 @@ process_one_sample() {
             wait -n || true
         done
         { run_chunk "$reg" || touch "${reg%.regions}.failed"; } &
+        chunk_pids+=($!)
     done
-    wait
+    # No-argument wait returns 0 even when a chunk failed; the .failed files are the check.
+    wait || true
     if compgen -G "${tmp}/chunk_*.failed" > /dev/null; then
         log_error "$(ls "${tmp}"/chunk_*.failed | wc -l) chunk(s) failed for $sample_name ($bam)"
         return 1
@@ -494,6 +554,9 @@ fi
 STATUS_DIR="${LOG_DIR}/.status_${TIMESTAMP}"
 mkdir -p "$STATUS_DIR"
 declare -a RUN_SAMPLES=()
+# Monitor mode gives each sample its own process group so a failed run can kill
+# that sample's samtools children without signaling the log tee.
+[[ "$DRY_RUN" == false ]] && set -m
 for i in "${!BAM_FILES[@]}"; do
     bam="${BAM_FILES[$i]}"
     if [[ ${#SAMPLE_NAMES[@]} -gt i && -n "${SAMPLE_NAMES[$i]:-}" ]]; then
@@ -509,14 +572,27 @@ for i in "${!BAM_FILES[@]}"; do
         process_one_sample "$bam" "$sample_name"
         continue
     fi
-    while (( $(jobs -rp | wc -l) >= MAX_JOBS )); do
-        wait -n || true
+    while (( ${#SAMPLE_PIDS[@]} >= MAX_JOBS )); do
+        wait -n "${SAMPLE_PIDS[@]}" || true
+        still=()
+        for pid in "${SAMPLE_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                still+=("$pid")
+            fi
+        done
+        SAMPLE_PIDS=("${still[@]+"${still[@]}"}")
     done
-    # errexit stays active in the subshell; the status file is written only when the sample completes
-    ( export LOG_PREFIX="[$sample_name] "; process_one_sample "$bam" "$sample_name"; touch "${STATUS_DIR}/${i}.ok" ) &
+    # set +m inside the sample so its chunk jobs stay in this process group.
+    # errexit stays active; the status file is written only when the sample completes.
+    ( set +m; trap - EXIT; export LOG_PREFIX="[$sample_name] "; process_one_sample "$bam" "$sample_name"; touch "${STATUS_DIR}/${i}.ok" ) &
+    SAMPLE_PIDS+=($!)
     RUN_SAMPLES[$i]="$sample_name"
 done
-wait
+for pid in "${SAMPLE_PIDS[@]+"${SAMPLE_PIDS[@]}"}"; do
+    wait "$pid" || true
+done
+[[ "$DRY_RUN" == false ]] && set +m
+SAMPLE_PIDS=()
 FAILED_SAMPLES=()
 for i in "${!RUN_SAMPLES[@]}"; do
     [[ -f "${STATUS_DIR}/${i}.ok" ]] || FAILED_SAMPLES+=("${RUN_SAMPLES[$i]}")

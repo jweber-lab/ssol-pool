@@ -238,8 +238,14 @@ if (!dir.exists(opts$`output-dir`)) {
 }
 
 # ---- INPUT ----
-if (opts$verbose) cat("Reading FST file:", opts$`fst-file`, "\n")
 dat <- read_fst_for_pbs(opts$`fst-file`, opts$`pop1-name`, opts$`pop2-name`, opts$`pop3-name`)
+if (opts$verbose) {
+  message("FST file: ", opts$`fst-file`)
+  message("Rows: ", nrow(dat), "; columns: ", paste(names(dat), collapse = ", "))
+  message("NA counts: fst_12=", sum(is.na(dat$fst_12)),
+          " fst_13=", sum(is.na(dat$fst_13)),
+          " fst_23=", sum(is.na(dat$fst_23)))
+}
 
 if (opts$`drop-all-na`) {
     n_before <- nrow(dat)
@@ -264,8 +270,10 @@ dat$pop3 <- opts$`pop3-name`
 if (median_scope == "genome") {
     med_PBS <- rep(median(dat$PBS, na.rm = TRUE), nrow(dat))
     med_T23 <- rep(median(dat$T23, na.rm = TRUE), nrow(dat))
+    if (opts$verbose) message("Genome medians: PBS=", signif(med_PBS[1], 6), " T23=", signif(med_T23[1], 6))
     dat$PBE <- compute_pbe1(dat$PBS, dat$T23, med_PBS, med_T23)
 } else {
+    if (opts$verbose) message("Medians computed per chromosome")
     by_chr <- dat %>% group_by(chr) %>% summarise(med_PBS = median(PBS, na.rm = TRUE), med_T23 = median(T23, na.rm = TRUE), .groups = "drop")
     dat <- dat %>% left_join(by_chr, by = "chr")
     dat$PBE <- compute_pbe1(dat$PBS, dat$T23, dat$med_PBS, dat$med_T23)

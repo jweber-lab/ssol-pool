@@ -38,6 +38,7 @@ OUTPUT_FORMAT="tsv"
 MEDIAN_SCOPE="genome"   # genome or chromosome
 DROP_ALL_NA=false
 DRY_RUN=false
+VERBOSE=false
 
 # Colors, used in logging messages
 RED='\033[0;31m'
@@ -82,6 +83,7 @@ Optional:
   --median-scope SCOPE        Medians for PBE: genome (default) or chromosome
   --drop-all-na               Drop rows with NA in any FST pair; skip output if no rows remain
   --dry-run                   Preview only, do not run
+  --verbose                   Log each comparison and, in R, row counts, NA counts, and medians
   -h, --help                  Show this help
 
 Output files (format depends on --output-format). Each FST file x trio writes:
@@ -320,6 +322,7 @@ while [[ $# -gt 0 ]]; do
         --median-scope)  MEDIAN_SCOPE="$2"; shift 2 ;;
         --drop-all-na)   DROP_ALL_NA=true; shift ;;
         --dry-run)       DRY_RUN=true; shift ;;
+        --verbose)       VERBOSE=true; shift ;;
         -h|--help)       usage; exit 0 ;;
         *)
             log_error "Unknown option: $1"
@@ -525,7 +528,9 @@ for fi in "${!FST_FILES[@]}"; do
             --median-scope "$MEDIAN_SCOPE"
         )
         [[ "$DROP_ALL_NA" == true ]] && R_ARGS+=(--drop-all-na)
+        [[ "$VERBOSE" == true ]] && R_ARGS+=(--verbose)
         log "Running PBS/PBE for $fst_path | $p1 / $p2 / $p3 (prefix: $out_prefix)"
+        [[ "$VERBOSE" == true ]] && log "  Rscript $R_SCRIPT ${R_ARGS[*]}"
         if ! Rscript "$R_SCRIPT" "${R_ARGS[@]}"; then
             log_error "R script failed for $fst_path ($p1 / $p2 / $p3)"
             exit 1
