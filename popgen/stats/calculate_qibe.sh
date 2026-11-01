@@ -1,0 +1,588 @@
+#!/bin/bash
+
+###############################################################################
+# calculate_qibe.sh
+#
+# Calculate Quartet Internal Branch Statistic (QIBS) 
+# and Quartet Internal Branch Excess (QIBE)
+# from per-locus FST data calculated by calculate_fst.sh.
+#
+# QIBS measures the length of the internal branch of a given quartet arrangement:
+# QIBS(1,2,3,4) = (T13 + T14 + T23 + T24) / 4 - (T12 + T34) / 2
+# where the quartet of 1,2,3,4 has topology with (1,2) and (3,4) grouped, i.e. Newick format ((1,2),3,4);
+# and where Tij = -ln(1 - Fst_ij) is the branch length between populations i and j
+# Mispecification of the quartet topology can lead to negative QIBS values, 
+# equal to -1/2 the branch length of the true internal branch in expectation.
+# 
+# 
+# QIBE uses median-based scaling to isolate population-specific local adaptation:
+# QIBE = QIBS - Expectation(QIBS) = QIBS - QEBS/median(QEBS) * median(QIBS)
+# where QEBS is the measure of the total branch length on external branches of the quartet:
+# QEBS(1,2,3,4) = T12 + T34
+# and where medians are whole-genome or chromosome-specific (see --median-scope).
+#
+#
+# Computation is done in R (calculate_qibe.R) in a vectorized way.
+# Output can be written as TSV, CSV, or HDF5.
+#
+# Usage: See README.md or run with --help
+###############################################################################
+
+set -euo pipefail  # Exit on error, undefined vars, pipe failures
+
+# Default parameters
+FST_FILE=""
+FST_DIR=""
+POP1_NAME=""
+POP2_NAME=""
+POP3_NAME=""
+POP4_NAME=""
+QIBE_COMPARISONS_FILE=""  # CSV with pop1, pop2, pop3, pop4 (alternative to single --pop1/2/3/4-name)
+SAMPLE_INFO_CSV=""        # Optional: validate comparison names against this (e.g. sample_info.csv)
+COMPUTE_DUP_COMPS=false   # If set, compute QIBE for the same quartet grouping more than once
+OUTPUT_DIR=""
+FILE_PREFIX=""
+OUTPUT_FORMAT="tsv"
+MEDIAN_SCOPE="genome"   # genome or chromosome
+DROP_ALL_NA=false
+DRY_RUN=false
+VERBOSE=false
+
+# Colors, used in logging messages
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+# Global log file variable (set after argument parsing)
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE=""
+LOG_REDIRECT_ACTIVE=false  # Flag to indicate if stdout/stderr redirection is active
+
+# Function to print usage
+usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Input options (choose one):
+  -f, --fst-file FILE         Single FST TSV/CSV file from grenedalf/calculate_fst.sh
+  -d, --fst-dir DIR           Directory containing FST output: discover all *fst*.tsv and *fst*.csv,
+                              run QIBS/QIBE for each, and encode window/step in output names
+                              (e.g. w1000_s500_Echo_Kjer_Cheney_Myv_qibe.tsv)
+
+Quartet (choose one). Topology is ((pop1,pop2),(pop3,pop4)):
+  --pop1-name NAME            Population 1, grouped with population 2
+  --pop2-name NAME            Population 2, grouped with population 1
+  --pop3-name NAME            Population 3, grouped with population 4
+  --pop4-name NAME            Population 4, grouped with population 3
+  --qibe-comparisons FILE     CSV with columns pop1, pop2, pop3, pop4 (one quartet per row).
+                              Names should match samples (e.g. in sample_info.csv).
+                              A later row with the same two sister pairs is skipped with a warning
+                              (order within a pair, and which pair is listed first, do not change QIBS)
+                              unless --compute-dup-comps is set.
+
+Required:
+  -o, --output-dir DIR        Output directory for results
+
+Optional:
+  --sample-info FILE          Optional CSV (e.g. sample_info.csv) to validate comparison
+                              names; warns if a population is not in the sample_name column
+  --compute-dup-comps         Compute QIBE again for a repeated quartet grouping (default: skip)
+  --file-prefix PREFIX        Prefix for output files (default: none)
+  --output-format FMT         Output format: tsv, csv, or hdf5 (default: tsv)
+  --median-scope SCOPE        Medians for QIBE: genome (default) or chromosome
+  --drop-all-na               Drop rows with NA in any of the six FST pairs; skip output if none remain
+  --dry-run                   Preview only, do not run
+  --verbose                   Log each quartet and, in R, row counts, NA counts, and medians
+  -h, --help                  Show this help
+
+Output files (format depends on --output-format). Each FST file x quartet writes:
+  {output_dir}/{file-prefix_}{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibs.{tsv|csv}
+  {output_dir}/{file-prefix_}{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibe.{tsv|csv}
+  where label is w{W}_s{S} or single (from the FST filename). Columns include chr, pos,
+  start, end (when the FST table has window bounds), the six FST pairs, T12, T13, T14,
+  T23, T24, T34, QEBS, QIBS, QIBE, and pop1/pop2/pop3/pop4.
+  hdf5: {output_dir}/{file-prefix_}{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibs_qibe.h5
+  Logs: {output_dir}/log/{file-prefix_}calculate_qibe_YYYYmmdd_HHMMSS.log
+
+Examples:
+
+  # Single FST file. Grouping ((Echo,Kjer),(Cheney,Myv)):
+  $0 --fst-file fst/fst_w1000_s500.tsv \\
+     --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_results
+
+  # FST directory: discover all *fst*.tsv/csv and run QIBS/QIBE for each:
+  $0 --fst-dir fst/ \\
+     --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv \\
+     -o qibe_results --output-format csv
+
+  # Several quartets from CSV (pop1, pop2, pop3, pop4; names match sample_info):
+  $0 --fst-dir fst/ --qibe-comparisons qibe_comparisons.csv -o qibe_results --sample-info sample_info.csv
+
+  # Outputting to HDF5 instead of tsv/csv:
+  $0 --fst-file fst.tsv --pop1-name A --pop2-name B --pop3-name C --pop4-name D -o out --output-format hdf5
+
+Note: Requires FST for all six pairs among the four populations
+(pop1-pop2, pop3-pop4, and the four cross pairs).
+
+EOF
+}
+
+# Function to log messages (to both console and log file)
+# Note: If LOG_REDIRECT_ACTIVE is true, stdout/stderr are redirected via tee, so we don't write directly to avoid duplicates
+log() {
+    local message="${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
+    echo -e "$message"
+    # Also write directly to log file (without colors) if LOG_FILE is set and redirection is not active
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        local clean_message="[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+        echo "$clean_message" >> "$LOG_FILE"
+    fi
+}
+
+log_error() {
+    local message="${RED}[ERROR]${NC} $1"
+    echo -e "$message" >&2
+    # Also write directly to log file if redirection is not active
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        local clean_message="[ERROR] $1"
+        echo "$clean_message" >> "$LOG_FILE"
+    fi
+}
+
+log_warn() {
+    local message="${YELLOW}[WARN]${NC} $1"
+    echo -e "$message"
+    # Also write directly to log file if redirection is not active
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        local clean_message="[WARN] $1"
+        echo "$clean_message" >> "$LOG_FILE"
+    fi
+}
+
+log_dry_run() {
+    local message="${YELLOW}[DRY-RUN]${NC} $1"
+    echo -e "$message"
+    # Directories are not created in dry-run, so only append when the log already exists
+    if [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]] && [[ "$LOG_REDIRECT_ACTIVE" == false ]]; then
+        local clean_message="[DRY-RUN] $1"
+        echo "$clean_message" >> "$LOG_FILE"
+    fi
+}
+
+dry_run_cmd() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dry_run "Would execute: $*"
+        return 0
+    fi
+    "$@"
+}
+
+check_command() {
+    if ! command -v "$1" &>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+check_file() {
+    if [[ ! -f "$1" ]]; then
+        log_error "File not found: $1"
+        exit 1
+    fi
+}
+
+check_dir() {
+    if [[ ! -d "$1" ]]; then
+        if [[ "$DRY_RUN" == true ]]; then
+            log_dry_run "Would create directory: $1"
+        else
+            log "Creating directory: $1"
+            mkdir -p "$1"
+        fi
+    fi
+}
+
+# Derive output label from FST filename: w{W}_s{S}, single, or sanitized basename
+derive_fst_label() {
+    local base="$1"
+    base="${base%.csv}"
+    base="${base%.tsv}"
+    if [[ "$base" =~ fst_w([0-9]+)_s([0-9]+)$ ]]; then
+        echo "w${BASH_REMATCH[1]}_s${BASH_REMATCH[2]}"
+    elif [[ "$base" =~ _single$ ]] || [[ "$base" == *"fst_single" ]]; then
+        echo "single"
+    else
+        # Fallback: strip leading path and fst, sanitize
+        echo "${base}" | sed 's/^.*fst//; s/^[-_]//; s/[^a-zA-Z0-9_-]/_/g; s/^$/run/'
+    fi
+}
+
+# Discover all FST files in dir; sets FST_FILES and FST_LABELS (caller must declare)
+# Order: single first, then windowed by label (w1000_s500, w5000_s2500, ...)
+discover_fst_files() {
+    local dir="$1"
+    FST_FILES=()
+    FST_LABELS=()
+    local f label
+    while IFS= read -r -d '' f; do
+        [[ -f "$f" ]] || continue
+        label=$(derive_fst_label "$(basename "$f")")
+        FST_FILES+=("$f")
+        FST_LABELS+=("$label")
+    done < <(find "$dir" -maxdepth 1 \( -name "*fst*.tsv" -o -name "*fst*.csv" \) -print0 2>/dev/null)
+    # Sort: single first, then by label
+    local i j tmp li lj swap
+    for (( i=0; i < ${#FST_FILES[@]}; i++ )); do
+        for (( j=i+1; j < ${#FST_FILES[@]}; j++ )); do
+            li="${FST_LABELS[$i]}"; lj="${FST_LABELS[$j]}"
+            swap=false
+            if [[ "$lj" == "single" ]] && [[ "$li" != "single" ]]; then swap=true; fi
+            if [[ "$swap" == false ]] && [[ "$li" != "single" ]] && [[ "$lj" != "single" ]] && [[ "$li" > "$lj" ]]; then swap=true; fi
+            if [[ "$swap" == true ]]; then
+                tmp="${FST_FILES[$i]}"; FST_FILES[$i]="${FST_FILES[$j]}"; FST_FILES[$j]="$tmp"
+                tmp="${FST_LABELS[$i]}"; FST_LABELS[$i]="${FST_LABELS[$j]}"; FST_LABELS[$j]="$tmp"
+            fi
+        done
+    done
+}
+
+# Sister-pair label with names sorted, so (A,B) and (B,A) share a key.
+canon_pair() {
+    local a="$1" b="$2"
+    if [[ "$a" < "$b" || "$a" == "$b" ]]; then
+        printf '%s|%s' "$a" "$b"
+    else
+        printf '%s|%s' "$b" "$a"
+    fi
+}
+
+# Key for topology ((p1,p2),(p3,p4)). Order within a pair and which pair is first do not matter.
+quartet_key() {
+    local a b
+    a=$(canon_pair "$1" "$2")
+    b=$(canon_pair "$3" "$4")
+    if [[ "$a" < "$b" || "$a" == "$b" ]]; then
+        printf '%s||%s' "$a" "$b"
+    else
+        printf '%s||%s' "$b" "$a"
+    fi
+}
+
+# Parse qibe_comparisons CSV (columns pop1, pop2, pop3, pop4).
+# Sets COMPARISON_POP1..4. Skips a repeated sister-pair partition unless COMPUTE_DUP_COMPS is true.
+# Returns 0 on success, 1 on error.
+parse_qibe_comparisons() {
+    local csv="$1"
+    COMPARISON_POP1=()
+    COMPARISON_POP2=()
+    COMPARISON_POP3=()
+    COMPARISON_POP4=()
+    declare -A SEEN_KEYS
+    local line_num=0
+    local pop1_col=-1 pop2_col=-1 pop3_col=-1 pop4_col=-1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_num=$((line_num + 1))
+        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Parse CSV line (simple: no quoted commas)
+        IFS=',' read -r -a F <<< "$line"
+        for i in "${!F[@]}"; do
+            F[$i]=$(echo "${F[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        done
+
+        if [[ $line_num -eq 1 ]]; then
+            for i in "${!F[@]}"; do
+                local h="${F[$i]}"
+                h=$(echo "$h" | tr '[:upper:]' '[:lower:]')
+                case "$h" in
+                    pop1) pop1_col=$i ;;
+                    pop2) pop2_col=$i ;;
+                    pop3) pop3_col=$i ;;
+                    pop4) pop4_col=$i ;;
+                esac
+            done
+            if [[ $pop1_col -lt 0 ]] || [[ $pop2_col -lt 0 ]] || [[ $pop3_col -lt 0 ]] || [[ $pop4_col -lt 0 ]]; then
+                log_error "qibe_comparisons CSV must have header columns: pop1, pop2, pop3, pop4 (found in: $line)"
+                return 1
+            fi
+            continue
+        fi
+
+        [[ ${#F[@]} -le $pop1_col ]] || [[ ${#F[@]} -le $pop2_col ]] || [[ ${#F[@]} -le $pop3_col ]] || [[ ${#F[@]} -le $pop4_col ]] && continue
+        local p1="${F[$pop1_col]}" p2="${F[$pop2_col]}" p3="${F[$pop3_col]}" p4="${F[$pop4_col]}"
+        [[ -z "$p1" ]] || [[ -z "$p2" ]] || [[ -z "$p3" ]] || [[ -z "$p4" ]] && continue
+
+        if [[ "$p1" == "$p2" || "$p1" == "$p3" || "$p1" == "$p4" || "$p2" == "$p3" || "$p2" == "$p4" || "$p3" == "$p4" ]]; then
+            log_error "Quartet needs four different populations (line $line_num): $p1, $p2, $p3, $p4"
+            return 1
+        fi
+
+        local key
+        key=$(quartet_key "$p1" "$p2" "$p3" "$p4")
+        if [[ -n "${SEEN_KEYS[$key]:-}" ]] && [[ "$COMPUTE_DUP_COMPS" != true ]]; then
+            log_warn "Skipping duplicate quartet ((${p1},${p2}),(${p3},${p4})) on line $line_num; the same two sister pairs were already listed. Use --compute-dup-comps to compute it anyway."
+            continue
+        fi
+        SEEN_KEYS[$key]=1
+        COMPARISON_POP1+=("$p1")
+        COMPARISON_POP2+=("$p2")
+        COMPARISON_POP3+=("$p3")
+        COMPARISON_POP4+=("$p4")
+    done < "$csv"
+
+    if [[ ${#COMPARISON_POP1[@]} -eq 0 ]]; then
+        log_error "No valid quartets found in $csv (or all skipped as duplicates)"
+        return 1
+    fi
+    return 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -f|--fst-file)   FST_FILE="$2"; shift 2 ;;
+        -d|--fst-dir)    FST_DIR="$2";  shift 2 ;;
+        --pop1-name)     POP1_NAME="$2"; shift 2 ;;
+        --pop2-name)     POP2_NAME="$2"; shift 2 ;;
+        --pop3-name)     POP3_NAME="$2"; shift 2 ;;
+        --pop4-name)     POP4_NAME="$2"; shift 2 ;;
+        --qibe-comparisons) QIBE_COMPARISONS_FILE="$2"; shift 2 ;;
+        --sample-info)   SAMPLE_INFO_CSV="$2"; shift 2 ;;
+        --compute-dup-comps) COMPUTE_DUP_COMPS=true; shift ;;
+        -o|--output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --file-prefix)   FILE_PREFIX="$2"; shift 2 ;;
+        --output-format) OUTPUT_FORMAT="$2"; shift 2 ;;
+        --median-scope)  MEDIAN_SCOPE="$2"; shift 2 ;;
+        --drop-all-na)   DROP_ALL_NA=true; shift ;;
+        --dry-run)       DRY_RUN=true; shift ;;
+        --verbose)       VERBOSE=true; shift ;;
+        -h|--help)       usage; exit 0 ;;
+        *)
+            log_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [[ -z "$OUTPUT_DIR" ]]; then
+    log_error "Missing required argument: --output-dir"
+    usage
+    exit 1
+fi
+
+# Initialize log file (create output/log directory)
+check_dir "$OUTPUT_DIR"
+LOG_DIR="${OUTPUT_DIR}/log"
+check_dir "$LOG_DIR"
+TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+if [[ -n "$FILE_PREFIX" ]]; then
+    LOG_FILE="${LOG_DIR}/${FILE_PREFIX}_${SCRIPT_NAME%.*}_${TIMESTAMP}.log"
+else
+    LOG_FILE="${LOG_DIR}/${SCRIPT_NAME%.*}_${TIMESTAMP}.log"
+fi
+
+if [[ "$DRY_RUN" == false ]]; then
+    touch "$LOG_FILE"
+    {
+        echo "=========================================="
+        echo "$SCRIPT_NAME"
+        echo "Started: $(date +'%Y-%m-%d %H:%M:%S')"
+        echo "Log file: $LOG_FILE"
+        echo "=========================================="
+    } >> "$LOG_FILE"
+    log "Log file: $LOG_FILE"
+
+    # Redirect all stdout and stderr to log file (in addition to console)
+    # Use file descriptors to preserve original stdout/stderr for console output
+    exec 3>&1 4>&2
+    # Tee stdout to both console (fd 3) and log file
+    exec 1> >(tee -a "$LOG_FILE" >&3)
+    # Redirect stderr to stdout (so it also gets teed to console and log file)
+    exec 2>&1
+    # Set flag so logging functions know redirection is active (avoid duplicate writes)
+    LOG_REDIRECT_ACTIVE=true
+else
+    log_dry_run "Would create log file: $LOG_FILE"
+fi
+
+# Quartets: either from --qibe-comparisons or a single --pop1/2/3/4-name
+declare -a COMPARISON_POP1 COMPARISON_POP2 COMPARISON_POP3 COMPARISON_POP4
+if [[ -n "$QIBE_COMPARISONS_FILE" ]]; then
+    if [[ -n "$POP1_NAME" ]] || [[ -n "$POP2_NAME" ]] || [[ -n "$POP3_NAME" ]] || [[ -n "$POP4_NAME" ]]; then
+        log_warn "Ignoring --pop1-name/--pop2-name/--pop3-name/--pop4-name when --qibe-comparisons is set"
+    fi
+    if [[ "$DRY_RUN" == false ]]; then
+        check_file "$QIBE_COMPARISONS_FILE"
+        parse_qibe_comparisons "$QIBE_COMPARISONS_FILE" || exit 1
+        log "Loaded ${#COMPARISON_POP1[@]} quartet(s) from $QIBE_COMPARISONS_FILE"
+    else
+        if [[ -f "$QIBE_COMPARISONS_FILE" ]]; then
+            parse_qibe_comparisons "$QIBE_COMPARISONS_FILE" 2>/dev/null || {
+                COMPARISON_POP1=("Echo"); COMPARISON_POP2=("Kjer"); COMPARISON_POP3=("Cheney"); COMPARISON_POP4=("Myv")
+            }
+        else
+            COMPARISON_POP1=("Echo"); COMPARISON_POP2=("Kjer"); COMPARISON_POP3=("Cheney"); COMPARISON_POP4=("Myv")
+            log_dry_run "Would load quartets from $QIBE_COMPARISONS_FILE"
+        fi
+    fi
+    # Optional: validate names against sample_info
+    if [[ -n "$SAMPLE_INFO_CSV" ]] && [[ -f "$SAMPLE_INFO_CSV" ]] && [[ "$DRY_RUN" == false ]]; then
+        declare -A VALID_NAMES
+        saw_header=false
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$saw_header" == false ]]; then
+                saw_header=true
+                continue
+            fi
+            IFS=',' read -r sn _ <<< "$line"
+            sn=$(echo "$sn" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [[ -n "$sn" ]] && VALID_NAMES[$sn]=1
+        done < "$SAMPLE_INFO_CSV"
+        for i in "${!COMPARISON_POP1[@]}"; do
+            for role in pop1 pop2 pop3 pop4; do
+                case "$role" in
+                    pop1) name="${COMPARISON_POP1[$i]}" ;;
+                    pop2) name="${COMPARISON_POP2[$i]}" ;;
+                    pop3) name="${COMPARISON_POP3[$i]}" ;;
+                    pop4) name="${COMPARISON_POP4[$i]}" ;;
+                esac
+                [[ -z "${VALID_NAMES[$name]:-}" ]] && log_warn "$role '$name' not in sample_info sample_name column"
+            done
+        done
+    fi
+else
+    if [[ -z "$POP1_NAME" ]] || [[ -z "$POP2_NAME" ]] || [[ -z "$POP3_NAME" ]] || [[ -z "$POP4_NAME" ]]; then
+        log_error "Missing population names: use --pop1-name, --pop2-name, --pop3-name, --pop4-name or --qibe-comparisons FILE"
+        usage
+        exit 1
+    fi
+    if [[ "$POP1_NAME" == "$POP2_NAME" || "$POP1_NAME" == "$POP3_NAME" || "$POP1_NAME" == "$POP4_NAME" || "$POP2_NAME" == "$POP3_NAME" || "$POP2_NAME" == "$POP4_NAME" || "$POP3_NAME" == "$POP4_NAME" ]]; then
+        log_error "Quartet needs four different populations: $POP1_NAME, $POP2_NAME, $POP3_NAME, $POP4_NAME"
+        exit 1
+    fi
+    COMPARISON_POP1=("$POP1_NAME")
+    COMPARISON_POP2=("$POP2_NAME")
+    COMPARISON_POP3=("$POP3_NAME")
+    COMPARISON_POP4=("$POP4_NAME")
+fi
+
+# Resolve FST file(s) and labels
+declare -a FST_FILES FST_LABELS
+if [[ -n "$FST_FILE" ]]; then
+    [[ "$DRY_RUN" == false ]] && check_file "$FST_FILE"
+    FST_FILES=("$FST_FILE")
+    FST_LABELS=("$(derive_fst_label "$(basename "$FST_FILE")")")
+    log "Using FST file: $FST_FILE (output label: ${FST_LABELS[0]})"
+elif [[ -n "$FST_DIR" ]]; then
+    if [[ "$DRY_RUN" == false ]]; then
+        [[ -d "$FST_DIR" ]] || { log_error "FST directory not found: $FST_DIR"; exit 1; }
+        discover_fst_files "$FST_DIR"
+        [[ ${#FST_FILES[@]} -gt 0 ]] || { log_error "No *fst*.tsv or *fst*.csv in $FST_DIR"; exit 1; }
+        log "Found ${#FST_FILES[@]} FST file(s) in $FST_DIR"
+        for i in "${!FST_FILES[@]}"; do
+            log "  ${FST_FILES[$i]} -> ${FST_LABELS[$i]}"
+        done
+    else
+        discover_fst_files "$FST_DIR" 2>/dev/null || true
+        if [[ ${#FST_FILES[@]} -eq 0 ]]; then
+            FST_FILES=("${FST_DIR}/fst_w1000_s500.csv")
+            FST_LABELS=("w1000_s500")
+        fi
+        log_dry_run "Would discover FST files in $FST_DIR and run for each"
+    fi
+else
+    log_error "Provide either --fst-file or --fst-dir"
+    usage
+    exit 1
+fi
+
+# Validate output format and median-scope
+case "$OUTPUT_FORMAT" in
+    tsv|csv|hdf5) ;;
+    *)
+        log_error "Invalid --output-format: $OUTPUT_FORMAT (use tsv, csv, or hdf5)"
+        exit 1
+        ;;
+esac
+case "${MEDIAN_SCOPE:-genome}" in
+    genome|chromosome) ;;
+    *)
+        log_error "Invalid --median-scope: ${MEDIAN_SCOPE:-genome} (use genome or chromosome)"
+        exit 1
+        ;;
+esac
+MEDIAN_SCOPE="${MEDIAN_SCOPE:-genome}"
+
+# Locate R script (same directory as this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+R_SCRIPT="${SCRIPT_DIR}/calculate_qibe.R"
+if [[ "$DRY_RUN" == false ]] && [[ ! -f "$R_SCRIPT" ]]; then
+    log_error "R script not found: $R_SCRIPT"
+    exit 1
+fi
+
+# Require R
+check_command "Rscript" || { log_error "Rscript not found. Please install R and Rscript."; exit 1; }
+
+if [[ "$DRY_RUN" == true ]]; then
+    log_dry_run "DRY-RUN MODE: Commands will be previewed but not executed"
+    log_dry_run "Input: ${#FST_FILES[@]} FST file(s), ${#COMPARISON_POP1[@]} quartet(s)"
+    for i in "${!FST_FILES[@]}"; do
+        log_dry_run "  ${FST_FILES[$i]} -> ${FST_LABELS[$i]}"
+    done
+    for i in "${!COMPARISON_POP1[@]}"; do
+        log_dry_run "  Quartet: ((${COMPARISON_POP1[$i]},${COMPARISON_POP2[$i]}),(${COMPARISON_POP3[$i]},${COMPARISON_POP4[$i]}))"
+    done
+    log_dry_run "Output dir: $OUTPUT_DIR, format: $OUTPUT_FORMAT, median-scope: $MEDIAN_SCOPE"
+    log_dry_run "Would run Rscript $R_SCRIPT for each (FST file x quartet) with --file-prefix <label>_<pop1>_<pop2>_<pop3>_<pop4>"
+    exit 0
+fi
+
+# Sanitize population name for use in filenames
+sanitize_pop_name() {
+    echo "$1" | sed 's/[^a-zA-Z0-9_-]/_/g'
+}
+
+# Run R for each (FST file x comparison)
+for fi in "${!FST_FILES[@]}"; do
+    fst_path="${FST_FILES[$fi]}"
+    label="${FST_LABELS[$fi]}"
+    for ci in "${!COMPARISON_POP1[@]}"; do
+        p1="${COMPARISON_POP1[$ci]}"
+        p2="${COMPARISON_POP2[$ci]}"
+        p3="${COMPARISON_POP3[$ci]}"
+        p4="${COMPARISON_POP4[$ci]}"
+        s1=$(sanitize_pop_name "$p1")
+        s2=$(sanitize_pop_name "$p2")
+        s3=$(sanitize_pop_name "$p3")
+        s4=$(sanitize_pop_name "$p4")
+        out_prefix="${FILE_PREFIX}${FILE_PREFIX:+_}${label}_${s1}_${s2}_${s3}_${s4}"
+        R_ARGS=(
+            --fst-file "$fst_path"
+            --pop1-name "$p1"
+            --pop2-name "$p2"
+            --pop3-name "$p3"
+            --pop4-name "$p4"
+            --output-dir "$OUTPUT_DIR"
+            --output-format "$OUTPUT_FORMAT"
+            --file-prefix "$out_prefix"
+            --median-scope "$MEDIAN_SCOPE"
+        )
+        [[ "$DROP_ALL_NA" == true ]] && R_ARGS+=(--drop-all-na)
+        [[ "$VERBOSE" == true ]] && R_ARGS+=(--verbose)
+        log "Running QIBS/QIBE for $fst_path | (($p1,$p2),($p3,$p4)) (prefix: $out_prefix)"
+        [[ "$VERBOSE" == true ]] && log "  Rscript $R_SCRIPT ${R_ARGS[*]}"
+        if ! Rscript "$R_SCRIPT" "${R_ARGS[@]}"; then
+            log_error "R script failed for $fst_path (($p1,$p2),($p3,$p4))"
+            exit 1
+        fi
+    done
+done
+
+log "Done. Results in $OUTPUT_DIR"

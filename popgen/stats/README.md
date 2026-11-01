@@ -11,6 +11,8 @@ The analysis scripts calculate:
 3. **Tajima's D**: Test statistic comparing π and θ to detect selection and demographic events
 4. **PBS**: Population Branch Statistic — population-specific branch length from three pairwise FSTs
 5. **PBE**: Population Branch Excess — PBS minus the median-scaled expectation from the sister-pair branch (`T23`)
+6. **QIBS**: Quartet Internal Branch Statistic — internal-branch length of a four-population grouping `((pop1, pop2), (pop3, pop4))`
+7. **QIBE**: Quartet Internal Branch Excess — QIBS minus the median-scaled expectation from the two sister-pair branches (`QEBS`)
 
 ## Requirements
 
@@ -32,14 +34,14 @@ The analysis scripts calculate:
 
 **Common Requirements:**
 - **samtools** - Required for BAM file processing (if using grenedalf)
-- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `calculate_pbe.R` and `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
+- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `calculate_pbe.R`, `calculate_qibe.R`, and `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
 
 ### Input Files
 
 **Primary Method (grenedalf):**
 - **BAM files** - Direct input from the main processing pipeline (`process_poolseq.sh`)
   - One BAM file per population for diversity and FST
-  - PBS/PBE are computed from FST tables (`calculate_pbe.sh`), not from BAMs
+  - PBS/PBE (`calculate_pbe.sh`) and QIBS/QIBE (`calculate_qibe.sh`) are computed from FST tables, not from BAMs
   - BAM files should be sorted and indexed
 
 **Fallback Method (popoolation2):**
@@ -60,7 +62,7 @@ After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked
 4. **Variants** ([`snp_call.sh`](../variants/README.md#snp_callsh) for SNPs, [`indel_call.sh`](../variants/README.md#indel_callsh) for indels): **same unmasked** reference as alignment; same **`--filter-mask-total-bed`** as diversity/FST.
 5. **Functional annotation** ([`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr)): **`--reference` must be the unmasked assembly that matches your GFF** (not hard-masked). Run csq on a BCF that still has the same `chr`/`pos` as that assembly.
 
-**PBE** (`calculate_pbe.sh`) uses FST outputs, so repeat handling follows step 3.
+**PBE** (`calculate_pbe.sh`) and **QIBE** (`calculate_qibe.sh`) use FST outputs, so repeat handling follows step 3.
 
 Masked positions count as missing in grenedalf, so they are removed from the valid-loci denominator instead of being treated as invariant. Collate keeps grenedalf's `total.masked` as **`n_masked`** (masked bp per window) in the diversity and FST HDF5, so windows that are mostly masked can be filtered downstream.
 
@@ -72,6 +74,7 @@ Every windowed table must use the same `(chr, start, end)` so collate's exact jo
 
 - **Diversity and FST require `--reference-genome`** for interval windows (FST also requires it whenever a mask is given). Without it, grenedalf ends each sample's windows at its last covered position, so samples and pairs get different grids, and with a mask grenedalf 0.6.3 crashes partway through. With a reference, all samples and pairs share one grid. Grenedalf walks each BAM in its `@SQ` header order and requires that order to follow the reference FASTA. `calculate_pi_theta.sh` checks this before calling grenedalf. A header that lists `scaffold_171` before `scaffold_170` while the FASTA has the opposite aborts with `Invalid sorting order ... scaffold_171 to scaffold_170`. Reorder that BAM to the reference dictionary (`samtools reheader`, then `samtools sort`). With a BED mask, grenedalf then appends chromosomes that have no reads, in hash order rather than FASTA order, and that append is the same abort (`scaffold_171:808` to `scaffold_170:1` when both have zero reads). `calculate_pi_theta.sh` drops those chromosomes from that sample's mask. The resulting windows are absent rather than all-NA; the default all-NA filter would have removed them anyway. Chromosomes with no data at all are omitted. Fully masked or empty windows are dropped by default. FST passes grenedalf `--no-nan-windows`. Diversity does not: that flag is fst-only, so `calculate_pi_theta.sh` removes rows whose pi, theta, and Tajima's D are all NA after grenedalf writes the table. `--keep-nan-windows` keeps those rows.
 - **PBE** keeps FST's `start` / `end`. Older PBE files with only `pos` get `end = start + window - 1` in collate.
+- **QIBE** also keeps FST's `start` / `end`. Collate does not read QIBE tables.
 - **`seq_qual_metrics.sh`** builds the same grid from the `.fai` and fails if BAM lengths differ from it.
 - **`variant_csq_windows.sh`** builds the same grid from `--reference` and `-w` / `--step-size`, and by default omits windows with no sites (`--no-nan-windows`). Pass **`--template-dir`** (diversity or FST output) so the rows are exactly the masked-stat windows. **`--filter-mask-total-bed`** is the same mask as diversity/FST; sites inside it are not counted.
 - **Collate** checks each table against the grid and against the first table at the same scale (on shared chromosomes). `Window check ... matches ...` means the same rows. `Window check ... share the grid` means both use start = 1 + k·step, but one table omits windows the other kept (diversity drops all-NA windows and chromosomes with no reads, per sample). Collate keeps each table's own rows and left-joins on `(chr, start, end)`. `WARNING window check` is only for windows off that grid. For `--seq-qual-dir` and `--variant-feature-dir`, an exact `w{W}_s{S}` table is used when present; otherwise collate keeps the analysis-grid windows from a finer same-window table when the analysis step is a multiple of the source step (e.g. `seq_qual_metrics_w1000_s250.tsv` supplies the 500 bp starts for diversity `w1000_s500`).
@@ -97,6 +100,8 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
   --window-type interval --window-size 1000 --step-size 500 \
   --filter-mask-total-bed mask/mask.bed -o fst_out ...
 ./calculate_pbe.sh --fst-dir fst_out --pop1-name Echo --pop2-name Kjer --pop3-name Cheney -o pbe_out
+./calculate_qibe.sh --fst-dir fst_out \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_out
 
 # 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
@@ -290,6 +295,64 @@ For each FST file × trio (label is `w{W}_s{S}` or `single` from the FST name):
 
 The FST table must contain all three pairs. Population names keep their case.
 
+### calculate_qibe.sh / calculate_qibe.R
+
+Computes Quartet Internal Branch Statistic (QIBS) and Quartet Internal Branch Excess (QIBE) from **FST tables** produced by `calculate_fst.sh`. It does not read BAMs or sync files. Names in `--pop1-name` through `--pop4-name` must match the FST pair columns (grenedalf’s `PopA:PopB.fst`).
+
+The quartet is `((pop1, pop2), (pop3, pop4))`: pop1 with pop2, and pop3 with pop4. Order within a sister pair, and which pair is listed first, give the same QIBS. A different pairing is a different topology.
+
+**Tij = −ln(1 − FSTij)** (FST ≥ 1 is capped at 10, as in PBS). The six pairs are the two sister pairs and the four cross pairs.
+
+**QIBS = (T13 + T14 + T23 + T24) / 4 − (T12 + T34) / 2**. This is the internal-branch length. A grouping that does not match the data can be negative; in expectation that value is −1/2 the internal branch of the true grouping.
+
+**QEBS = T12 + T34**, the two sister-pair (external) branches.
+
+**QIBE = QIBS − (QEBS / median(QEBS)) × median(QIBS)**. Medians are genome-wide (`--median-scope genome`, default) or per chromosome. This is an excess relative to the external-branch length, not a Z-score.
+
+Windows are whatever the FST file used: `start` / `end` are copied when present. Run FST with the same `--reference-genome`, `--window-size`, and `--step-size` as diversity.
+
+#### Usage
+
+```bash
+# One quartet, every *fst*.tsv/csv in the FST directory (single and each w{W}_s{S})
+./calculate_qibe.sh --fst-dir fst_out \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_out
+
+# One FST file
+./calculate_qibe.sh --fst-file fst_out/fst_w1000_s500.tsv \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_out
+
+# Several quartets (CSV header: pop1,pop2,pop3,pop4). A repeated sister-pair partition is skipped
+# unless --compute-dup-comps. --sample-info warns if a name is missing from sample_name.
+./calculate_qibe.sh --fst-dir fst_out --qibe-comparisons qibe_comparisons.csv \
+  --sample-info ../../sample_info.csv -o qibe_out
+```
+
+#### Options
+
+**Input (choose one):**
+- `-f, --fst-file FILE`: one FST TSV/CSV from `calculate_fst.sh`
+- `-d, --fst-dir DIR`: directory of `*fst*.tsv` / `*fst*.csv` (top level)
+
+**Quartet (choose one):**
+- `--pop1-name` / `--pop2-name` / `--pop3-name` / `--pop4-name`: one grouping, `((pop1, pop2), (pop3, pop4))`
+- `--qibe-comparisons FILE`: CSV with columns `pop1`, `pop2`, `pop3`, `pop4`
+
+**Required:** `-o, --output-dir DIR`
+
+**Optional:** `--sample-info FILE`, `--compute-dup-comps`, `--file-prefix PREFIX`, `--output-format tsv|csv|hdf5` (default tsv), `--median-scope genome|chromosome`, `--drop-all-na` (drop rows with any of the six FSTs missing; skip the file if none remain), `--dry-run`, `--verbose`
+
+#### Output files
+
+For each FST file × quartet (label is `w{W}_s{S}` or `single` from the FST name):
+
+- `{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibs.tsv` — chr, pos, start, end (if present), pop1–pop4, six FST columns, T12, T13, T14, T23, T24, T34, QEBS, QIBS
+- `{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibe.tsv` — same plus QIBE
+- `--output-format hdf5`: `{label}_{pop1}_{pop2}_{pop3}_{pop4}_qibs_qibe.h5`
+- Logs: `{output_dir}/log/calculate_qibe_YYYYmmdd_HHMMSS.log`
+
+The FST table must contain all six pairs. Population names keep their case. The four names must be different. Collate reads `*_pbe.tsv` only; it does not read these QIBE files.
+
 ## Workflow Example
 
 ### Complete Analysis Pipeline
@@ -323,7 +386,7 @@ done
   --threads 8
 ```
 
-3. **Calculate FST, then PBS/PBE** (same reference, mask, and window/step as diversity):
+3. **Calculate FST, then PBS/PBE and QIBS/QIBE** (same reference, mask, and window/step as diversity):
 ```bash
 ./calculate_fst.sh \
   --sample-info ../../sample_info.csv \
@@ -336,6 +399,10 @@ done
   --fst-dir ./fst_out \
   --pop1-name Echo --pop2-name Kjer --pop3-name Outgroup \
   --output-dir ./pbe_out
+./calculate_qibe.sh \
+  --fst-dir ./fst_out \
+  --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv \
+  --output-dir ./qibe_out
 ```
 
 ### Alternative Workflow with Popoolation2 (Fallback)
@@ -385,7 +452,7 @@ java -jar /opt/popoolation2/mpileup2sync.jar \
   --step-size 5000
 ```
 
-4. **PBS/PBE** in this repo always come from `calculate_fst.sh` tables (grenedalf), not from popoolation2. After a popoolation2 diversity run, still compute FST with `calculate_fst.sh` on the BAMs, then `calculate_pbe.sh --fst-dir fst_out ...`.
+4. **PBS/PBE and QIBS/QIBE** in this repo always come from `calculate_fst.sh` tables (grenedalf), not from popoolation2. After a popoolation2 diversity run, still compute FST with `calculate_fst.sh` on the BAMs, then `calculate_pbe.sh --fst-dir fst_out ...` and `calculate_qibe.sh --fst-dir fst_out ...`.
 
 ## Dry-Run Mode
 
@@ -448,6 +515,21 @@ This is particularly useful for:
 - Negative PBE: less pop1-specific divergence than expected given T23
 - Downstream outlier calling (`identify_outliers.sh`) uses the collated PBE quantiles, not a fixed ±2 cutoff
 
+### QIBS (Quartet Internal Branch Statistic)
+
+- Internal-branch length of the grouping `((pop1, pop2), (pop3, pop4))`
+- **QIBS = (T13 + T14 + T23 + T24) / 4 − (T12 + T34) / 2**, with **Tij = −ln(1 − FSTij)**
+- Positive QIBS: an internal branch separating the two sister pairs
+- Negative QIBS: the named grouping does not match the pairwise FSTs. In expectation the value is −1/2 the internal branch of the true grouping
+- Swapping names within a sister pair, or swapping the two pairs, does not change QIBS. Pairing different populations does
+
+### QIBE (Quartet Internal Branch Excess)
+
+- **Not a Z-score.** QIBE = QIBS − (QEBS / median(QEBS)) × median(QIBS), with **QEBS = T12 + T34** and medians genome-wide or per chromosome
+- Positive QIBE: a longer internal branch than that external-branch relationship predicts
+- Negative QIBE: a shorter internal branch than expected given QEBS
+- Collate does not rank QIBE. Outlier calling uses the collated PBE quantiles
+
 ## Notes
 
 - Window sizes should be chosen based on your genome size and expected signal
@@ -463,6 +545,9 @@ This is particularly useful for:
   - Pop1: Target population (e.g., adapted)
   - Pop2: Comparison population (e.g., control)
   - Pop3: Outgroup (e.g., ancestral)
+- QIBS requires four different populations and a grouping `((pop1, pop2), (pop3, pop4))`
+  - The two sister pairs are the branches in QEBS
+  - A second row with those same pairs is skipped unless `--compute-dup-comps` is set
 
 ## Troubleshooting
 
@@ -485,6 +570,13 @@ For large genomes:
 - `Could not find FST columns for all three pairs`: names must match the FST header (`Echo:Kjer.fst`). Use the `sample_name` values from `sample_info.csv`
 - `--fst-dir` sees no files: `calculate_fst.sh` writes `fst_w{W}_s{S}.{csv|tsv}` or `fst_single.{csv|tsv}` in that directory
 - Collate missing PBE: pass `--pbe-dir` to the directory of `*_pbe.tsv` (not the HDF5 from `--output-format hdf5`)
+
+### QIBS/QIBE errors
+
+- `Could not find FST columns`: the table needs all six pairs among the four populations (`Echo:Kjer.fst` and the other five). Names must be the `sample_name` values from `sample_info.csv`
+- `Quartet needs four different populations`: a name was repeated
+- A skipped quartet in the log is the same two sister pairs as an earlier row. Pass `--compute-dup-comps` to write it again
+- QIBE output is `*_qibe.tsv`. Collate's `--pbe-dir` does not read those files
 
 ## Citation
 
