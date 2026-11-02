@@ -6,7 +6,7 @@
 # Bash wrapper for identify_outliers.R. Identifies outlier windows from
 # diversity (pi, theta, tajima_d), FST, and PBE using quantile thresholds.
 # Main options: --hdf5-dir or --diversity-dir/--fst-dir, --output-dir,
-# --high-quantile, --low-quantile, --statistics (pi, theta, tajima_d, pbe, fst).
+# --high-quantile, --low-quantile, --statistics (pi, theta, tajima_d, pbe, qibe, lrpi, fst).
 # For output file formats and column naming, see the header of identify_outliers.R.
 #
 # Workflow: Validates args and dirs -> builds Rscript command with all flags
@@ -68,7 +68,7 @@ Usage: $0 [OPTIONS]
 Required (at least one):
   --fst-dir DIR              Directory containing FST TSV files (from calculate_fst.sh)
   --diversity-dir DIR        Directory containing diversity TSV files (from calculate_pi_theta.sh)
-  --hdf5-dir DIR             Directory containing collated HDF5 from collate.sh (diversity_w*_s*.h5, fst_w*.h5, pbe_*.h5; columns as in collate.R)
+  --hdf5-dir DIR             Directory containing collated HDF5 from collate.sh (diversity_w*_s*.h5, fst_w*.h5, pbe_*.h5, qibe_*.h5, lrpi_*.h5; columns as in collate.R)
 
 Required:
   --output-dir DIR           Output directory for results
@@ -93,7 +93,7 @@ Optional:
   --region-end N             Restrict to interval end on --chromosome (requires --chromosome)
   --window-size NUMBER       Filter to specific window size (default: all window sizes)
   --step-size NUMBER         Filter to specific step size (required when several steps exist for --window-size)
-  --statistics LIST          Comma-separated list: pi, theta, tajima_d, pbe, fst (default: pi,theta,tajima_d)
+  --statistics LIST          Comma-separated list: pi, theta, tajima_d, pbe, qibe, lrpi, fst (default: pi,theta,tajima_d)
   --sample-pairs LIST        Comma-separated list of FST pairs to process (default: all)
   --top-n-extreme N          Return only the N most extreme values in each quantile (optional)
   --merge-distance N         Merge nearby windows into regions: bp or 'auto' = max(2*window, 2000) [default: auto]

@@ -4,14 +4,14 @@
 # identify_outliers.R
 #
 # Purpose: Identify outlier candidate windows from diversity (pi, theta, tajima_d),
-# FST, and PBE statistics based on quantile thresholds. Use --statistics to select
-# which stats to process (pi, theta, tajima_d, pbe, fst). Outputs summary
+# FST, PBE, QIBE, and LRPI statistics based on quantile thresholds. Use --statistics to select
+# which stats to process (pi, theta, tajima_d, pbe, qibe, lrpi, fst). Outputs summary
 # statistics and outlier windows/regions to CSV.
 # Usage: Rscript identify_outliers.R --hdf5-dir DIR --output-dir DIR
 #        --high-quantile Q --low-quantile Q [--statistics pi,theta,tajima_d] [options]
 #
 # When using --hdf5-dir, expected files are collate output: diversity_w*_s*.h5,
-# fst_w*.h5 or fst_single.h5, pbe_*.h5, with group /windows or /sites and columns
+# fst_w*.h5 or fst_single.h5, pbe_*.h5, qibe_*.h5, lrpi_*.h5, with group /windows or /sites and columns
 # as documented in collate.R (e.g. chr, start, end, sample/pop1,pop2, stat values,
 # *_rank, *_quantile, and where present: n_snps, n_total, mean_coverage, mean_mapping_quality).
 #
@@ -22,7 +22,9 @@
 #     outlier_stat (colon-separated stats, e.g. pi:fst); outlier_direction (high, low, or high:low);
 #     optional window_type (seed/expanded when seed-expand mode); then value columns
 #     samplename.statname (e.g. Cheney.pi) and samplename.statname_quantile (window quantile 0-1);
-#     sample1:sample2.fst, sample1:sample2:sample3.pbe and their _quantile columns.
+#     sample1:sample2.fst, sample1:sample2.lrpi, sample1:sample2:sample3.pbe,
+#     sample1:sample2:sample3:sample4.qibe
+#     and their _quantile columns.
 #   outlier_regions_*.csv   One row per merged/expanded region when --merge-distance or
 #     seed-expand is used. Filename includes _across_samples or _within_samples and
 #     _seed_expand or _merge_only. Columns: chr, region_start, region_end, n_windows,
@@ -133,7 +135,7 @@ option_list <- list(
     make_option(c("--step-size"), type="numeric", default=NULL,
                 help="Filter to specific step size (required when several steps exist for --window-size)", metavar="NUMBER"),
     make_option(c("--statistics"), type="character", default="pi,theta,tajima_d",
-                help="Comma-separated list: pi, theta, tajima_d, pbe, fst (default: pi,theta,tajima_d). Diversity stats use diversity data; fst and pbe use FST/PBE data when provided.", metavar="LIST"),
+                help="Comma-separated list: pi, theta, tajima_d, pbe, qibe, lrpi, fst (default: pi,theta,tajima_d). Diversity stats use diversity data; fst, pbe, qibe, and lrpi use the matching collate HDF5 when provided.", metavar="LIST"),
     make_option(c("--sample-pairs"), type="character", default="",
                 help="Comma-separated list of FST pairs to process (default: all)", metavar="LIST"),
     make_option(c("--top-n-extreme"), type="numeric", default=NULL,
@@ -215,9 +217,9 @@ if ((!is.null(opts$`region-start`) || !is.null(opts$`region-end`)) && is.null(op
 # Parse statistics list
 statistics <- strsplit(opts$statistics, ",")[[1]]
 statistics <- trimws(statistics)
-valid_stats <- c("pi", "theta", "tajima_d", "pbe", "fst")
+valid_stats <- c("pi", "theta", "tajima_d", "pbe", "qibe", "lrpi", "fst")
 if (!all(statistics %in% valid_stats)) {
-    stop("--statistics must be one or more of: pi, theta, tajima_d, pbe, fst")
+    stop("--statistics must be one or more of: pi, theta, tajima_d, pbe, qibe, lrpi, fst")
 }
 
 # Create output directory if it doesn't exist
@@ -524,13 +526,15 @@ read_fst_from_h5 <- function(hdf5_dir, selected_window_size = NULL, selected_pai
     list(data = bind_rows(out), pairs = pairs_named)
 }
 
-# Read PBE data from collated HDF5 (pbe_w*.h5 or pbe_single.h5). Group /windows or /sites.
-read_pbe_from_h5 <- function(hdf5_dir, selected_window_size = NULL, selected_step_size = NULL) {
+# Read PBE (3 pops, trio_id) or QIBE (4 pops, quartet_id) from collated HDF5.
+# Files are pbe_*.h5, qibe_*.h5, or lrpi_*.h5. Group /windows or /sites.
+read_pbe_from_h5 <- function(hdf5_dir, selected_window_size = NULL, selected_step_size = NULL, stat = "pbe", n_pops = 3L, id_col = "trio_id") {
     if (!requireNamespace("hdf5r", quietly = TRUE)) {
-        stop("Package hdf5r required for PBE from HDF5. Install with: install.packages(\"hdf5r\")")
+        stop("Package hdf5r required for ", stat, " from HDF5. Install with: install.packages(\"hdf5r\")")
     }
-    files <- list.files(hdf5_dir, pattern = "^pbe.*\\.h5$", full.names = TRUE)
+    files <- list.files(hdf5_dir, pattern = paste0("^", stat, ".*\\.h5$"), full.names = TRUE)
     if (length(files) == 0) return(NULL)
+    pop_cols <- paste0("pop", seq_len(n_pops))
     out <- list()
     for (f in files) {
         if (!file_matches_scale(basename(f), selected_window_size, selected_step_size)) next
@@ -541,7 +545,7 @@ read_pbe_from_h5 <- function(hdf5_dir, selected_window_size = NULL, selected_ste
         if ("windows" %in% names(h5)) grp_name <- "windows" else if ("sites" %in% names(h5)) grp_name <- "sites"
         if (is.null(grp_name)) { h5$close_all(); next }
         grp <- h5[[grp_name]]
-        if (!"pbe" %in% names(grp) || !"pop1" %in% names(grp)) { h5$close_all(); next }
+        if (!stat %in% names(grp) || !all(pop_cols %in% names(grp))) { h5$close_all(); next }
         d <- data.frame(
             chr = grp[["chr"]][],
             start = grp[["start"]][],
@@ -549,18 +553,18 @@ read_pbe_from_h5 <- function(hdf5_dir, selected_window_size = NULL, selected_ste
             pos = grp[["start"]][],
             window_size = if ("window_size" %in% names(grp)) as.numeric(grp[["window_size"]][]) else ps$window_size,
             step_size = if ("step_size" %in% names(grp)) as.numeric(grp[["step_size"]][]) else ps$step_size,
-            pop1 = as.character(grp[["pop1"]][]),
-            pop2 = as.character(grp[["pop2"]][]),
-            pop3 = as.character(grp[["pop3"]][]),
-            pbe = as.numeric(grp[["pbe"]][]),
             stringsAsFactors = FALSE
         )
-        if ("pbe_quantile" %in% names(grp)) d$pbe_quantile <- grp[["pbe_quantile"]][]
-        if ("pbe_rank" %in% names(grp)) d$pbe_rank <- grp[["pbe_rank"]][]
+        for (pc in pop_cols) d[[pc]] <- as.character(grp[[pc]][])
+        d[[stat]] <- as.numeric(grp[[stat]][])
+        qcol <- paste0(stat, "_quantile")
+        rcol <- paste0(stat, "_rank")
+        if (qcol %in% names(grp)) d[[qcol]] <- grp[[qcol]][]
+        if (rcol %in% names(grp)) d[[rcol]] <- grp[[rcol]][]
         for (col in c("mean_coverage", "mean_mapping_quality", "n_snps", "n_masked")) {
             if (col %in% names(grp)) d[[col]] <- grp[[col]][]
         }
-        d$trio_id <- paste0(d$pop1, ":", d$pop2, ":", d$pop3)
+        d[[id_col]] <- do.call(paste, c(lapply(pop_cols, function(pc) d[[pc]]), list(sep = ":")))
         out[[length(out) + 1L]] <- d
         h5$close_all()
         on.exit()
@@ -570,7 +574,7 @@ read_pbe_from_h5 <- function(hdf5_dir, selected_window_size = NULL, selected_ste
 }
 
 # Check that every used data source has columns required by set filter options; stop() with clear message if not.
-check_quality_columns_and_abort <- function(data_sources, opts, has_diversity, has_fst, has_pbe) {
+check_quality_columns_and_abort <- function(data_sources, opts, has_diversity, has_fst, has_pbe, has_qibe = FALSE, has_lrpi = FALSE) {
     need_coverage <- !is.null(opts$`min-depth`) || !is.null(opts$`max-depth`)
     need_mapq <- !is.null(opts$`min-mapping-quality`) || !is.null(opts$`max-mapping-quality`)
     need_n_snps <- !is.null(opts$`min-snps`) || !is.null(opts$`max-snps`) ||
@@ -594,6 +598,8 @@ check_quality_columns_and_abort <- function(data_sources, opts, has_diversity, h
     if (has_diversity) check(data_sources$diversity, "diversity")
     if (has_fst) check(data_sources$fst, "FST")
     if (has_pbe) check(data_sources$pbe, "PBE")
+    if (has_qibe) check(data_sources$qibe, "QIBE")
+    if (has_lrpi) check(data_sources$lrpi, "LRPI")
     invisible(NULL)
 }
 
@@ -659,7 +665,7 @@ add_region_stat_summaries <- function(regions, windows_by_value_col) {
 # Build list of window tibbles (chr, start, end, window_size/step_size when present, value, quantile) keyed by value_col.
 # Used for region summaries and for the fill step. value_cols: e.g. "Cheney.pi", "S1:S2.fst", "S1:S2:S3.pbe".
 # window_size and step_size are passed through so fill can join on the same overlapping-window scale.
-build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe_data) {
+build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe_data, qibe_data = NULL, lrpi_data = NULL) {
     out <- list()
     if (length(value_cols) == 0) return(out)
     scale_transmute <- function(sub, value_col, qcol, src) {
@@ -673,7 +679,34 @@ build_windows_by_value_col <- function(value_cols, diversity_data, fst_data, pbe
             )
     }
     for (vc in value_cols) {
-        if (grepl("\\.pbe$", vc)) {
+        if (grepl("\\.lrpi$", vc)) {
+            pid <- sub("\\.lrpi$", "", vc)
+            if (is.null(lrpi_data) || nrow(lrpi_data) == 0) next
+            if ("pair_id" %in% colnames(lrpi_data)) {
+                sub <- lrpi_data %>% filter(.data$pair_id == pid)
+            } else {
+                pair_parts <- strsplit(pid, ":", fixed = TRUE)[[1]]
+                if (length(pair_parts) != 2) next
+                sub <- lrpi_data %>%
+                    filter(.data$pop1 == pair_parts[1], .data$pop2 == pair_parts[2])
+            }
+            sub <- scale_transmute(sub, "lrpi", "lrpi_quantile", lrpi_data)
+            if (nrow(sub) > 0) out[[vc]] <- sub
+        } else if (grepl("\\.qibe$", vc)) {
+            qid <- sub("\\.qibe$", "", vc)
+            if (is.null(qibe_data) || nrow(qibe_data) == 0) next
+            if ("quartet_id" %in% colnames(qibe_data)) {
+                sub <- qibe_data %>% filter(.data$quartet_id == qid)
+            } else {
+                trio_parts <- strsplit(qid, ":", fixed = TRUE)[[1]]
+                if (length(trio_parts) != 4) next
+                sub <- qibe_data %>%
+                    filter(.data$pop1 == trio_parts[1], .data$pop2 == trio_parts[2],
+                           .data$pop3 == trio_parts[3], .data$pop4 == trio_parts[4])
+            }
+            sub <- scale_transmute(sub, "qibe", "qibe_quantile", qibe_data)
+            if (nrow(sub) > 0) out[[vc]] <- sub
+        } else if (grepl("\\.pbe$", vc)) {
             trio <- sub("\\.pbe$", "", vc)
             if (is.null(pbe_data) || nrow(pbe_data) == 0) next
             if ("trio_id" %in% colnames(pbe_data)) {
@@ -1438,6 +1471,23 @@ diversity_data <- NULL
 fst_data_list <- list(data = NULL, pairs = character(0))
 
 pbe_data <- NULL
+qibe_data <- NULL
+lrpi_data <- NULL
+attach_div_quality <- function(target, diversity_data) {
+    if (is.null(target) || nrow(target) == 0 || is.null(diversity_data)) return(target)
+    sum_exprs <- list()
+    if ("mean_coverage" %in% colnames(diversity_data)) sum_exprs$mean_coverage <- quote(mean(mean_coverage, na.rm = TRUE))
+    if ("mean_mapping_quality" %in% colnames(diversity_data)) sum_exprs$mean_mapping_quality <- quote(mean(mean_mapping_quality, na.rm = TRUE))
+    if ("n_snps" %in% colnames(diversity_data)) sum_exprs$n_snps <- quote(first(n_snps, default = NA_real_))
+    if (length(sum_exprs) == 0) return(target)
+    group_cols <- intersect(c("chr", "start", "end", "window_size", "step_size"), colnames(diversity_data))
+    div_win <- diversity_data %>%
+        group_by(across(all_of(group_cols))) %>%
+        summarise(!!!sum_exprs, .groups = "drop")
+    join_by <- intersect(group_cols, colnames(target))
+    if (length(join_by) < 3) join_by <- c("chr", "start", "end")
+    target %>% left_join(div_win, by = join_by)
+}
 if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
     if (opts$verbose) cat("Reading from HDF5 directory:", opts$`hdf5-dir`, "\n")
     diversity_data <- read_diversity_from_h5(opts$`hdf5-dir`, opts$`window-size`, opts$`step-size`)
@@ -1450,23 +1500,17 @@ if (!is.null(opts$`hdf5-dir`) && dir.exists(opts$`hdf5-dir`)) {
         fst_data_list <- read_fst_from_h5(opts$`hdf5-dir`, opts$`window-size`, selected_pairs, opts$`step-size`)
     }
     if ("pbe" %in% statistics) {
-        pbe_data <- read_pbe_from_h5(opts$`hdf5-dir`, opts$`window-size`, opts$`step-size`)
-        if (!is.null(pbe_data) && nrow(pbe_data) > 0 && !is.null(diversity_data)) {
-            sum_exprs <- list()
-            if ("mean_coverage" %in% colnames(diversity_data)) sum_exprs$mean_coverage <- quote(mean(mean_coverage, na.rm = TRUE))
-            if ("mean_mapping_quality" %in% colnames(diversity_data)) sum_exprs$mean_mapping_quality <- quote(mean(mean_mapping_quality, na.rm = TRUE))
-            if ("n_snps" %in% colnames(diversity_data)) sum_exprs$n_snps <- quote(first(n_snps, default = NA_real_))
-            if (length(sum_exprs) > 0) {
-                group_cols <- intersect(c("chr", "start", "end", "window_size", "step_size"), colnames(diversity_data))
-                div_win <- diversity_data %>%
-                    group_by(across(all_of(group_cols))) %>%
-                    summarise(!!!sum_exprs, .groups = "drop")
-                join_by <- intersect(group_cols, colnames(pbe_data))
-                if (length(join_by) < 3) join_by <- c("chr", "start", "end")
-                pbe_data <- pbe_data %>%
-                    left_join(div_win, by = join_by)
-            }
-        }
+        pbe_data <- attach_div_quality(read_pbe_from_h5(opts$`hdf5-dir`, opts$`window-size`, opts$`step-size`), diversity_data)
+    }
+    if ("qibe" %in% statistics) {
+        qibe_data <- attach_div_quality(
+            read_pbe_from_h5(opts$`hdf5-dir`, opts$`window-size`, opts$`step-size`, stat = "qibe", n_pops = 4L, id_col = "quartet_id"),
+            diversity_data)
+    }
+    if ("lrpi" %in% statistics) {
+        lrpi_data <- attach_div_quality(
+            read_pbe_from_h5(opts$`hdf5-dir`, opts$`window-size`, opts$`step-size`, stat = "lrpi", n_pops = 2L, id_col = "pair_id"),
+            diversity_data)
     }
 }
 
@@ -1487,12 +1531,14 @@ if ("fst" %in% statistics && (length(fst_data_list) == 0 || is.null(fst_data_lis
 has_diversity <- !is.null(diversity_data) && any(c("pi", "theta", "tajima_d") %in% statistics)
 has_fst <- length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data_list$pairs) > 0 && ("fst" %in% statistics)
 has_pbe <- !is.null(pbe_data) && nrow(pbe_data) > 0 && ("pbe" %in% statistics)
-if (!has_diversity && !has_fst && !has_pbe) {
-    stop("No data found for requested statistics. Provide diversity data for pi/theta/tajima_d, FST data for fst, and/or PBE data for pbe.")
+has_qibe <- !is.null(qibe_data) && nrow(qibe_data) > 0 && ("qibe" %in% statistics)
+has_lrpi <- !is.null(lrpi_data) && nrow(lrpi_data) > 0 && ("lrpi" %in% statistics)
+if (!has_diversity && !has_fst && !has_pbe && !has_qibe && !has_lrpi) {
+    stop("No data found for requested statistics. Provide diversity data for pi/theta/tajima_d, FST data for fst, PBE data for pbe, QIBE data for qibe, and/or LRPI data for lrpi.")
 }
 
 assert_step_when_ambiguous(
-    list(diversity_data, if (length(fst_data_list) > 0) fst_data_list$data else NULL, pbe_data),
+    list(diversity_data, if (length(fst_data_list) > 0) fst_data_list$data else NULL, pbe_data, qibe_data, lrpi_data),
     opts$`window-size`, opts$`step-size`
 )
 
@@ -1516,8 +1562,8 @@ if (!is.null(diversity_data) && length(fst_data_list) > 0 && !is.null(fst_data_l
 
 # Abort before any computation if a filter is set but required column is missing in used data
 check_quality_columns_and_abort(
-    list(diversity = diversity_data, fst = if (length(fst_data_list) > 0) fst_data_list$data else NULL, pbe = pbe_data),
-    opts, has_diversity, has_fst, has_pbe
+    list(diversity = diversity_data, fst = if (length(fst_data_list) > 0) fst_data_list$data else NULL, pbe = pbe_data, qibe = qibe_data, lrpi = lrpi_data),
+    opts, has_diversity, has_fst, has_pbe, has_qibe, has_lrpi
 )
 
 # Combine diversity and FST data for chromosome length calculation
@@ -1527,6 +1573,15 @@ if (!is.null(diversity_data)) {
 }
 if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) {
     all_data_for_chr_lengths <- c(all_data_for_chr_lengths, list(fst_data_list$data))
+}
+if (!is.null(pbe_data) && nrow(pbe_data) > 0) {
+    all_data_for_chr_lengths <- c(all_data_for_chr_lengths, list(pbe_data))
+}
+if (!is.null(qibe_data) && nrow(qibe_data) > 0) {
+    all_data_for_chr_lengths <- c(all_data_for_chr_lengths, list(qibe_data))
+}
+if (!is.null(lrpi_data) && nrow(lrpi_data) > 0) {
+    all_data_for_chr_lengths <- c(all_data_for_chr_lengths, list(lrpi_data))
 }
 
 if (length(all_data_for_chr_lengths) > 0) {
@@ -1622,6 +1677,12 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) {
 if (!is.null(pbe_data)) {
     pbe_data <- pbe_data %>% filter(.data$chr %in% selected_chrs)
 }
+if (!is.null(qibe_data)) {
+    qibe_data <- qibe_data %>% filter(.data$chr %in% selected_chrs)
+}
+if (!is.null(lrpi_data)) {
+    lrpi_data <- lrpi_data %>% filter(.data$chr %in% selected_chrs)
+}
 
 # Further restrict to [region_start, region_end] when set (windows overlapping the interval)
 if (!is.null(opts$chromosome) && (is.numeric(region_start) && is.numeric(region_end))) {
@@ -1632,6 +1693,8 @@ if (!is.null(opts$chromosome) && (is.numeric(region_start) && is.numeric(region_
     if (!is.null(diversity_data)) diversity_data <- overlap_filter(diversity_data)
     if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data <- overlap_filter(fst_data_list$data)
     if (!is.null(pbe_data)) pbe_data <- overlap_filter(pbe_data)
+    if (!is.null(qibe_data)) qibe_data <- overlap_filter(qibe_data)
+    if (!is.null(lrpi_data)) lrpi_data <- overlap_filter(lrpi_data)
 }
 
 # Whether any depth/mapq/SNP quality options are set (for filtering seeds/expansion)
@@ -1968,19 +2031,27 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
     }
 }
 
-# Process PBE statistics (from HDF5 only)
-if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
-    trios <- pbe_data %>% distinct(pop1, pop2, pop3) %>% mutate(trio_id = paste0(.data$pop1, ":", .data$pop2, ":", .data$pop3))
-    for (i in seq_len(nrow(trios))) {
-        trio_id <- trios$trio_id[i]
-        pair_data <- pbe_data %>%
-            filter(.data$pop1 == trios$pop1[i], .data$pop2 == trios$pop2[i], .data$pop3 == trios$pop3[i], !is.na(.data$pbe))
+# PBE (3 populations) and QIBE (4 populations), from collated HDF5 only.
+flag_branch_outliers <- function(branch_data, stat, pop_cols) {
+    outliers_out <- list()
+    regions_out <- list()
+    if (is.null(branch_data) || nrow(branch_data) == 0 || !(stat %in% statistics)) {
+        return(list(outliers = outliers_out, regions = regions_out))
+    }
+    qcol <- paste0(stat, "_quantile")
+    groups <- branch_data %>% distinct(across(all_of(pop_cols)))
+    for (i in seq_len(nrow(groups))) {
+        id <- paste(vapply(pop_cols, function(pc) as.character(groups[[pc]][i]), character(1)), collapse = ":")
+        keep <- !is.na(branch_data[[stat]])
+        for (pc in pop_cols) keep <- keep & !is.na(branch_data[[pc]]) & branch_data[[pc]] == groups[[pc]][i]
+        keep[is.na(keep)] <- FALSE
+        pair_data <- branch_data[keep, , drop = FALSE]
         if (nrow(pair_data) == 0) next
         scales <- scale_pairs(pair_data)
         all_high_outliers <- list()
         all_low_outliers <- list()
-        all_tagged_pbe <- list()
-        all_expanded_regions_pbe <- list()
+        all_tagged <- list()
+        all_expanded <- list()
         for (si in seq_len(nrow(scales))) {
             ws <- scales$window_size[si]
             ss <- scales$step_size[si]
@@ -1993,22 +2064,22 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
                 merge_dist_ws <- as.numeric(merge_dist_ws)
                 if (is.na(merge_dist_ws) || merge_dist_ws < 0) merge_dist_ws <- 2000
             }
-            use_pbe_quantile <- "pbe_quantile" %in% colnames(ws_data) && !all(is.na(ws_data$pbe_quantile))
+            use_quantile <- qcol %in% colnames(ws_data) && !all(is.na(ws_data[[qcol]]))
             if (expand_mode) {
-                if (use_pbe_quantile) {
-                    seed_high <- ws_data %>% filter(.data$pbe_quantile >= opts$`seed-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                    seed_low <- ws_data %>% filter(.data$pbe_quantile <= opts$`seed-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                    expand_high <- ws_data %>% filter(.data$pbe_quantile >= opts$`expand-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                    expand_low <- ws_data %>% filter(.data$pbe_quantile <= opts$`expand-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
+                if (use_quantile) {
+                    seed_high <- ws_data %>% filter(.data[[qcol]] >= opts$`seed-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
+                    seed_low <- ws_data %>% filter(.data[[qcol]] <= opts$`seed-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
+                    expand_high <- ws_data %>% filter(.data[[qcol]] >= opts$`expand-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
+                    expand_low <- ws_data %>% filter(.data[[qcol]] <= opts$`expand-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
                 } else {
-                    sh <- quantile(ws_data$pbe, opts$`seed-high-quantile`, na.rm = TRUE)
-                    sl <- quantile(ws_data$pbe, opts$`seed-low-quantile`, na.rm = TRUE)
-                    eh <- quantile(ws_data$pbe, opts$`expand-high-quantile`, na.rm = TRUE)
-                    el <- quantile(ws_data$pbe, opts$`expand-low-quantile`, na.rm = TRUE)
-                    seed_high <- ws_data %>% filter(.data$pbe >= sh) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                    seed_low <- ws_data %>% filter(.data$pbe <= sl) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                    expand_high <- ws_data %>% filter(.data$pbe >= eh) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                    expand_low <- ws_data %>% filter(.data$pbe <= el) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
+                    sh <- quantile(ws_data[[stat]], opts$`seed-high-quantile`, na.rm = TRUE)
+                    sl <- quantile(ws_data[[stat]], opts$`seed-low-quantile`, na.rm = TRUE)
+                    eh <- quantile(ws_data[[stat]], opts$`expand-high-quantile`, na.rm = TRUE)
+                    el <- quantile(ws_data[[stat]], opts$`expand-low-quantile`, na.rm = TRUE)
+                    seed_high <- ws_data %>% filter(.data[[stat]] >= sh) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
+                    seed_low <- ws_data %>% filter(.data[[stat]] <= sl) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
+                    expand_high <- ws_data %>% filter(.data[[stat]] >= eh) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
+                    expand_low <- ws_data %>% filter(.data[[stat]] <= el) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
                 }
                 if (has_quality_opts) {
                     seed_high <- seed_high %>% filter(passes_quality_filters(seed_high, opts))
@@ -2018,34 +2089,34 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
                 }
                 if (!is.null(opts$`top-n-extreme`) && opts$`top-n-extreme` > 0) {
                     n_extreme <- as.integer(opts$`top-n-extreme`)
-                    if (nrow(seed_high) > n_extreme) seed_high <- seed_high %>% arrange(desc(.data$pbe)) %>% head(n_extreme)
-                    if (nrow(seed_low) > n_extreme) seed_low <- seed_low %>% arrange(.data$pbe) %>% head(n_extreme)
+                    if (nrow(seed_high) > n_extreme) seed_high <- seed_high %>% arrange(desc(.data[[stat]])) %>% head(n_extreme)
+                    if (nrow(seed_low) > n_extreme) seed_low <- seed_low %>% arrange(.data[[stat]]) %>% head(n_extreme)
                 }
                 seed_windows <- bind_rows(if (nrow(seed_high) > 0) seed_high else NULL, if (nrow(seed_low) > 0) seed_low else NULL)
                 expand_windows <- bind_rows(if (nrow(expand_high) > 0) expand_high else NULL, if (nrow(expand_low) > 0) expand_low else NULL)
                 if (nrow(seed_windows) > 0 && !is.null(merge_dist_ws) && merge_dist_ws > 0) {
                     res <- seed_expand_regions(seed_windows, expand_windows, merge_dist_ws, verbose = opts$verbose)
                     if (nrow(res$windows) > 0) {
-                        all_tagged_pbe[[length(all_tagged_pbe) + 1L]] <- res$windows
+                        all_tagged[[length(all_tagged) + 1L]] <- res$windows
                         if (!is.null(res$regions) && nrow(res$regions) > 0) {
-                            res$regions$statistic <- "pbe"
+                            res$regions$statistic <- stat
                             res$regions$sample <- NA_character_
-                            res$regions$sample_pair <- trio_id
-                            all_expanded_regions_pbe[[length(all_expanded_regions_pbe) + 1L]] <- res$regions
+                            res$regions$sample_pair <- id
+                            all_expanded[[length(all_expanded) + 1L]] <- res$regions
                         }
                     }
                 } else if (nrow(seed_windows) > 0) {
-                    all_tagged_pbe[[length(all_tagged_pbe) + 1L]] <- seed_windows %>% mutate(window_type = "seed")
+                    all_tagged[[length(all_tagged) + 1L]] <- seed_windows %>% mutate(window_type = "seed")
                 }
             } else {
-                if (use_pbe_quantile) {
-                    high_outliers <- ws_data %>% filter(.data$pbe_quantile >= opts$`high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                    low_outliers <- ws_data %>% filter(.data$pbe_quantile <= opts$`low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
+                if (use_quantile) {
+                    high_outliers <- ws_data %>% filter(.data[[qcol]] >= opts$`high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
+                    low_outliers <- ws_data %>% filter(.data[[qcol]] <= opts$`low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
                 } else {
-                    high_threshold <- quantile(ws_data$pbe, opts$`high-quantile`, na.rm = TRUE)
-                    low_threshold <- quantile(ws_data$pbe, opts$`low-quantile`, na.rm = TRUE)
-                    high_outliers <- ws_data %>% filter(.data$pbe >= high_threshold) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                    low_outliers <- ws_data %>% filter(.data$pbe <= low_threshold) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
+                    high_threshold <- quantile(ws_data[[stat]], opts$`high-quantile`, na.rm = TRUE)
+                    low_threshold <- quantile(ws_data[[stat]], opts$`low-quantile`, na.rm = TRUE)
+                    high_outliers <- ws_data %>% filter(.data[[stat]] >= high_threshold) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
+                    low_outliers <- ws_data %>% filter(.data[[stat]] <= low_threshold) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
                 }
                 if (has_quality_opts) {
                     high_outliers <- high_outliers %>% filter(passes_quality_filters(high_outliers, opts))
@@ -2053,37 +2124,41 @@ if (!is.null(pbe_data) && nrow(pbe_data) > 0 && "pbe" %in% statistics) {
                 }
                 if (!is.null(opts$`top-n-extreme`) && opts$`top-n-extreme` > 0) {
                     n_extreme <- as.integer(opts$`top-n-extreme`)
-                    if (nrow(high_outliers) > n_extreme) high_outliers <- high_outliers %>% arrange(desc(.data$pbe)) %>% head(n_extreme)
-                    if (nrow(low_outliers) > n_extreme) low_outliers <- low_outliers %>% arrange(.data$pbe) %>% head(n_extreme)
+                    if (nrow(high_outliers) > n_extreme) high_outliers <- high_outliers %>% arrange(desc(.data[[stat]])) %>% head(n_extreme)
+                    if (nrow(low_outliers) > n_extreme) low_outliers <- low_outliers %>% arrange(.data[[stat]]) %>% head(n_extreme)
                 }
                 if (nrow(high_outliers) > 0) all_high_outliers[[length(all_high_outliers) + 1]] <- high_outliers
                 if (nrow(low_outliers) > 0) all_low_outliers[[length(all_low_outliers) + 1]] <- low_outliers
             }
         }
-        if (expand_mode && length(all_tagged_pbe) > 0) {
-            outliers <- bind_rows(all_tagged_pbe) %>% mutate(statistic = "pbe", sample = NA_character_, sample_pair = trio_id)
+        out_cols <- c("statistic", "sample", "sample_pair", "window_size", "step_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value")
+        if (expand_mode && length(all_tagged) > 0) {
+            outliers <- bind_rows(all_tagged) %>% mutate(statistic = stat, sample = NA_character_, sample_pair = id)
             if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
             if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-            out_cols_pbe <- c("statistic", "sample", "sample_pair", "window_size", "step_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value", "window_type")
-            extra_cols_pbe <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps", "n_total", "n_masked"), colnames(outliers))
-            outliers <- standardize_outlier_columns(outliers, "pbe", "pbe_quantile", out_cols_pbe, extra_cols_pbe)
-            outlier_results[[paste0("pbe_", trio_id)]] <- outliers
-            if (length(all_expanded_regions_pbe) > 0) {
-                expanded_region_results[[paste0("pbe_", trio_id)]] <- bind_rows(all_expanded_regions_pbe)
-            }
+            extra_cols <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps", "n_total", "n_masked"), colnames(outliers))
+            outliers_out[[paste0(stat, "_", id)]] <- standardize_outlier_columns(outliers, stat, qcol, c(out_cols, "window_type"), extra_cols)
+            if (length(all_expanded) > 0) regions_out[[paste0(stat, "_", id)]] <- bind_rows(all_expanded)
         } else if (length(all_high_outliers) > 0 || length(all_low_outliers) > 0) {
             outliers <- bind_rows(
                 if (length(all_high_outliers) > 0) bind_rows(all_high_outliers) else NULL,
                 if (length(all_low_outliers) > 0) bind_rows(all_low_outliers) else NULL
-            ) %>% mutate(statistic = "pbe", sample = NA_character_, sample_pair = trio_id)
+            ) %>% mutate(statistic = stat, sample = NA_character_, sample_pair = id)
             if (!"start" %in% colnames(outliers)) outliers$start <- NA_real_
             if (!"end" %in% colnames(outliers)) outliers$end <- NA_real_
-            out_cols_pbe <- c("statistic", "sample", "sample_pair", "window_size", "step_size", "chr", "start", "end", "pos", "value", "quantile", "quantile_type", "quantile_value")
-            extra_cols_pbe <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps", "n_total", "n_masked"), colnames(outliers))
-            outliers <- standardize_outlier_columns(outliers, "pbe", "pbe_quantile", out_cols_pbe, extra_cols_pbe)
-            outlier_results[[paste0("pbe_", trio_id)]] <- outliers
+            extra_cols <- intersect(c("mean_coverage", "mean_mapping_quality", "n_snps", "n_total", "n_masked"), colnames(outliers))
+            outliers_out[[paste0(stat, "_", id)]] <- standardize_outlier_columns(outliers, stat, qcol, out_cols, extra_cols)
         }
     }
+    list(outliers = outliers_out, regions = regions_out)
+}
+for (flagged in list(
+    flag_branch_outliers(pbe_data, "pbe", c("pop1", "pop2", "pop3")),
+    flag_branch_outliers(qibe_data, "qibe", c("pop1", "pop2", "pop3", "pop4")),
+    flag_branch_outliers(lrpi_data, "lrpi", c("pop1", "pop2"))
+)) {
+    for (nm in names(flagged$outliers)) outlier_results[[nm]] <- flagged$outliers[[nm]]
+    for (nm in names(flagged$regions)) expanded_region_results[[nm]] <- flagged$regions[[nm]]
 }
 
 # -----------------------------------------------------------------------------
@@ -2103,9 +2178,10 @@ if (length(outlier_results) > 0) {
     all_outliers$value_col <- ifelse(
         all_outliers$statistic %in% c("pi", "theta", "tajima_d"),
         paste0(ifelse(is.na(all_outliers$sample), "unknown", all_outliers$sample), ".", all_outliers$statistic),
-        ifelse(all_outliers$statistic == "fst",
-               paste0(ifelse(is.na(all_outliers$sample_pair), "unknown", all_outliers$sample_pair), ".fst"),
-               paste0(ifelse(is.na(all_outliers$sample_pair), "unknown", all_outliers$sample_pair), ".pbe"))
+        paste0(ifelse(is.na(all_outliers$sample_pair), "unknown", all_outliers$sample_pair),
+               ifelse(all_outliers$statistic == "fst", ".fst",
+                      ifelse(all_outliers$statistic == "lrpi", ".lrpi",
+                             ifelse(all_outliers$statistic == "qibe", ".qibe", ".pbe"))))
     )
     qtype_col <- if ("quantile_type" %in% colnames(all_outliers)) "quantile_type" else NULL
     id_cols <- window_key_cols(all_outliers)
@@ -2165,6 +2241,8 @@ if (length(outlier_results) > 0) {
       div_for_fill <- diversity_data
       fst_for_fill <- if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data else NULL
       pbe_for_fill <- pbe_data
+      qibe_for_fill <- qibe_data
+      lrpi_for_fill <- lrpi_data
       ws_out <- if ("window_size" %in% names(wide_outliers)) unique(wide_outliers$window_size[!is.na(wide_outliers$window_size)]) else numeric(0)
       ss_out <- if ("step_size" %in% names(wide_outliers)) unique(wide_outliers$step_size[!is.na(wide_outliers$step_size)]) else numeric(0)
       filter_fill_scale <- function(df, label) {
@@ -2181,6 +2259,8 @@ if (length(outlier_results) > 0) {
       div_for_fill <- filter_fill_scale(div_for_fill, "diversity")
       fst_for_fill <- filter_fill_scale(fst_for_fill, "FST")
       pbe_for_fill <- filter_fill_scale(pbe_for_fill, "PBE")
+      qibe_for_fill <- filter_fill_scale(qibe_for_fill, "QIBE")
+      lrpi_for_fill <- filter_fill_scale(lrpi_for_fill, "LRPI")
       # Warn if fill data have duplicate keys (avoids silent many-to-many joins).
       if (!is.null(div_for_fill) && nrow(div_for_fill) > 0) {
         key_div <- c("chr", "start", "end", "sample")
@@ -2216,11 +2296,37 @@ if (length(outlier_results) > 0) {
             warning("Fill PBE data has duplicate key (", paste(key_pbe, collapse = ", "), "); nrow=", n_pbe, " unique=", u_pbe, ". Join may be many-to-many.")
         }
       }
+      if (!is.null(qibe_for_fill) && nrow(qibe_for_fill) > 0) {
+        by_quartet_fill <- if ("quartet_id" %in% names(qibe_for_fill)) c("chr", "start", "end", "quartet_id") else c("chr", "start", "end", "pop1", "pop2", "pop3", "pop4")
+        key_qibe <- by_quartet_fill
+        if ("window_size" %in% names(qibe_for_fill)) key_qibe <- c(key_qibe, "window_size")
+        if ("step_size" %in% names(qibe_for_fill)) key_qibe <- c(key_qibe, "step_size")
+        if (all(key_qibe %in% names(qibe_for_fill))) {
+          n_qibe <- nrow(qibe_for_fill)
+          u_qibe <- nrow(qibe_for_fill %>% distinct(!!!syms(key_qibe)))
+          if (n_qibe != u_qibe)
+            warning("Fill QIBE data has duplicate key (", paste(key_qibe, collapse = ", "), "); nrow=", n_qibe, " unique=", u_qibe, ". Join may be many-to-many.")
+        }
+      }
+      if (!is.null(lrpi_for_fill) && nrow(lrpi_for_fill) > 0) {
+        by_pair_fill <- if ("pair_id" %in% names(lrpi_for_fill)) c("chr", "start", "end", "pair_id") else c("chr", "start", "end", "pop1", "pop2")
+        key_lrpi <- by_pair_fill
+        if ("window_size" %in% names(lrpi_for_fill)) key_lrpi <- c(key_lrpi, "window_size")
+        if ("step_size" %in% names(lrpi_for_fill)) key_lrpi <- c(key_lrpi, "step_size")
+        if (all(key_lrpi %in% names(lrpi_for_fill))) {
+          n_lrpi <- nrow(lrpi_for_fill)
+          u_lrpi <- nrow(lrpi_for_fill %>% distinct(!!!syms(key_lrpi)))
+          if (n_lrpi != u_lrpi)
+            warning("Fill LRPI data has duplicate key (", paste(key_lrpi, collapse = ", "), "); nrow=", n_lrpi, " unique=", u_lrpi, ". Join may be many-to-many.")
+        }
+      }
       windows_by_vc <- build_windows_by_value_col(
         value_cols_stat,
         div_for_fill,
         fst_for_fill,
-        pbe_for_fill
+        pbe_for_fill,
+        qibe_for_fill,
+        lrpi_for_fill
       )
       full_long <- bind_rows(Filter(Negate(is.null), lapply(names(windows_by_vc), function(vc) {
         w <- windows_by_vc[[vc]] %>% semi_join(keys, by = join_by)
@@ -2309,7 +2415,9 @@ if (length(outlier_results) > 0) {
         value_cols_for_regions,
         diversity_data,
         if (length(fst_data_list) > 0 && !is.null(fst_data_list$data)) fst_data_list$data else NULL,
-        pbe_data
+        pbe_data,
+        qibe_data,
+        lrpi_data
     )
 
     outliers_file <- file.path(opts$`output-dir`, paste0("outlier_windows", window_suffix, chr_suffix, quantile_suffix, region_filename_suffix, ".csv"))

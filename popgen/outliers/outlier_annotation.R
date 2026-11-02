@@ -17,7 +17,7 @@
 #   outlier_csq_sites_<suffix>.csv: one row per (region, site); qseqid, region_chr, region_start,
 #     region_end, outlier_stat, n_windows, then the site columns (chr, pos, ref, alt, variant_type,
 #     region_category, coding_effect, genes, genes_protein_altering, csq_consequences, bcsq, per-pool
-#     *_AD / *_alt_freq, and *.fst / *.pbe columns when read from single_position.h5).
+#     *_AD / *_alt_freq, and *.fst / *.pbe / *.qibe / *.lrpi columns when read from single_position.h5).
 #   outlier_csq_genes_<suffix>.csv: one row per (region, gene); n_sites, n_protein_altering,
 #     coding_effects ("missense:3;synonymous:2"), overlaps_region (gene overlaps the region in the
 #     GFF), gene_id, gene_name, product, go_terms, strand, gene_start, gene_end.
