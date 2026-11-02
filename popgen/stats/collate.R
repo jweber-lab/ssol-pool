@@ -3,11 +3,11 @@
 ###############################################################################
 # collate.R
 #
-# Purpose: Collate diversity, FST, PBE, QIBE, and optional variant TSV into HDF5.
+# Purpose: Collate diversity, FST, PBE, QIBE, LRPI, and optional variant TSV into HDF5.
 # Uses (window, step) for grouping; combines multiple inputs per scale with
 # sample/pop1,pop2/pop1,pop2,pop3/pop1..pop4 as columns. Missing or empty
-# FST/PBE/QIBE input dirs are skipped without failing.
-# Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR] [--qibe-dir DIR]
+# FST/PBE/QIBE/LRPI input dirs are skipped without failing.
+# Usage: Rscript collate.R --diversity-dir DIR [--fst-dir DIR] [--pbe-dir DIR] [--qibe-dir DIR] [--lrpi-dir DIR]
 #        --output-dir DIR [--seq-qual-dir DIR] [--variant-tsv-dir DIR] [--variant-csq PATHS]
 #        [--variant-feature-dir DIR] [options]
 # Options: --drop-all-na  Drop rows/sites where every statistic value is NA before ranking/collation.
@@ -22,8 +22,8 @@
 #     kept on the analysis grid when S is a multiple of the source step (e.g. s250 -> s500).
 #     optional n_sites / n_sites_snp / n_sites_indel / n_csq_* / n_region_* / n_effect_* counts and
 #     genes / genes_protein_altering (semicolon-separated) when --variant-feature-dir is set.
-#     Those window columns are also joined into fst_w*.h5, pbe_w*.h5, and qibe_w*.h5, and not into
-#     fst_single / pbe_single / qibe_single / single_position. variant_features_wW_sS.tsv uses the same
+#     Those window columns are also joined into fst_w*.h5, pbe_w*.h5, qibe_w*.h5, and lrpi_w*.h5, and not into
+#     fst_single / pbe_single / qibe_single / lrpi_single / single_position. variant_features_wW_sS.tsv uses the same
 #     exact-then-finer-step lookup as seq_qual.
 #   diversity_*_summary.tsv  Companion summary (mean, median, variance, skew, quantiles)
 #
@@ -41,6 +41,10 @@
 #     qibe_rank, qibe_quantile (optional). Same layout as PBE, with the quartet
 #     ((pop1, pop2), (pop3, pop4)).
 #   qibe_*_summary.tsv  Companion summary by pop1, pop2, pop3, pop4
+#   lrpi_w{W}_s{S}.h5  (or lrpi_single.h5)
+#     Group /windows or /sites: chr, start, end, pos, pop1, pop2, pi_pop1, pi_pop2, lrpi,
+#     lrpi_rank, lrpi_quantile. Ranked within each pair file. LRPI = ln(pi_pop1 / pi_pop2).
+#   lrpi_*_summary.tsv  Companion summary by pop1, pop2
 #
 #   variants.h5  Group /sites: one row per site from --variant-tsv-dir (snp_sites.tsv and
 #     indel_sites.tsv): chr, pos, start, end, ref, alt, variant_type (snp/indel), dp, alt_freq,
@@ -48,13 +52,14 @@
 #     coding_effect, genes, genes_protein_altering from a site csq TSV (--variant-csq, or a
 #     *csq*.tsv in the same directory; *_long.tsv ignored), joined on chr, pos, ref, alt.
 #     These columns are not added to window HDF5.
-#   single_position.h5  (when --single-position-merged; replaces fst_single, pbe_single and
-#     variants.h5; window HDF5 are unchanged) One group /sites: the variants.h5 table plus
-#     FST/PBE/QIBE in wide form on SNP rows:
+#   single_position.h5  (when --single-position-merged; replaces fst_single, pbe_single,
+#     qibe_single, lrpi_single, and variants.h5; window HDF5 are unchanged) One group /sites:
+#     the variants.h5 table plus FST/PBE/QIBE/LRPI in wide form on SNP rows:
 #     Sample1:Sample2.fst, Sample1:Sample2.fst_rank, Sample1:Sample2.fst_quantile;
 #     Sample1:Sample2:Sample3.pbe, .pbe_rank, .pbe_quantile;
-#     Sample1:Sample2:Sample3:Sample4.qibe, .qibe_rank, .qibe_quantile.
-#     Indel rows have no FST/PBE/QIBE.
+#     Sample1:Sample2:Sample3:Sample4.qibe, .qibe_rank, .qibe_quantile;
+#     Sample1:Sample2.lrpi, .lrpi_rank, .lrpi_quantile.
+#     Indel rows have no FST/PBE/QIBE/LRPI.
 #     Window feature counts are not in this file. single_position_summary.tsv summarizes
 #     all numeric columns.
 ###############################################################################
@@ -89,7 +94,7 @@ STD_COLS <- c(
   "chr", "chrom", "chromosome", "contig", "pos", "position", "start", "end", "begin", "stop",
   "ref", "alt", "dp", "qual", "filter", "alt_freq", "indel_len", "variant_type",
   "bcsq", "csq_consequences", "region_category", "coding_effect", "genes", "genes_protein_altering",
-  "total.passed", "total_passed", "total.invariant", "total_invariant", "sample", "pbe", "qibe", "n_snps"
+  "total.passed", "total_passed", "total.invariant", "total_invariant", "sample", "pbe", "qibe", "lrpi", "n_snps"
 )
 lower_std_names <- function(d) {
   lo <- tolower(names(d))
@@ -842,7 +847,8 @@ read_one_pbe <- function(path, trio_name, drop_all_na = FALSE, window_size = NA_
     for (pc in pop_cols) d[[pc]] <- as.character(d[[pc]])
   }
   d$trio_name <- trio_name
-  d %>% select(any_of(c("chr", "pos", "start", "end", stat, paste0(stat, "_rank"), paste0(stat, "_quantile"), pop_cols, "trio_name")))
+  pi_cols <- grep("^pi_pop[0-9]+$", names(d), value = TRUE)
+  d %>% select(any_of(c("chr", "pos", "start", "end", stat, paste0(stat, "_rank"), paste0(stat, "_quantile"), pop_cols, pi_cols, "trio_name")))
 }
 
 write_pbe_groups_h5 <- function(tbl_list, out_path, group_prefix = "windows_trio", sites = FALSE) {
@@ -869,6 +875,8 @@ write_pbe_long_h5 <- function(tbl_list, out_path, group_name = "windows", sites 
   keep_cols <- c("chr", "start", "end", "pos", pop_cols, stat)
   if (paste0(stat, "_rank") %in% names(all_d)) keep_cols <- c(keep_cols, paste0(stat, "_rank"))
   if (paste0(stat, "_quantile") %in% names(all_d)) keep_cols <- c(keep_cols, paste0(stat, "_quantile"))
+  pi_cols <- grep("^pi_pop[0-9]+$", names(all_d), value = TRUE)
+  keep_cols <- c(keep_cols, pi_cols)
   vf_extra <- grep("^n_(csq|region|effect|sites)", names(all_d), value = TRUE, ignore.case = TRUE)
   keep_cols <- unique(c(keep_cols, vf_extra, intersect(VF_GENE_COLS, names(all_d))))
   keep_cols <- intersect(keep_cols, names(all_d))
@@ -1124,7 +1132,7 @@ single_position_base <- function(single_position_data) {
   if (!is.null(single_position_data$fst) && nrow(single_position_data$fst) > 0) {
     return(single_position_data$fst %>% distinct(.data$chr, .data$pos, .data$start, .data$end))
   }
-  for (key in c("pbe", "qibe")) {
+  for (key in c("pbe", "qibe", "lrpi")) {
     grp <- single_position_data[[key]]
     if (!is.null(grp) && length(grp) > 0 && nrow(grp[[1L]]$data) > 0) {
       return(grp[[1L]]$data %>% distinct(.data$chr, .data$pos, .data$start, .data$end))
@@ -1174,6 +1182,7 @@ write_single_position_merged <- function(single_position_data, output_dir, write
   }
   merged <- add_branch_wide(merged, single_position_data$pbe, "pbe", 3L)
   merged <- add_branch_wide(merged, single_position_data$qibe, "qibe", 4L)
+  merged <- add_branch_wide(merged, single_position_data$lrpi, "lrpi", 2L)
   merged$.row <- NULL
   h5_path <- file.path(output_dir, "single_position.h5")
   h5 <- hdf5r::H5File$new(h5_path, mode = "w")
@@ -1200,21 +1209,22 @@ option_list <- list(
   make_option(c("--fst-dir"), type = "character", default = NULL, help = "Directory containing FST TSV/CSV"),
   make_option(c("--pbe-dir"), type = "character", default = NULL, help = "Directory containing PBE TSV/CSV"),
   make_option(c("--qibe-dir"), type = "character", default = NULL, help = "Directory containing QIBE TSV/CSV (calculate_qibe.sh *_qibe.tsv)"),
+  make_option(c("--lrpi-dir"), type = "character", default = NULL, help = "Directory containing LRPI TSV/CSV (calculate_lrpi.sh *_lrpi.tsv)"),
   make_option(c("--seq-qual-dir"), type = "character", default = NULL, help = "Optional: directory with seq_qual_metrics TSV (exact wW_sS, or a finer same-window step when the analysis step is a multiple of the source step)"),
   make_option(c("--variant-tsv-dir"), type = "character", default = NULL, help = "Optional: directory with site TSVs (snp_sites.tsv / indel_sites.tsv); a *csq*.tsv here is joined as annotation, not stacked as sites"),
   make_option(c("--variant-csq"), type = "character", default = NULL, help = "Optional: comma-separated site csq TSV(s) or directories (variant_csq.sh; names containing csq/variant/sites/calls, not *_long.tsv) joined onto sites by chr, pos, ref, alt. Not applied to window HDF5"),
-  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv; left-joined onto windowed diversity/FST/PBE/QIBE only (not fst_single, qibe_single, or single_position)"),
+  make_option(c("--variant-feature-dir"), type = "character", default = NULL, help = "Optional: directory with variant_features_wW_sS.tsv; left-joined onto windowed diversity/FST/PBE/QIBE/LRPI only (not fst_single, lrpi_single, or single_position)"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory for HDF5 files [default: %default]"),
-  make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Replace fst_single.h5, pbe_single.h5, qibe_single.h5, and variants.h5 with single_position.h5 (site csq plus per-locus FST/PBE/QIBE on SNP rows). Window HDF5 are still written."),
+  make_option(c("--single-position-merged"), action = "store_true", default = FALSE, help = "Replace fst_single.h5, pbe_single.h5, qibe_single.h5, lrpi_single.h5, and variants.h5 with single_position.h5 (site csq plus per-locus FST/PBE/QIBE/LRPI on SNP rows). Window HDF5 are still written."),
   make_option(c("--no-summary"), action = "store_true", default = FALSE, help = "Do not write companion *_summary.tsv files"),
-  make_option(c("--drop-all-na"), action = "store_true", default = FALSE, help = "Drop rows/sites where every statistic value (FST, PBE, or QIBE) is NA before ranking and collation"),
+  make_option(c("--drop-all-na"), action = "store_true", default = FALSE, help = "Drop rows/sites where every statistic value (FST, PBE, QIBE, or LRPI) is NA before ranking and collation"),
   make_option(c("--verbose"), action = "store_true", default = FALSE, help = "Verbose")
 )
 parser <- OptionParser(usage = "usage: %prog [options]", option_list = option_list)
 opts <- parse_args(parser)
 
-if (is.null(opts$`diversity-dir`) && is.null(opts$`fst-dir`) && is.null(opts$`pbe-dir`) && is.null(opts$`qibe-dir`)) {
-  stop("At least one of --diversity-dir, --fst-dir, --pbe-dir, --qibe-dir is required")
+if (is.null(opts$`diversity-dir`) && is.null(opts$`fst-dir`) && is.null(opts$`pbe-dir`) && is.null(opts$`qibe-dir`) && is.null(opts$`lrpi-dir`)) {
+  stop("At least one of --diversity-dir, --fst-dir, --pbe-dir, --qibe-dir, --lrpi-dir is required")
 }
 
 dir.create(opts$`output-dir`, showWarnings = FALSE, recursive = TRUE)
@@ -1236,12 +1246,15 @@ if (!is.null(opts$`pbe-dir`) && dir.exists(opts$`pbe-dir`)) {
 if (!is.null(opts$`qibe-dir`) && dir.exists(opts$`qibe-dir`)) {
   collate_pbe(opts$`qibe-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose, stat = "qibe", n_pops = 4L)
 }
+if (!is.null(opts$`lrpi-dir`) && dir.exists(opts$`lrpi-dir`)) {
+  collate_pbe(opts$`lrpi-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_feature_dir = opts$`variant-feature-dir`, drop_all_na = drop_all_na, verbose = opts$verbose, stat = "lrpi", n_pops = 2L)
+}
 if ((!is.null(opts$`variant-tsv-dir`) && dir.exists(opts$`variant-tsv-dir`)) || !is.null(opts$`variant-csq`)) {
   collate_variant_tsv(opts$`variant-tsv-dir`, opts$`output-dir`, single_position_merged = single_position_merged, write_summary = write_summary, single_position_data = single_position_data, variant_csq = opts$`variant-csq`)
 }
 has_branch <- function(key) !is.null(single_position_data[[key]]) && length(single_position_data[[key]]) > 0
 if (single_position_merged && !is.null(single_position_data) &&
-    (!is.null(single_position_data$fst) || has_branch("pbe") || has_branch("qibe") || !is.null(single_position_data$variants))) {
+    (!is.null(single_position_data$fst) || has_branch("pbe") || has_branch("qibe") || has_branch("lrpi") || !is.null(single_position_data$variants))) {
   write_single_position_merged(single_position_data, opts$`output-dir`, write_summary = write_summary)
 }
 
