@@ -65,7 +65,7 @@ Optional (sites; not applied to window HDF5):
   --variant-tsv-dir DIR  Directory with site TSVs (snp_sites.tsv, indel_sites.tsv). A csq TSV in this
                          directory is annotation, not an extra site row.
   --variant-csq PATH     Site TSV from variant_csq.sh, or a directory of them (repeatable). Names
-                         containing variant, sites, calls, or csq are used (e.g. variants_csq.tsv,
+                         containing variant, sites, calls, or csq are used (e.g. variants.csq.tsv,
                          snps_csq.tsv); *_long.tsv is ignored. Columns are joined onto sites by
                          chr, pos, ref, alt. With no site TSV, the csq table is the site table.
   --single-position-merged  Do not write fst_single.h5, pbe_single.h5, qibe_single.h5, lrpi_single.h5, or variants.h5.

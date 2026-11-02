@@ -43,15 +43,15 @@ These scripts follow the repository-wide repeat-masking policy described in [pop
   --gff annotation.gff3 --output-dir csq_indels
 
 # Windowed variant features from both tables, on the same windows as masked FST/diversity
-./variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv \
-  --sites-tsv csq_indels/variants_csq.tsv --reference ref.unmasked.fa \
+./variant_csq_windows.sh --sites-tsv csq_snps/variants.csq.tsv \
+  --sites-tsv csq_indels/variants.csq.tsv --reference ref.unmasked.fa \
   -w 1000 --step-size 500 --template-dir pi_out \
   --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 ```
 
 ### Into collate and outliers
 
-- **Single-site HDF5**: [`collate.sh`](../stats/README.md#collatesh--collater) `--variant-tsv-dir` (a directory holding `snp_sites.tsv` and `indel_sites.tsv`) with `--variant-csq` (a `variants_csq.tsv` / `snps_csq.tsv` file, or a directory containing one) writes `variants.h5`. `--single-position-merged` writes that table as `single_position.h5` instead and adds per-locus FST, PBE, QIBE, and LRPI on SNP rows only. Neither flag is applied to window HDF5.
+- **Single-site HDF5**: [`collate.sh`](../stats/README.md#collatesh--collater) `--variant-tsv-dir` (a directory holding `snp_sites.tsv` and `indel_sites.tsv`) with `--variant-csq` (a `variants.csq.tsv` file, or a directory containing one) writes `variants.h5`. `--single-position-merged` writes that table as `single_position.h5` instead and adds per-locus FST, PBE, QIBE, and LRPI on SNP rows only. Neither flag is applied to window HDF5.
 - **Window HDF5**: `--variant-feature-dir variant_features` adds the `n_sites*` and `n_csq_*` / `n_region_*` / `n_effect_*` counts and the `genes` / `genes_protein_altering` lists to `diversity_w*.h5`, `fst_w*.h5`, `pbe_w*.h5`, `qibe_w*.h5`, and `lrpi_w*.h5` only. `fst_single.h5` and `single_position.h5` do not get those columns.
 - **Outliers**: `identify_outliers.R` ranks windows on the diversity, FST, PBE, QIBE, and LRPI quantiles when those names are in `--statistics`. Variant counts and gene lists are not carried into `outlier_windows_*.csv` / `outlier_regions_*.csv`. [`outlier_annotation.sh`](../outliers/README.md#2-outlier_annotationsh) `--variant-csq csq_snps --variant-csq csq_indels --gff annotation.gff3` adds the sites, consequences and genes inside each outlier interval, and copies FST/PBE/QIBE/LRPI site columns from `single_position.h5`. [`gene_collation.sh`](../outliers/README.md#3-gene_collationsh) then lists those results by GFF gene.
 - **Plots**: [`plot_outlier_csq.sh`](../plotting/README.md#7-plot_outlier_csqr--plot_outlier_csqsh) shows the consequence composition and enrichment of each outlier statistic's sites. [`plot_fst_csq.sh`](../plotting/README.md#8-plot_fst_csqr--plot_fst_csqsh) shows per-site FST by consequence class from the collated HDF5.
@@ -117,7 +117,7 @@ On the same simulations, `snp_call.sh` recovered every polymorphic SNP from 2% u
 
 ### variant_csq.sh / variant_csq.R
 
-Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suitable for csq (see [bcftools consequence calling](https://samtools.github.io/bcftools/howtos/csq-calling.html)). Produces an annotated BCF and a **site-level TSV** with:
+Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suitable for csq (see [bcftools consequence calling](https://samtools.github.io/bcftools/howtos/csq-calling.html)). `--output-dir` writes `variants.csq.bcf` and `variants.csq.tsv`. The BCF is the input calls with `INFO/BCSQ` added (and indexed). The TSV is one row per site with the parsed columns below; downstream steps use the TSV. An explicit `--output-tsv` or `--output-bcf` that contains `/` is used as given. A bare filename is written in `--output-dir`.
 
 - **`bcsq`**: raw `INFO/BCSQ` from csq (full detail).
 - **`csq_consequences`**: semicolon-separated list of verbatim consequence tokens parsed from BCSQ.
@@ -135,16 +135,16 @@ Runs **bcftools csq** on a BCF/VCF using the reference FASTA and a **GFF3** suit
 **Example:**
 ```bash
 ./variant_csq.sh --bcf snps_out/snp_sites.bcf --reference ref.unmasked.fa --gff genes.gff3 --output-dir csq_out
-# Annotated sites: csq_out/variants_csq.tsv ; CSQ BCF: csq_out/calls.csq.bcf
+# Site table: csq_out/variants.csq.tsv ; BCSQ BCF: csq_out/variants.csq.bcf
 ```
 
 ### variant_csq_windows.sh / variant_csq_windows.R
 
-Aggregates annotated sites into **per-window count tables** on grenedalf's interval grid ([Window boundaries](../stats/README.md#window-boundaries)). **`--reference`** (FASTA or `.fai`, the same one given to diversity/FST) with **`-w` / `--step-size`** (repeatable, paired; step defaults to window/2) builds the grid from chromosome lengths. Empty windows (`n_sites=0`) are omitted by default (`--no-nan-windows`; `--keep-nan-windows` writes them). **`--template-dir`** (or **`--template-tsv`**) takes existing windowed FST or diversity tables whose names include `w{W}_s{S}` (searched recursively; e.g. `fst_w1000_s500.tsv`, `diversity_w1000_s500_sampleEcho.csv`). Those tables' `(chr, start, end)` are used **even when `--reference` is also given**, so the feature file matches masked stats (including `--no-nan-windows` gaps). `--reference` still checks that those windows sit on the interval grid, and fills in any `-w` scale that has no template. **`--filter-mask-total-bed`** / **`--filter-mask-total-fasta`** are the same mask files as diversity/FST; sites overlapping the mask are not counted. Sites are assigned to windows by interval search per chromosome, so memory stays flat on large scaffolds. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, **`n_sites_snp`** / **`n_sites_indel`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns, plus **`genes`** / **`genes_protein_altering`** (sorted, semicolon-separated union over the window's sites), suitable for joining in collate. `--sites-tsv` can be repeated to combine the SNP and indel csq tables.
+Aggregates annotated sites into **per-window count tables** on grenedalf's interval grid ([Window boundaries](../stats/README.md#window-boundaries)). **`--reference`** (FASTA or `.fai`, the same one given to diversity/FST) with **`-w` / `--step-size`** (repeatable, paired; step defaults to window/2) builds the grid from chromosome lengths. Empty windows (`n_sites=0`) are omitted by default (`--no-nan-windows`; `--keep-nan-windows` writes them). **`--template-dir`** (or **`--template-tsv`**) takes existing windowed FST or diversity tables whose names include `w{W}_s{S}` (searched recursively; e.g. `fst_w1000_s500.tsv`, `diversity_w1000_s500_sampleEcho.csv`). Those tables' `(chr, start, end)` are used **even when `--reference` is also given**, so the feature file matches masked stats (including `--no-nan-windows` gaps). `--reference` still checks that those windows sit on the interval grid, and fills in any `-w` scale that has no template. **`--filter-mask-total-bed`** / **`--filter-mask-total-fasta`** are the same mask files as diversity/FST; sites overlapping the mask are not counted. Sites are assigned to windows by interval search per chromosome, so memory stays flat on large scaffolds. Output files: **`variant_features_w{W}_s{S}.tsv`** in `--output-dir`, with **`n_sites`**, **`n_sites_snp`** / **`n_sites_indel`**, dynamic **`n_csq_*`** (verbatim consequence tokens), **`n_region_*`**, and **`n_effect_*`** columns, plus **`genes`** / **`genes_protein_altering`** (sorted, semicolon-separated union over the window's sites), suitable for joining in collate. `--sites-tsv` is a site TSV or a `variant_csq.sh` output directory, and can be repeated to stack the SNP and indel tables. A directory uses `variants.csq.tsv`, or `variants_csq*.tsv` when that is the only name present; `*_long.tsv` is ignored. The two tables are row-stacked. `n_sites_snp` and `n_sites_indel` come from the `variant_type` column, which `variant_csq.R` sets from the allele lengths.
 
 **Example:**
 ```bash
-./variant_csq_windows.sh --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \
+./variant_csq_windows.sh --sites-tsv csq_snps/variants.csq.tsv --sites-tsv csq_indels/variants.csq.tsv \
   --reference ref.unmasked.fa -w 1000 --step-size 500 --template-dir pi_out \
   --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 ```

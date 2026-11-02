@@ -46,12 +46,19 @@ Required:
                               (not the hard-masked genome used only for alignment).
   -g, --gff FILE              GFF3 for bcftools csq (see bcftools howto). Sites on chromosomes
                               without GFF features (gene-free scaffolds) are kept without BCSQ
-  -o, --output-bcf FILE       Output BCF path with BCSQ annotations
-  OR --output-dir DIR         Output directory; writes calls.csq.bcf and annotated TSV
+  -o, --output-bcf FILE       Output BCF with INFO/BCSQ. A bare filename is written
+                              in --output-dir when that is set
+  OR --output-dir DIR         Output directory. Default pair:
+                              variants.csq.bcf and variants.csq.tsv
 
 Outputs:
-  --output-tsv FILE           Final annotated site TSV (default: <dir>/variants_csq.tsv with --output-dir)
-  --output-long-tsv FILE      Optional long-format BCSQ rows (one row per sub-record)
+  --output-tsv FILE           Site TSV from variant_csq.R (parsed BCSQ columns).
+                              Default: variants.csq.tsv in --output-dir, or the
+                              BCF path with .tsv when only --output-bcf is set.
+                              A bare filename is placed in --output-dir. A path
+                              containing / is used as given
+  --output-long-tsv FILE      Optional long-format BCSQ rows (one row per sub-record).
+                              Same path rule as --output-tsv
 
 Optional:
   --map-tsv FILE              Optional mapping table for variant_csq.R (see variant_csq.R --help)
@@ -117,22 +124,38 @@ if [[ ! -f "$VARIANT_CSQ_R" ]]; then
     exit 1
 fi
 
-if [[ -n "$OUTPUT_DIR" && -z "$OUTPUT_BCF" ]]; then
-    OUTPUT_BCF="${OUTPUT_DIR}/calls.csq.bcf"
-fi
-if [[ -z "$OUTPUT_BCF" ]]; then
+# A bare filename is placed in --output-dir. A path containing / is used as given.
+in_output_dir() {
+    local path="$1"
+    if [[ -n "$OUTPUT_DIR" && "$path" != */* ]]; then
+        printf '%s/%s\n' "$OUTPUT_DIR" "$path"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+if [[ -n "$OUTPUT_BCF" ]]; then
+    OUTPUT_BCF=$(in_output_dir "$OUTPUT_BCF")
+elif [[ -n "$OUTPUT_DIR" ]]; then
+    OUTPUT_BCF="${OUTPUT_DIR}/variants.csq.bcf"
+else
     log_error "Specify -o/--output-bcf or --output-dir"
     usage
     exit 1
 fi
 
-if [[ -n "$OUTPUT_DIR" && -z "$OUTPUT_TSV" ]]; then
-    OUTPUT_TSV="${OUTPUT_DIR}/variants_csq.tsv"
-elif [[ -z "$OUTPUT_TSV" ]]; then
+if [[ -n "$OUTPUT_TSV" ]]; then
+    OUTPUT_TSV=$(in_output_dir "$OUTPUT_TSV")
+elif [[ -n "$OUTPUT_DIR" ]]; then
+    OUTPUT_TSV="${OUTPUT_DIR}/variants.csq.tsv"
+else
     base="${OUTPUT_BCF%.bcf}"
     base="${base%.vcf.gz}"
     base="${base%.vcf}"
-    OUTPUT_TSV="${base}_annotated.tsv"
+    OUTPUT_TSV="${base}.tsv"
+fi
+if [[ -n "$OUTPUT_LONG" ]]; then
+    OUTPUT_LONG=$(in_output_dir "$OUTPUT_LONG")
 fi
 
 mkdir -p "$(dirname "$OUTPUT_BCF")"

@@ -32,7 +32,10 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Required:
-  --sites-tsv FILE          Annotated TSV from variant_csq.R; repeat to combine SNP and indel outputs
+  --sites-tsv PATH          Site TSV from variant_csq.sh (variants.csq.tsv), or that output
+                            directory. Repeat to stack SNP and indel tables. A directory
+                            uses variants.csq.tsv, or variants_csq*.tsv if that is all it has.
+                            *_long.tsv is ignored. SNP and indel tables are not handled differently.
 
 Windows (use a stats template so rows match masked diversity / FST for collate):
   --reference FILE          Reference FASTA (with .fai) or .fai; builds the interval grid when a
@@ -54,14 +57,15 @@ Mask (same files as calculate_pi_theta.sh / calculate_fst.sh; sites inside are n
   --keep-nan-windows          Write empty reference-grid windows (turns off --no-nan-windows)
 
 Optional:
-  --output-dir DIR          Where to write variant_features_wW_sS.tsv [default: .]
+  --output-dir DIR          Where to write variant_features_wW_sS.tsv, one file per window
+                            scale [default: .]
   --rscript PATH            [default: Rscript]
   --dry-run
   --verbose                 Log the R command, and in R the site count and window source
   -h, --help
 
 Example:
-  $0 --sites-tsv csq_snps/variants_csq.tsv --sites-tsv csq_indels/variants_csq.tsv \\
+  $0 --sites-tsv csq_snps/variants.csq.tsv --sites-tsv csq_indels/variants.csq.tsv \\
      --reference ref.unmasked.fa -w 1000 --step-size 500 --template-dir pi_out \\
      --filter-mask-total-bed mask/mask.bed --output-dir vf_out
 EOF
@@ -101,8 +105,8 @@ if [[ ${#SITES_TSVS[@]} -eq 0 ]]; then
     exit 1
 fi
 for f in "${SITES_TSVS[@]}"; do
-    if [[ ! -f "$f" ]]; then
-        log_error "Sites TSV not found: $f"
+    if [[ ! -f "$f" && ! -d "$f" ]]; then
+        log_error "Sites TSV or directory not found: $f"
         exit 1
     fi
     if [[ "$f" == *,* ]]; then

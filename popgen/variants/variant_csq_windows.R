@@ -45,6 +45,31 @@ sanitize_suffix <- function(x) {
   tolower(s)
 }
 
+# A file is used as given. A directory contributes variants.csq.tsv, or variants_csq*.tsv
+# when the new name is absent. *_long.tsv is one row per BCSQ record, not per site.
+expand_sites_paths <- function(paths) {
+  files <- character(0)
+  for (p in paths) {
+    if (dir.exists(p)) {
+      f <- list.files(p, pattern = "^variants[._]csq.*\\.tsv$", full.names = TRUE)
+      f <- f[!grepl("_long\\.tsv$", f)]
+      new_name <- file.path(p, "variants.csq.tsv")
+      if (new_name %in% f && length(f) > 1L) {
+        message("Directory ", p, " also has older variants_csq*.tsv; using variants.csq.tsv")
+        f <- new_name
+      }
+      if (length(f) == 0L) stop("No variants.csq.tsv or variants_csq*.tsv in directory: ", p)
+      message("Sites from ", p, ": ", paste(basename(f), collapse = ", "))
+      files <- c(files, f)
+    } else if (file.exists(p)) {
+      files <- c(files, p)
+    } else {
+      stop("--sites-tsv path not found: ", p)
+    }
+  }
+  unique(files)
+}
+
 prepare_sites <- function(sites) {
   d <- sites %>% rename_all(tolower)
   if (!all(c("chr", "pos") %in% names(d))) stop("sites TSV must have chr and pos")
@@ -277,7 +302,7 @@ split_num <- function(x) if (is.null(x)) numeric(0) else as.numeric(trimws(strsp
 
 main <- function() {
   option_list <- list(
-    make_option(c("--sites-tsv"), type = "character", help = "Annotated variants TSV(s) from variant_csq.R; comma-separate to combine (e.g. SNP and indel outputs)"),
+    make_option(c("--sites-tsv"), type = "character", help = "Site TSV(s) from variant_csq.sh, or those output directories (variants.csq.tsv, else variants_csq*.tsv; not *_long.tsv). Comma-separate to stack SNP and indel tables"),
     make_option(c("--output-dir"), type = "character", default = ".", help = "Directory for variant_features_wW_sS.tsv"),
     make_option(c("--reference"), type = "character", default = NULL, help = "Reference FASTA (with .fai) or .fai: windows are built on the grenedalf interval grid from chromosome lengths"),
     make_option(c("--window-size"), type = "character", default = NULL, help = "Window size(s), comma-separated (with --reference)"),
@@ -292,9 +317,9 @@ main <- function() {
   )
   opt <- parse_args(OptionParser(option_list = option_list))
   sites_paths <- if (is.null(opt$`sites-tsv`)) character(0) else trimws(strsplit(opt$`sites-tsv`, ",", fixed = TRUE)[[1L]])
-  if (length(sites_paths) == 0L || !all(file.exists(sites_paths))) {
-    stop("--sites-tsv must exist: ", paste(sites_paths[!file.exists(sites_paths)], collapse = ", "))
-  }
+  sites_paths <- sites_paths[nzchar(sites_paths)]
+  if (length(sites_paths) == 0L) stop("--sites-tsv is required")
+  sites_paths <- expand_sites_paths(sites_paths)
 
   # Scales: explicit sizes, else template file names
   ws <- split_num(opt$`window-size`)

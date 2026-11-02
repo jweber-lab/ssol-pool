@@ -7,7 +7,7 @@
 # --regions is outlier_regions*.csv (region_start/region_end) or outlier_windows*.csv
 # (start/end; each window is one interval).
 #   1. Consequence calls (--variant-csq, --gff): sites inside each interval from variant_csq.sh
-#      tables (variants_csq.tsv) or collate variants.h5 / single_position.h5, with their
+#      tables (variants.csq.tsv) or collate variants.h5 / single_position.h5, with their
 #      bcftools csq consequences and genes, plus assembly GFF genes overlapping the region.
 #      Same assembly coordinates as the regions, so no BLAST is involved.
 #   2. BLAST (--blast-config, --reference): extract sequences, BLAST per region against
@@ -118,6 +118,10 @@ read_regions <- function(path) {
   d
 }
 
+# paste0() prints large coordinates in scientific notation (900000 -> "9e+05").
+fmt_bp <- function(x) format(x, scientific = FALSE, trim = TRUE)
+interval_id <- function(chr, start, end) paste0(chr, ":", fmt_bp(start), "-", fmt_bp(end))
+
 # Write region FASTA using samtools faidx (reference must be indexed).
 # Single samtools call with all regions for efficiency.
 write_region_fasta <- function(regions, reference, out_fasta, samtools = "samtools") {
@@ -128,7 +132,7 @@ write_region_fasta <- function(regions, reference, out_fasta, samtools = "samtoo
   }
   fai <- paste0(reference, ".fai")
   if (!file.exists(fai)) stop("Reference index not found: ", fai)
-  reg_vec <- paste0(regions$chr, ":", regions$region_start, "-", regions$region_end)
+  reg_vec <- interval_id(regions$chr, regions$region_start, regions$region_end)
   seq <- system2(samtools, c("faidx", reference, reg_vec), stdout = TRUE, stderr = FALSE)
   writeLines(seq, out_fasta)
   out_fasta
@@ -430,17 +434,18 @@ hits_to_genes <- function(blast_tsv, gff_path, verbose = FALSE) {
 CSQ_TEXT_COLS <- c("chr", "ref", "alt", "filter", "bcsq", "csq_consequences", "region_category",
                    "coding_effect", "genes", "genes_protein_altering", "variant_type")
 
-# Expand comma-separated --variant-csq into files: variants_csq*.tsv in directories (not *_long.tsv),
-# plain TSV files, or collate HDF5 (variants.h5 / single_position.h5, group /sites).
+# Expand comma-separated --variant-csq into files: variants.csq.tsv or variants_csq*.tsv
+# in directories (not *_long.tsv), plain TSV files, or collate HDF5
+# (variants.h5 / single_position.h5, group /sites).
 expand_csq_paths <- function(paths) {
   paths <- trimws(strsplit(paths, ",", fixed = TRUE)[[1]])
   paths <- paths[nzchar(paths)]
   files <- character(0)
   for (p in paths) {
     if (dir.exists(p)) {
-      f <- list.files(p, pattern = "^variants_csq.*\\.tsv$", full.names = TRUE)
+      f <- list.files(p, pattern = "^variants[._]csq.*\\.tsv$", full.names = TRUE)
       f <- f[!grepl("_long\\.tsv$", f)]
-      if (length(f) == 0) stop("No variants_csq*.tsv in directory: ", p)
+      if (length(f) == 0) stop("No variants.csq.tsv or variants_csq*.tsv in directory: ", p)
       files <- c(files, f)
     } else if (file.exists(p)) {
       files <- c(files, p)
@@ -660,7 +665,7 @@ option_list <- list(
   make_option(c("--reference"), type = "character", default = NULL, help = "Reference genome FASTA (indexed with samtools faidx); required with --blast-config"),
   make_option(c("--blast-config"), type = "character", default = NULL, help = "BLAST config YAML/JSON (list of db_path, name, gff_path)"),
   make_option(c("--variant-csq"), type = "character", default = NULL,
-    help = "Comma-separated consequence tables: variants_csq.tsv files or directories (variant_csq.sh), or collate variants.h5 / single_position.h5"),
+    help = "Comma-separated consequence tables: variants.csq.tsv files or directories (variant_csq.sh; variants_csq.tsv still accepted), or collate variants.h5 / single_position.h5"),
   make_option(c("--gff"), type = "character", default = NULL,
     help = "Assembly GFF3 (the one given to variant_csq.sh): genes overlapping each region, and product/GO for csq gene names"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory"),
@@ -701,7 +706,7 @@ if (!is.na(opts$evalue) && nzchar(trimws(opts$evalue)))
 
 regions <- read_regions(opts$regions)
 if (nrow(regions) == 0) stop("No regions found in ", opts$regions)
-regions$qseqid <- paste0(regions$chr, ":", regions$region_start, "-", regions$region_end)
+regions$qseqid <- interval_id(regions$chr, regions$region_start, regions$region_end)
 region_extra <- setdiff(names(regions), c("qseqid", "chr", "region_start", "region_end"))
 region_lookup <- regions %>%
   select("qseqid", "chr", "region_start", "region_end", any_of(region_extra)) %>%
@@ -788,11 +793,9 @@ process_one_db <- function(db) {
   out_blast <- file.path(opts$`output-dir`, paste0("blast_", gsub("[^A-Za-z0-9_]", "_", name), ".tsv"))
   if (opts$verbose) {
     message("Running BLAST for DB: ", name)
-    message("  Query: ", nrow(regions), " region(s) from ", query_fa)
-    for (i in seq_len(nrow(regions))) {
-      qlen <- regions$region_end[i] - regions$region_start[i] + 1L
-      message("    ", regions$qseqid[i], " length=", qlen)
-    }
+    qlen <- regions$region_end - regions$region_start + 1L
+    message("  Query: ", nrow(regions), " region(s) from ", query_fa,
+            " (length bp min=", min(qlen), " median=", stats::median(qlen), " max=", max(qlen), ")")
     min_cov_opt <- opts$`min-query-coverage`
     use_cov <- is.numeric(min_cov_opt) && is.finite(min_cov_opt) && min_cov_opt > 0 && min_cov_opt <= 1
     message("  min-query-coverage: ", if (use_cov) min_cov_opt else "not set (all hits kept)")
@@ -840,11 +843,8 @@ process_one_db <- function(db) {
   if (is.null(genes)) return(NULL)
   if (opts$verbose && nrow(genes) > 0) {
     n_uniq_genes <- length(unique(genes$gene_id))
-    message("  Genes (", name, "): ", nrow(genes), " rows (feature-type expansion), ", n_uniq_genes, " unique gene_id")
-    by_q <- genes %>% group_by(.data$qseqid) %>% summarise(n_rows = dplyr::n(), n_genes = length(unique(.data$gene_id)), .groups = "drop")
-    for (i in seq_len(nrow(by_q))) {
-      message("    ", by_q$qseqid[i], ": ", by_q$n_rows[i], " rows, ", by_q$n_genes[i], " unique genes")
-    }
+    message("  Genes (", name, "): ", nrow(genes), " rows, ", n_uniq_genes, " unique gene_id, ",
+            dplyr::n_distinct(genes$qseqid), " regions. Hit table is written after every database finishes.")
   }
   genes$db <- name
   anno_ok <- !is.null(annotation_tsv) && length(annotation_tsv) > 0 && !is.na(annotation_tsv) && nzchar(trimws(annotation_tsv))
@@ -904,6 +904,7 @@ if (length(all_genes) > 0) {
   genes_out <- genes_out %>%
     left_join(region_lookup, by = "qseqid", multiple = "first")
   genes_file <- file.path(opts$`output-dir`, paste0("outlier_genes_", output_suffix, ".csv"))
+  message("Writing ", genes_file, " (", nrow(genes_out), " hit-gene rows)")
   write_csv(genes_out, genes_file)
   message("Wrote ", genes_file, " (", nrow(genes_out), " hit-gene rows)")
 

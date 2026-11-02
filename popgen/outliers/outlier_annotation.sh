@@ -4,7 +4,7 @@
 # outlier_annotation.sh
 #
 # Wrapper for outlier_annotation.R: annotate outlier regions or windows from
-#   - consequence calls (variant_csq.sh variants_csq.tsv, or collate variants.h5 /
+#   - consequence calls (variant_csq.sh variants.csq.tsv, or collate variants.h5 /
 #     single_position.h5) and the assembly GFF: sites, consequences and genes per region.
 #     Output: outlier_csq_sites_<suffix>.csv, outlier_csq_genes_<suffix>.csv,
 #     outlier_csq_summary_<suffix>.csv, outlier_csq_background_<suffix>.csv.
@@ -49,7 +49,7 @@ Required:
   At least one of --variant-csq, --gff, --blast-config.
 
 Consequence calls (same assembly as the regions; no BLAST):
-  --variant-csq PATH     variants_csq.tsv file or directory from variant_csq.sh, or collate
+  --variant-csq PATH     variants.csq.tsv file or directory from variant_csq.sh, or collate
                           variants.h5 / single_position.h5 (repeatable: e.g. SNP and indel csq dirs)
   --gff FILE             Assembly GFF3 given to variant_csq.sh: lists genes overlapping each region
                           and adds product/GO to the genes named by csq
