@@ -25,6 +25,7 @@ POP1_NAME=""
 POP2_NAME=""
 COMPARAND=""
 ALL_PAIRS=false
+RESTRICT_TO_SAMPLE_INFO=false
 LRPI_COMPARISONS_FILE=""
 SAMPLE_INFO_CSV=""
 COMPUTE_DUP_COMPS=false
@@ -62,14 +63,18 @@ Comparison (choose one). LRPI = ln(pi_pop1 / pi_pop2). Order matters:
                               The same ordered pair is skipped unless --compute-dup-comps.
                               The swapped pair is a different comparison.
   --comparand NAME            ln(pi_NAME / pi_other) for every other sample in the directory
-  --all-pairs                 Every unordered pair once. Names are sorted, so pop1 < pop2
-                              and the value is ln(pi_pop1 / pi_pop2). Swap the names to flip the sign.
+  --all-pairs                 Every unordered pair once, from the diversity filenames.
+                              Names are sorted, so pop1 < pop2 and the value is ln(pi_pop1 / pi_pop2).
+  --sample-info FILE          With no other comparison option, every unordered pair among
+                              sample_name, sorted the same way (earlier name is pop1).
+                              With another comparison option, warn if a name is missing
+                              from sample_name. With --all-pairs, the pairs are limited
+                              to sample_name.
 
 Required:
   -o, --output-dir DIR        Output directory
 
 Optional:
-  --sample-info FILE          Warn if a comparison name is missing from the sample_name column
   --compute-dup-comps         Keep duplicate ordered pairs from the comparisons file
   --file-prefix PREFIX        Prefix for output files
   --output-format FMT         tsv, csv, or hdf5 (default: tsv)
@@ -86,6 +91,8 @@ Output (one file per diversity scale and directed pair):
   Logs: {output_dir}/log/{prefix_}calculate_lrpi_YYYYmmdd_HHMMSS.log
 
 Examples:
+  $0 --diversity-dir pi_out --sample-info ../../sample_info.csv -o lrpi_out
+
   $0 --diversity-dir pi_out --pop1-name Echo --pop2-name Kjer -o lrpi_out
 
   $0 --diversity-dir pi_out --comparand Echo -o lrpi_out
@@ -249,6 +256,45 @@ parse_lrpi_comparisons() {
     return 0
 }
 
+# sample_name column, comments skipped, sorted in byte order so pop1 < pop2.
+read_sample_names() {
+    local csv="$1"
+    INFO_SAMPLES=()
+    local saw_header=false name_col=-1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        IFS=',' read -r -a F <<< "$line"
+        local i
+        for i in "${!F[@]}"; do
+            F[$i]=$(echo "${F[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+        done
+        if [[ "$saw_header" == false ]]; then
+            saw_header=true
+            for i in "${!F[@]}"; do
+                local h
+                h=$(echo "${F[$i]}" | tr '[:upper:]' '[:lower:]')
+                [[ "$h" == "sample_name" ]] && name_col=$i
+            done
+            if [[ $name_col -lt 0 ]]; then
+                log_error "sample-info CSV needs a sample_name column (found: $line)"
+                return 1
+            fi
+            continue
+        fi
+        [[ ${#F[@]} -le $name_col ]] && continue
+        local name="${F[$name_col]}"
+        [[ -z "$name" ]] && continue
+        INFO_SAMPLES+=("$name")
+    done < "$csv"
+    if [[ ${#INFO_SAMPLES[@]} -eq 0 ]]; then
+        log_error "No sample_name values in $csv"
+        return 1
+    fi
+    mapfile -t INFO_SAMPLES < <(printf '%s\n' "${INFO_SAMPLES[@]}" | LC_ALL=C sort -u)
+    return 0
+}
+
 # Unique labels, single-style sort not needed; sort labels for stable output.
 unique_labels() {
     printf '%s\n' "${DIV_LABELS[@]}" | LC_ALL=C sort -u
@@ -310,8 +356,16 @@ mode_n=0
 [[ -n "$COMPARAND" ]] && mode_n=$((mode_n + 1))
 [[ "$ALL_PAIRS" == true ]] && mode_n=$((mode_n + 1))
 [[ -n "$POP1_NAME" || -n "$POP2_NAME" ]] && mode_n=$((mode_n + 1))
+if [[ "$mode_n" -eq 0 && -n "$SAMPLE_INFO_CSV" ]]; then
+    ALL_PAIRS=true
+    RESTRICT_TO_SAMPLE_INFO=true
+    mode_n=1
+fi
+if [[ "$ALL_PAIRS" == true && -n "$SAMPLE_INFO_CSV" ]]; then
+    RESTRICT_TO_SAMPLE_INFO=true
+fi
 if [[ "$mode_n" -eq 0 ]]; then
-    log_error "Choose a comparison: --pop1-name and --pop2-name, --lrpi-comparisons, --comparand, or --all-pairs"
+    log_error "Choose a comparison: --sample-info, --pop1-name and --pop2-name, --lrpi-comparisons, --comparand, or --all-pairs"
     usage
     exit 1
 fi
@@ -394,6 +448,7 @@ check_command "Rscript" || { log_error "Rscript not found. Please install R and 
 
 declare -a DIV_PATHS=() DIV_SAMPLES=() DIV_LABELS=()
 declare -a PAIR_POP1=() PAIR_POP2=()
+declare -a INFO_SAMPLES=()
 
 if [[ -n "$DIVERSITY_DIR" ]]; then
     if [[ "$DRY_RUN" == false ]]; then
@@ -412,6 +467,23 @@ if [[ -n "$DIVERSITY_DIR" ]]; then
             log_dry_run "Would discover diversity files in $DIVERSITY_DIR"
         fi
     fi
+fi
+
+if [[ "$RESTRICT_TO_SAMPLE_INFO" == true ]]; then
+    if [[ "$DRY_RUN" == false ]]; then
+        check_file "$SAMPLE_INFO_CSV"
+        read_sample_names "$SAMPLE_INFO_CSV" || exit 1
+    elif [[ -f "$SAMPLE_INFO_CSV" ]]; then
+        read_sample_names "$SAMPLE_INFO_CSV" || exit 1
+    else
+        INFO_SAMPLES=("Cheney" "Echo")
+        log_dry_run "Would load sample_name values from $SAMPLE_INFO_CSV"
+    fi
+    if [[ ${#INFO_SAMPLES[@]} -lt 2 ]]; then
+        log_error "sample-info needs at least two sample_name values to form a pair"
+        exit 1
+    fi
+    log "All pairs from sample-info, name order (pop1 < pop2): $(printf '%s ' "${INFO_SAMPLES[@]}")"
 fi
 
 if [[ -n "$LRPI_COMPARISONS_FILE" ]]; then
@@ -470,7 +542,11 @@ if [[ "$DRY_RUN" == true ]]; then
     else
         log_dry_run "Diversity files: ${#DIV_PATHS[@]}"
         if [[ "$ALL_PAIRS" == true ]]; then
-            log_dry_run "Would run every unordered pair at each scale (pop1 < pop2)"
+            if [[ "$RESTRICT_TO_SAMPLE_INFO" == true ]]; then
+                log_dry_run "Would run every unordered pair among sample-info names (pop1 < pop2)"
+            else
+                log_dry_run "Would run every unordered pair at each scale (pop1 < pop2)"
+            fi
         elif [[ -n "$COMPARAND" ]]; then
             log_dry_run "Would run ln(pi_${COMPARAND} / pi_other) at each scale"
         else
@@ -530,6 +606,29 @@ while IFS= read -r label; do
     SCALE_P1=()
     SCALE_P2=()
     if [[ "$ALL_PAIRS" == true ]]; then
+        if [[ "$RESTRICT_TO_SAMPLE_INFO" == true ]]; then
+            local_kept=()
+            for s in "${INFO_SAMPLES[@]}"; do
+                found=false
+                for have in "${scale_samples[@]}"; do
+                    if [[ "$have" == "$s" ]]; then
+                        found=true
+                        break
+                    fi
+                done
+                if [[ "$found" == true ]]; then
+                    local_kept+=("$s")
+                else
+                    log_warn "No diversity table for $s at $label; omitting it from pairs"
+                fi
+            done
+            if [[ ${#local_kept[@]} -eq 0 ]]; then
+                scale_samples=()
+            else
+                scale_samples=("${local_kept[@]}")
+            fi
+            unset local_kept
+        fi
         if [[ ${#scale_samples[@]} -lt 2 ]]; then
             log_warn "Scale $label has fewer than two samples; skipping"
             continue

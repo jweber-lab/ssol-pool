@@ -104,7 +104,7 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
 ./calculate_pbe.sh --fst-dir fst_out --pop1-name Echo --pop2-name Kjer --pop3-name Cheney -o pbe_out
 ./calculate_qibe.sh --fst-dir fst_out \
   --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_out
-./calculate_lrpi.sh --diversity-dir pi_out --pop1-name Echo --pop2-name Kjer -o lrpi_out
+./calculate_lrpi.sh --diversity-dir pi_out --sample-info ../../sample_info.csv -o lrpi_out
 
 # 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
@@ -256,12 +256,12 @@ pop1 is the numerator. Swapping the two names negates the value. A window is NA 
 
 **Usage:**
 ```bash
-./calculate_lrpi.sh --diversity-dir pi_out --pop1-name Echo --pop2-name Kjer -o lrpi_out
+./calculate_lrpi.sh --diversity-dir pi_out --sample-info ../../sample_info.csv -o lrpi_out
 ```
 
-`--comparand Echo` writes ln(π_Echo / π_other) for every other sample. `--all-pairs` writes each unordered pair once, with the names sorted so the file is ln(π_first / π_second). `--lrpi-comparisons` is a CSV with columns `pop1`, `pop2` (directed; a repeated ordered pair is skipped unless `--compute-dup-comps`).
+`--sample-info` alone writes every unordered pair among `sample_name`. Names are sorted, so the earlier name is pop1 and the file is ln(π_pop1 / π_pop2). A listed sample with no diversity table at that window and step is omitted. `--all-pairs` does the same sort over every sample that has a diversity file. `--comparand Echo` writes ln(π_Echo / π_other). `--pop1-name` and `--pop2-name` are one directed pair. `--lrpi-comparisons` is a CSV with columns `pop1`, `pop2` (directed; a repeated ordered pair is skipped unless `--compute-dup-comps`).
 
-**Options:** `--diversity-a` / `--diversity-b` for one pair of tables, `--output-format tsv|csv|hdf5`, `--drop-all-na`, `--sample-info`, `--file-prefix`, `--dry-run`, `--verbose`.
+**Options:** `--diversity-a` / `--diversity-b` for one pair of tables, `--output-format tsv|csv|hdf5`, `--drop-all-na`, `--file-prefix`, `--dry-run`, `--verbose`.
 
 **Outputs:** `{label}_{pop1}_{pop2}_lrpi.tsv` (or `.csv` / `_lrpi.h5`). `label` is `w{W}_s{S}` from the diversity filename. Columns are `chr`, `pos`, `start`, `end`, `pop1`, `pop2`, `pi_pop1`, `pi_pop2`, `lrpi`. Collate reads `*_lrpi.tsv` from `--lrpi-dir` and writes `lrpi_w{W}_s{S}.h5` (`pop1`, `pop2`, `pi_pop1`, `pi_pop2`, `lrpi`, `lrpi_rank`, `lrpi_quantile`, ranked within each pair). A per-locus file becomes `Pop1:Pop2.lrpi` on `single_position.h5`.
 
@@ -427,7 +427,7 @@ done
   --output-dir ./qibe_out
 ./calculate_lrpi.sh \
   --diversity-dir ./diversity_analysis \
-  --pop1-name Echo --pop2-name Kjer \
+  --sample-info ../../sample_info.csv \
   --output-dir ./lrpi_out
 ```
 
