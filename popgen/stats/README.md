@@ -13,6 +13,7 @@ The analysis scripts calculate:
 5. **PBE**: Population Branch Excess — PBS minus the median-scaled expectation from the sister-pair branch (`T23`)
 6. **QIBS**: Quartet Internal Branch Statistic — internal-branch length of a four-population grouping `((pop1, pop2), (pop3, pop4))`
 7. **QIBE**: Quartet Internal Branch Excess — QIBS minus the median-scaled expectation from the two sister-pair branches (`QEBS`)
+8. **LRPI**: Log ratio of nucleotide diversity between two populations, ln(π_A / π_B)
 
 ## Requirements
 
@@ -34,7 +35,7 @@ The analysis scripts calculate:
 
 **Common Requirements:**
 - **samtools** - Required for BAM file processing (if using grenedalf)
-- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `calculate_pbe.R`, `calculate_qibe.R`, and `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
+- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `calculate_pbe.R`, `calculate_qibe.R`, `calculate_lrpi.R`, and `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
 
 ### Input Files
 
@@ -102,6 +103,7 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
 ./calculate_pbe.sh --fst-dir fst_out --pop1-name Echo --pop2-name Kjer --pop3-name Cheney -o pbe_out
 ./calculate_qibe.sh --fst-dir fst_out \
   --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_out
+./calculate_lrpi.sh --diversity-dir pi_out --pop1-name Echo --pop2-name Kjer -o lrpi_out
 
 # 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
@@ -242,6 +244,25 @@ Calculates nucleotide diversity (π), Watterson's theta (θ), and Tajima's D fro
   --min-coverage 10 \
   --max-coverage 100
 ```
+
+### calculate_lrpi.sh / calculate_lrpi.R
+
+Computes the log ratio of nucleotide diversity between two populations from **diversity tables** written by `calculate_pi_theta.sh`:
+
+**LRPI = ln(π_pop1 / π_pop2)**
+
+pop1 is the numerator. Swapping the two names negates the value. A window is NA when either π is missing, not finite, or not greater than 0. Windows present in only one of the two tables are dropped. `start` / `end` are copied from the diversity tables so the rows stay on the same grid.
+
+**Usage:**
+```bash
+./calculate_lrpi.sh --diversity-dir pi_out --pop1-name Echo --pop2-name Kjer -o lrpi_out
+```
+
+`--comparand Echo` writes ln(π_Echo / π_other) for every other sample. `--all-pairs` writes each unordered pair once, with the names sorted so the file is ln(π_first / π_second). `--lrpi-comparisons` is a CSV with columns `pop1`, `pop2` (directed; a repeated ordered pair is skipped unless `--compute-dup-comps`).
+
+**Options:** `--diversity-a` / `--diversity-b` for one pair of tables, `--output-format tsv|csv|hdf5`, `--drop-all-na`, `--sample-info`, `--file-prefix`, `--dry-run`, `--verbose`.
+
+**Outputs:** `{label}_{pop1}_{pop2}_lrpi.tsv` (or `.csv` / `_lrpi.h5`). `label` is `w{W}_s{S}` from the diversity filename. Columns are `chr`, `pos`, `start`, `end`, `pop1`, `pop2`, `pi_pop1`, `pi_pop2`, `lrpi`. Collate does not read these files.
 
 ### calculate_pbe.sh / calculate_pbe.R
 
@@ -403,6 +424,10 @@ done
   --fst-dir ./fst_out \
   --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv \
   --output-dir ./qibe_out
+./calculate_lrpi.sh \
+  --diversity-dir ./diversity_analysis \
+  --pop1-name Echo --pop2-name Kjer \
+  --output-dir ./lrpi_out
 ```
 
 ### Alternative Workflow with Popoolation2 (Fallback)
@@ -485,6 +510,7 @@ This is particularly useful for:
 - **High π**: High genetic diversity, may indicate balancing selection or large effective population size
 - **Low π**: Low genetic diversity, may indicate selective sweeps, bottlenecks, or small effective population size
 - Compare π values between populations to identify regions with differential diversity
+- `calculate_lrpi.sh` writes that comparison as ln(π_A / π_B): positive where A is more diverse than B, negative where A is less diverse. The sign follows which sample is the numerator
 
 ### θ (Watterson's Theta)
 
@@ -570,6 +596,12 @@ For large genomes:
 - `Could not find FST columns for all three pairs`: names must match the FST header (`Echo:Kjer.fst`). Use the `sample_name` values from `sample_info.csv`
 - `--fst-dir` sees no files: `calculate_fst.sh` writes `fst_w{W}_s{S}.{csv|tsv}` or `fst_single.{csv|tsv}` in that directory
 - Collate missing PBE: pass `--pbe-dir` to the directory of `*_pbe.tsv` (not the HDF5 from `--output-format hdf5`)
+
+### LRPI errors
+
+- Diversity tables must be named `diversity_w{W}_s{S}_sample{NAME}.tsv` (the `calculate_pi_theta.sh` names). Both samples need a table at that window and step
+- `LRPI is NA` on a window means one π was missing or not greater than 0. `--drop-all-na` removes those rows
+- The pair is directed. `Echo / Kjer` is the negative of `Kjer / Echo`
 
 ### QIBS/QIBE errors
 
