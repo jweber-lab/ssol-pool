@@ -8,7 +8,7 @@
 # which stats to process (pi, theta, tajima_d, pbe, qibe, lrpi, fst). Outputs summary
 # statistics and outlier windows/regions to CSV.
 # Usage: Rscript identify_outliers.R --hdf5-dir DIR --output-dir DIR
-#        --high-quantile Q --low-quantile Q [--statistics pi,theta,tajima_d] [options]
+#        --high-quantile Q and/or --low-quantile Q [--statistics pi,theta,tajima_d] [options]
 #
 # When using --hdf5-dir, expected files are collate output: diversity_w*_s*.h5,
 # fst_w*.h5 or fst_single.h5, pbe_*.h5, qibe_*.h5, lrpi_*.h5, with group /windows or /sites and columns
@@ -109,9 +109,9 @@ option_list <- list(
     make_option(c("--reference-genome"), type="character", default=NULL,
                 help="Reference genome FASTA file (optional, for chromosome lengths)", metavar="FILE"),
     make_option(c("--high-quantile"), type="numeric", default=NULL,
-                help="High quantile threshold (e.g., 0.99 for top 1%) [required]", metavar="NUMBER"),
+                help="High quantile threshold (e.g., 0.99 for top 1%). Optional if --low-quantile is set", metavar="NUMBER"),
     make_option(c("--low-quantile"), type="numeric", default=NULL,
-                help="Low quantile threshold (e.g., 0.01 for bottom 1%) [required]", metavar="NUMBER"),
+                help="Low quantile threshold (e.g., 0.01 for bottom 1%). Optional if --high-quantile is set", metavar="NUMBER"),
     make_option(c("--seed-high-quantile"), type="numeric", default=NULL,
                 help="Strict high quantile for seed windows (seed-then-expand mode; requires --expand-high-quantile)", metavar="NUMBER"),
     make_option(c("--seed-low-quantile"), type="numeric", default=NULL,
@@ -181,34 +181,42 @@ if (is.null(opts$`fst-dir`) && is.null(opts$`diversity-dir`) && is.null(opts$`hd
     stop("At least one of --fst-dir, --diversity-dir, or --hdf5-dir must be specified")
 }
 
-expand_mode <- !is.null(opts$`expand-high-quantile`) && !is.null(opts$`expand-low-quantile`)
+# One tail is enough. Seed-then-expand is per tail: high needs seed and expand high, low needs both low flags.
+seed_high_set <- !is.null(opts$`seed-high-quantile`)
+seed_low_set <- !is.null(opts$`seed-low-quantile`)
+expand_high_set <- !is.null(opts$`expand-high-quantile`)
+expand_low_set <- !is.null(opts$`expand-low-quantile`)
+if (xor(seed_high_set, expand_high_set)) {
+    stop("High seed-then-expand needs both --seed-high-quantile and --expand-high-quantile")
+}
+if (xor(seed_low_set, expand_low_set)) {
+    stop("Low seed-then-expand needs both --seed-low-quantile and --expand-low-quantile")
+}
+use_high_expand <- seed_high_set && expand_high_set
+use_low_expand <- seed_low_set && expand_low_set
+expand_mode <- use_high_expand || use_low_expand
 if (expand_mode) {
-    if (is.null(opts$`seed-high-quantile`) || is.null(opts$`seed-low-quantile`)) {
-        stop("Seed-then-expand requires --seed-high-quantile and --seed-low-quantile when --expand-high-quantile and --expand-low-quantile are set")
-    }
-    if (opts$`seed-high-quantile` < opts$`expand-high-quantile`) {
+    if (use_high_expand && opts$`seed-high-quantile` < opts$`expand-high-quantile`) {
         stop("--seed-high-quantile must be >= --expand-high-quantile")
     }
-    if (opts$`seed-low-quantile` > opts$`expand-low-quantile`) {
+    if (use_low_expand && opts$`seed-low-quantile` > opts$`expand-low-quantile`) {
         stop("--seed-low-quantile must be <= --expand-low-quantile")
     }
-    if (is.null(opts$`high-quantile`)) opts$`high-quantile` <- opts$`expand-high-quantile`
-    if (is.null(opts$`low-quantile`)) opts$`low-quantile` <- opts$`expand-low-quantile`
-} else {
-    if (is.null(opts$`high-quantile`)) {
-        stop("--high-quantile is required (or use seed/expand quantiles for seed-then-expand mode)")
-    }
-    if (is.null(opts$`low-quantile`)) {
-        stop("--low-quantile is required (or use seed/expand quantiles for seed-then-expand mode)")
-    }
+    if (use_high_expand && is.null(opts$`high-quantile`)) opts$`high-quantile` <- opts$`expand-high-quantile`
+    if (use_low_expand && is.null(opts$`low-quantile`)) opts$`low-quantile` <- opts$`expand-low-quantile`
+} else if (is.null(opts$`high-quantile`) && is.null(opts$`low-quantile`)) {
+    stop("Give --high-quantile, --low-quantile, or both")
 }
 
-if (opts$`high-quantile` < 0 || opts$`high-quantile` > 1) {
-    stop("--high-quantile must be between 0 and 1")
+check_quantile <- function(name, value) {
+    if (!is.null(value) && (value < 0 || value > 1)) stop(name, " must be between 0 and 1")
 }
-if (opts$`low-quantile` < 0 || opts$`low-quantile` > 1) {
-    stop("--low-quantile must be between 0 and 1")
-}
+check_quantile("--high-quantile", opts$`high-quantile`)
+check_quantile("--low-quantile", opts$`low-quantile`)
+check_quantile("--seed-high-quantile", opts$`seed-high-quantile`)
+check_quantile("--seed-low-quantile", opts$`seed-low-quantile`)
+check_quantile("--expand-high-quantile", opts$`expand-high-quantile`)
+check_quantile("--expand-low-quantile", opts$`expand-low-quantile`)
 
 if ((!is.null(opts$`region-start`) || !is.null(opts$`region-end`)) && is.null(opts$chromosome)) {
     stop("--region-start and --region-end require --chromosome")
@@ -775,6 +783,25 @@ filter_regions_by_opts <- function(regions, opts) {
 
 # Apply optional depth, mapping quality, and per-window SNP filters. Returns TRUE for rows that pass.
 # If a threshold is set and the column is missing, the row fails (excluded).
+# Windows on one tail. A missing threshold returns no rows, so a high-only run does not flag the low tail.
+flag_one_tail <- function(ws_data, value_col, quantile_col, use_quantile, threshold, direction) {
+    empty <- ws_data[0, , drop = FALSE]
+    empty$quantile_type <- character()
+    empty$quantile_value <- numeric()
+    if (is.null(threshold)) return(empty)
+    if (use_quantile) {
+        hit <- if (direction == "high") ws_data[[quantile_col]] >= threshold else ws_data[[quantile_col]] <= threshold
+    } else {
+        cut <- stats::quantile(ws_data[[value_col]], threshold, na.rm = TRUE)
+        hit <- if (direction == "high") ws_data[[value_col]] >= cut else ws_data[[value_col]] <= cut
+    }
+    hit[is.na(hit)] <- FALSE
+    out <- ws_data[hit, , drop = FALSE]
+    out$quantile_type <- direction
+    out$quantile_value <- threshold
+    out
+}
+
 passes_quality_filters <- function(df, opts) {
     if (nrow(df) == 0) return(logical(0))
     pass <- rep(TRUE, nrow(df))
@@ -1785,23 +1812,11 @@ if (!is.null(diversity_data)) {
                 }
                 
                 if (expand_mode) {
-                    if (use_quantile) {
-                        seed_high <- ws_data %>% filter(.data[[quantile_col]] >= opts$`seed-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                        seed_low <- ws_data %>% filter(.data[[quantile_col]] <= opts$`seed-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                        expand_high <- ws_data %>% filter(.data[[quantile_col]] >= opts$`expand-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                        expand_low <- ws_data %>% filter(.data[[quantile_col]] <= opts$`expand-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
-                        if (opts$verbose) cat("    seed_high(>=", opts$`seed-high-quantile`, ")=", nrow(seed_high), " seed_low(<=", opts$`seed-low-quantile`, ")=", nrow(seed_low), " expand_high(>=", opts$`expand-high-quantile`, ")=", nrow(expand_high), " expand_low(<=", opts$`expand-low-quantile`, ")=", nrow(expand_low), "\n", sep = "")
-                    } else {
-                        sh <- quantile(ws_data[[stat_col]], opts$`seed-high-quantile`, na.rm = TRUE)
-                        sl <- quantile(ws_data[[stat_col]], opts$`seed-low-quantile`, na.rm = TRUE)
-                        eh <- quantile(ws_data[[stat_col]], opts$`expand-high-quantile`, na.rm = TRUE)
-                        el <- quantile(ws_data[[stat_col]], opts$`expand-low-quantile`, na.rm = TRUE)
-                        if (opts$verbose) cat("    Using value thresholds (no quantile column): seed_high>=", sh, " seed_low<=", sl, " expand_high>=", eh, " expand_low<=", el, "\n", sep = "")
-                        seed_high <- ws_data %>% filter(.data[[stat_col]] >= sh) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                        seed_low <- ws_data %>% filter(.data[[stat_col]] <= sl) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                        expand_high <- ws_data %>% filter(.data[[stat_col]] >= eh) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                        expand_low <- ws_data %>% filter(.data[[stat_col]] <= el) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
-                    }
+                    seed_high <- flag_one_tail(ws_data, stat_col, quantile_col, use_quantile, opts$`seed-high-quantile`, "high")
+                    seed_low <- flag_one_tail(ws_data, stat_col, quantile_col, use_quantile, opts$`seed-low-quantile`, "low")
+                    expand_high <- flag_one_tail(ws_data, stat_col, quantile_col, use_quantile, opts$`expand-high-quantile`, "high")
+                    expand_low <- flag_one_tail(ws_data, stat_col, quantile_col, use_quantile, opts$`expand-low-quantile`, "low")
+                    if (opts$verbose) cat("    seed_high=", nrow(seed_high), " seed_low=", nrow(seed_low), " expand_high=", nrow(expand_high), " expand_low=", nrow(expand_low), "\n", sep = "")
                     if (has_quality_opts) {
                         seed_high <- seed_high %>% filter(passes_quality_filters(seed_high, opts))
                         seed_low <- seed_low %>% filter(passes_quality_filters(seed_low, opts))
@@ -1832,19 +1847,8 @@ if (!is.null(diversity_data)) {
                         all_tagged[[length(all_tagged) + 1L]] <- seed_windows %>% mutate(window_type = "seed")
                     }
                 } else {
-                    if (use_quantile) {
-                        high_outliers <- ws_data %>%
-                            filter(.data[[quantile_col]] >= opts$`high-quantile`) %>%
-                            mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                        low_outliers <- ws_data %>%
-                            filter(.data[[quantile_col]] <= opts$`low-quantile`) %>%
-                            mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
-                    } else {
-                        high_threshold <- quantile(ws_data[[stat_col]], opts$`high-quantile`, na.rm=TRUE)
-                        low_threshold <- quantile(ws_data[[stat_col]], opts$`low-quantile`, na.rm=TRUE)
-                        high_outliers <- ws_data %>% filter(.data[[stat_col]] >= high_threshold) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                        low_outliers <- ws_data %>% filter(.data[[stat_col]] <= low_threshold) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
-                    }
+                    high_outliers <- flag_one_tail(ws_data, stat_col, quantile_col, use_quantile, opts$`high-quantile`, "high")
+                    low_outliers <- flag_one_tail(ws_data, stat_col, quantile_col, use_quantile, opts$`low-quantile`, "low")
                     if (has_quality_opts) {
                         high_outliers <- high_outliers %>% filter(passes_quality_filters(high_outliers, opts))
                         low_outliers <- low_outliers %>% filter(passes_quality_filters(low_outliers, opts))
@@ -1939,21 +1943,10 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
             use_fst_quantile <- "fst_quantile" %in% colnames(ws_data) && !all(is.na(ws_data$fst_quantile))
             
             if (expand_mode) {
-                if (use_fst_quantile) {
-                    seed_high <- ws_data %>% filter(.data$fst_quantile >= opts$`seed-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                    seed_low <- ws_data %>% filter(.data$fst_quantile <= opts$`seed-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                    expand_high <- ws_data %>% filter(.data$fst_quantile >= opts$`expand-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                    expand_low <- ws_data %>% filter(.data$fst_quantile <= opts$`expand-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
-                } else {
-                    sh <- quantile(ws_data$fst, opts$`seed-high-quantile`, na.rm = TRUE)
-                    sl <- quantile(ws_data$fst, opts$`seed-low-quantile`, na.rm = TRUE)
-                    eh <- quantile(ws_data$fst, opts$`expand-high-quantile`, na.rm = TRUE)
-                    el <- quantile(ws_data$fst, opts$`expand-low-quantile`, na.rm = TRUE)
-                    seed_high <- ws_data %>% filter(.data$fst >= sh) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                    seed_low <- ws_data %>% filter(.data$fst <= sl) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                    expand_high <- ws_data %>% filter(.data$fst >= eh) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                    expand_low <- ws_data %>% filter(.data$fst <= el) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
-                }
+                seed_high <- flag_one_tail(ws_data, "fst", "fst_quantile", use_fst_quantile, opts$`seed-high-quantile`, "high")
+                seed_low <- flag_one_tail(ws_data, "fst", "fst_quantile", use_fst_quantile, opts$`seed-low-quantile`, "low")
+                expand_high <- flag_one_tail(ws_data, "fst", "fst_quantile", use_fst_quantile, opts$`expand-high-quantile`, "high")
+                expand_low <- flag_one_tail(ws_data, "fst", "fst_quantile", use_fst_quantile, opts$`expand-low-quantile`, "low")
                 if (has_quality_opts) {
                     seed_high <- seed_high %>% filter(passes_quality_filters(seed_high, opts))
                     seed_low <- seed_low %>% filter(passes_quality_filters(seed_low, opts))
@@ -1982,15 +1975,8 @@ if (length(fst_data_list) > 0 && !is.null(fst_data_list$data) && length(fst_data
                     all_tagged_fst[[length(all_tagged_fst) + 1L]] <- seed_windows %>% mutate(window_type = "seed")
                 }
             } else {
-                if (use_fst_quantile) {
-                    high_outliers <- ws_data %>% filter(.data$fst_quantile >= opts$`high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                    low_outliers <- ws_data %>% filter(.data$fst_quantile <= opts$`low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
-                } else {
-                    high_threshold <- quantile(ws_data$fst, opts$`high-quantile`, na.rm=TRUE)
-                    low_threshold <- quantile(ws_data$fst, opts$`low-quantile`, na.rm=TRUE)
-                    high_outliers <- ws_data %>% filter(.data$fst >= high_threshold) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                    low_outliers <- ws_data %>% filter(.data$fst <= low_threshold) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
-                }
+                high_outliers <- flag_one_tail(ws_data, "fst", "fst_quantile", use_fst_quantile, opts$`high-quantile`, "high")
+                low_outliers <- flag_one_tail(ws_data, "fst", "fst_quantile", use_fst_quantile, opts$`low-quantile`, "low")
                 if (has_quality_opts) {
                     high_outliers <- high_outliers %>% filter(passes_quality_filters(high_outliers, opts))
                     low_outliers <- low_outliers %>% filter(passes_quality_filters(low_outliers, opts))
@@ -2066,21 +2052,10 @@ flag_branch_outliers <- function(branch_data, stat, pop_cols) {
             }
             use_quantile <- qcol %in% colnames(ws_data) && !all(is.na(ws_data[[qcol]]))
             if (expand_mode) {
-                if (use_quantile) {
-                    seed_high <- ws_data %>% filter(.data[[qcol]] >= opts$`seed-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                    seed_low <- ws_data %>% filter(.data[[qcol]] <= opts$`seed-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                    expand_high <- ws_data %>% filter(.data[[qcol]] >= opts$`expand-high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                    expand_low <- ws_data %>% filter(.data[[qcol]] <= opts$`expand-low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
-                } else {
-                    sh <- quantile(ws_data[[stat]], opts$`seed-high-quantile`, na.rm = TRUE)
-                    sl <- quantile(ws_data[[stat]], opts$`seed-low-quantile`, na.rm = TRUE)
-                    eh <- quantile(ws_data[[stat]], opts$`expand-high-quantile`, na.rm = TRUE)
-                    el <- quantile(ws_data[[stat]], opts$`expand-low-quantile`, na.rm = TRUE)
-                    seed_high <- ws_data %>% filter(.data[[stat]] >= sh) %>% mutate(quantile_type = "high", quantile_value = opts$`seed-high-quantile`)
-                    seed_low <- ws_data %>% filter(.data[[stat]] <= sl) %>% mutate(quantile_type = "low", quantile_value = opts$`seed-low-quantile`)
-                    expand_high <- ws_data %>% filter(.data[[stat]] >= eh) %>% mutate(quantile_type = "high", quantile_value = opts$`expand-high-quantile`)
-                    expand_low <- ws_data %>% filter(.data[[stat]] <= el) %>% mutate(quantile_type = "low", quantile_value = opts$`expand-low-quantile`)
-                }
+                seed_high <- flag_one_tail(ws_data, stat, qcol, use_quantile, opts$`seed-high-quantile`, "high")
+                seed_low <- flag_one_tail(ws_data, stat, qcol, use_quantile, opts$`seed-low-quantile`, "low")
+                expand_high <- flag_one_tail(ws_data, stat, qcol, use_quantile, opts$`expand-high-quantile`, "high")
+                expand_low <- flag_one_tail(ws_data, stat, qcol, use_quantile, opts$`expand-low-quantile`, "low")
                 if (has_quality_opts) {
                     seed_high <- seed_high %>% filter(passes_quality_filters(seed_high, opts))
                     seed_low <- seed_low %>% filter(passes_quality_filters(seed_low, opts))
@@ -2109,15 +2084,8 @@ flag_branch_outliers <- function(branch_data, stat, pop_cols) {
                     all_tagged[[length(all_tagged) + 1L]] <- seed_windows %>% mutate(window_type = "seed")
                 }
             } else {
-                if (use_quantile) {
-                    high_outliers <- ws_data %>% filter(.data[[qcol]] >= opts$`high-quantile`) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                    low_outliers <- ws_data %>% filter(.data[[qcol]] <= opts$`low-quantile`) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
-                } else {
-                    high_threshold <- quantile(ws_data[[stat]], opts$`high-quantile`, na.rm = TRUE)
-                    low_threshold <- quantile(ws_data[[stat]], opts$`low-quantile`, na.rm = TRUE)
-                    high_outliers <- ws_data %>% filter(.data[[stat]] >= high_threshold) %>% mutate(quantile_type = "high", quantile_value = opts$`high-quantile`)
-                    low_outliers <- ws_data %>% filter(.data[[stat]] <= low_threshold) %>% mutate(quantile_type = "low", quantile_value = opts$`low-quantile`)
-                }
+                high_outliers <- flag_one_tail(ws_data, stat, qcol, use_quantile, opts$`high-quantile`, "high")
+                low_outliers <- flag_one_tail(ws_data, stat, qcol, use_quantile, opts$`low-quantile`, "low")
                 if (has_quality_opts) {
                     high_outliers <- high_outliers %>% filter(passes_quality_filters(high_outliers, opts))
                     low_outliers <- low_outliers %>% filter(passes_quality_filters(low_outliers, opts))
@@ -2404,7 +2372,10 @@ if (length(outlier_results) > 0) {
     } else if (!is.null(opts$`min-chromosome-length`)) {
         chr_suffix <- paste0(chr_suffix, "_min", opts$`min-chromosome-length`, "bp")
     }
-    quantile_suffix <- paste0("_high", opts$`high-quantile`, "_low", opts$`low-quantile`)
+    quantile_parts <- character()
+    if (!is.null(opts$`high-quantile`)) quantile_parts <- c(quantile_parts, paste0("high", opts$`high-quantile`))
+    if (!is.null(opts$`low-quantile`)) quantile_parts <- c(quantile_parts, paste0("low", opts$`low-quantile`))
+    quantile_suffix <- paste0("_", paste(quantile_parts, collapse = "_"))
     if (!is.null(opts$`top-n-extreme`) && opts$`top-n-extreme` > 0) {
         quantile_suffix <- paste0(quantile_suffix, "_top", opts$`top-n-extreme`)
     }

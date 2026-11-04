@@ -14,7 +14,7 @@ Coordinates are 1-based inclusive, the same grid as collate (`start = 1 + k·ste
 
 Reads `diversity_w*_s*.h5`, `fst_w*_s*.h5`, `pbe_w*_s*.h5`, `qibe_w*_s*.h5`, and `lrpi_w*_s*.h5` from `--hdf5-dir` (collate output). Without HDF5, `--diversity-dir` and/or `--fst-dir` read the TSVs instead. PBE, QIBE, and LRPI are HDF5-only.
 
-Quantiles are taken from the collate `*_quantile` columns when those columns are present (one distribution per sample, pair, trio, or quartet at that window and step). Otherwise they are computed the same way. A window is an outlier when its quantile is at or above `--high-quantile` or at or below `--low-quantile`. Diversity stats are per sample; FST and LRPI are per pair; PBE is per trio; QIBE is per quartet. LRPI is directed: `Echo:Kjer.lrpi` is ln(π_Echo / π_Kjer). After flagging, every sample's value and quantile is filled in for that window, not only the sample that crossed the threshold.
+Quantiles are taken from the collate `*_quantile` columns when those columns are present (one distribution per sample, pair, trio, or quartet at that window and step). Otherwise they are computed the same way. A window is an outlier when its quantile is at or above `--high-quantile` or at or below `--low-quantile`. Either threshold can be omitted; the tail that is not given is not flagged. Diversity stats are per sample; FST and LRPI are per pair; PBE is per trio; QIBE is per quartet. LRPI is directed: `Echo:Kjer.lrpi` is ln(π_Echo / π_Kjer). After flagging, every sample's value and quantile is filled in for that window, not only the sample that crossed the threshold.
 
 `--window-size` keeps one window width. If that width was collated at more than one step, pass `--step-size` too; otherwise the overlapping grids would be pooled and the script stops.
 
@@ -24,7 +24,7 @@ Quantiles are taken from the collate `*_quantile` columns when those columns are
 - `--merge-across-samples true` builds one set of regions across samples, pairs, trios, and quartets. `false` merges within each sample or pair.
 - Set `--merge-distance 0` to write windows only.
 
-Seed-then-expand (instead of the single threshold) needs all four of `--seed-high-quantile`, `--seed-low-quantile`, `--expand-high-quantile`, `--expand-low-quantile`. Seeds are the strict tail; neighboring windows in the soft tail are added, then merged with the same gap.
+Seed-then-expand replaces the single threshold on a tail. The high tail needs `--seed-high-quantile` and `--expand-high-quantile`; the low tail needs `--seed-low-quantile` and `--expand-low-quantile`. One tail is enough. Seeds are the strict end of that tail; neighboring windows in the soft tail are added, then merged with the same gap.
 
 Optional filters apply to seeds and to expansion, and to the single-threshold windows: `--min-depth`, `--max-depth`, `--min-mapping-quality`, `--max-mapping-quality`, `--min-snps`, `--max-snps`, `--min-total-sites`, `--max-total-sites`. Region filters are `--min-region-snps` and `--max-region-snps`. Depth and mapping quality come from the seq-qual columns collate joined onto diversity. They are not applied unless you set them.
 

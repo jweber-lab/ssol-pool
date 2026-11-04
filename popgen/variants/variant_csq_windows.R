@@ -61,6 +61,9 @@ expand_sites_paths <- function(paths) {
       if (length(f) == 0L) stop("No variants.csq.tsv or variants_csq*.tsv in directory: ", p)
       message("Sites from ", p, ": ", paste(basename(f), collapse = ", "))
       files <- c(files, f)
+    } else if (grepl("\\.(bcf|vcf)(\\.[gx]z)?$", p, ignore.case = TRUE)) {
+      stop("--sites-tsv expects the site TSV from variant_csq.sh, not a BCF/VCF: ", p,
+           ". Use variants.csq.tsv (or pass that output directory).")
     } else if (file.exists(p)) {
       files <- c(files, p)
     } else {

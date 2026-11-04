@@ -73,14 +73,15 @@ Required (at least one):
 Required:
   --output-dir DIR           Output directory for results
   Either single-threshold or seed-then-expand quantiles (see below).
+  Give the high tail, the low tail, or both. A tail that is not given is not flagged.
 
-Single-threshold mode (require both):
+Single-threshold mode (one or both):
   --high-quantile N          High quantile threshold (e.g., 0.99 for top 1%)
   --low-quantile N           Low quantile threshold (e.g., 0.01 for bottom 1%)
 
-Seed-then-expand mode (require all four; overrides single-threshold when set):
-  --seed-high-quantile N     Strict high quantile for seed windows
-  --seed-low-quantile N      Strict low quantile for seed windows
+Seed-then-expand mode (per tail; overrides that tail's single threshold):
+  --seed-high-quantile N     Strict high quantile for seed windows (with --expand-high-quantile)
+  --seed-low-quantile N      Strict low quantile for seed windows (with --expand-low-quantile)
   --expand-high-quantile N   Soft high quantile for expanding regions
   --expand-low-quantile N    Soft low quantile for expanding regions
 
@@ -354,14 +355,21 @@ if [[ -z "$OUTPUT_DIR" ]]; then
     exit 1
 fi
 
-# Require EITHER (--high-quantile and --low-quantile) OR (all four seed/expand quantiles)
-HAVE_HIGH_LOW=false
-HAVE_SEED_EXPAND=false
-[[ -n "$HIGH_QUANTILE" && -n "$LOW_QUANTILE" ]] && HAVE_HIGH_LOW=true
-[[ -n "$SEED_HIGH_QUANTILE" && -n "$SEED_LOW_QUANTILE" && -n "$EXPAND_HIGH_QUANTILE" && -n "$EXPAND_LOW_QUANTILE" ]] && HAVE_SEED_EXPAND=true
-
-if [[ "$HAVE_HIGH_LOW" == false && "$HAVE_SEED_EXPAND" == false ]]; then
-    log_error "Either (--high-quantile and --low-quantile) or (--seed-high-quantile, --seed-low-quantile, --expand-high-quantile, --expand-low-quantile) are required"
+# One tail is enough. A seed flag and its expand flag must be given together.
+if [[ -n "$SEED_HIGH_QUANTILE" && -z "$EXPAND_HIGH_QUANTILE" ]] || [[ -z "$SEED_HIGH_QUANTILE" && -n "$EXPAND_HIGH_QUANTILE" ]]; then
+    log_error "High seed-then-expand needs both --seed-high-quantile and --expand-high-quantile"
+    exit 1
+fi
+if [[ -n "$SEED_LOW_QUANTILE" && -z "$EXPAND_LOW_QUANTILE" ]] || [[ -z "$SEED_LOW_QUANTILE" && -n "$EXPAND_LOW_QUANTILE" ]]; then
+    log_error "Low seed-then-expand needs both --seed-low-quantile and --expand-low-quantile"
+    exit 1
+fi
+HIGH_TAIL=false
+LOW_TAIL=false
+[[ -n "$HIGH_QUANTILE" || ( -n "$SEED_HIGH_QUANTILE" && -n "$EXPAND_HIGH_QUANTILE" ) ]] && HIGH_TAIL=true
+[[ -n "$LOW_QUANTILE" || ( -n "$SEED_LOW_QUANTILE" && -n "$EXPAND_LOW_QUANTILE" ) ]] && LOW_TAIL=true
+if [[ "$HIGH_TAIL" == false && "$LOW_TAIL" == false ]]; then
+    log_error "Give --high-quantile, --low-quantile, or both (or the seed/expand pair for that tail)"
     usage
     exit 1
 fi
@@ -559,7 +567,7 @@ if [[ "$DRY_RUN" == true ]]; then
         log_dry_run "HDF5 directory: $HDF5_DIR"
     fi
     log_dry_run "Output directory: $OUTPUT_DIR"
-    if [[ -n "$SEED_HIGH_QUANTILE" && -n "$SEED_LOW_QUANTILE" ]]; then
+    if [[ -n "$SEED_HIGH_QUANTILE" || -n "$SEED_LOW_QUANTILE" ]]; then
         log_dry_run "Quantile mode: seed-then-expand"
         log_dry_run "  Seed quantiles: high=$SEED_HIGH_QUANTILE low=$SEED_LOW_QUANTILE"
         log_dry_run "  Expand quantiles: high=$EXPAND_HIGH_QUANTILE low=$EXPAND_LOW_QUANTILE"
@@ -611,7 +619,7 @@ else
         log "  HDF5 directory: $HDF5_DIR"
     fi
     log "  Output directory: $OUTPUT_DIR"
-    if [[ -n "$SEED_HIGH_QUANTILE" && -n "$SEED_LOW_QUANTILE" ]]; then
+    if [[ -n "$SEED_HIGH_QUANTILE" || -n "$SEED_LOW_QUANTILE" ]]; then
         log "  Quantile mode: seed-then-expand"
         log "    Seed quantiles: high=$SEED_HIGH_QUANTILE low=$SEED_LOW_QUANTILE"
         log "    Expand quantiles: high=$EXPAND_HIGH_QUANTILE low=$EXPAND_LOW_QUANTILE"

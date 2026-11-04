@@ -113,6 +113,13 @@ for f in "${SITES_TSVS[@]}"; do
         log_error "Sites TSV path contains a comma (not supported): $f"
         exit 1
     fi
+    case "$f" in
+        *.bcf|*.bcf.gz|*.vcf|*.vcf.gz)
+            log_error "--sites-tsv expects the site TSV from variant_csq.sh, not the BCSQ BCF: $f"
+            log_error "Use the Annotated TSV from that run (variants.csq.tsv, or the BCF path with .tsv), or pass the output directory"
+            exit 1
+            ;;
+    esac
 done
 SITES_TSV=$(IFS=,; echo "${SITES_TSVS[*]}")
 if [[ -z "$TEMPLATE_DIR" && -z "$TEMPLATE_TSV" && ( -z "$REFERENCE" || ${#WINDOW_SIZES[@]} -eq 0 ) ]]; then
