@@ -16,7 +16,7 @@ Reads `diversity_w*_s*.h5`, `fst_w*_s*.h5`, `pbe_w*_s*.h5`, `qibe_w*_s*.h5`, and
 
 Quantiles are taken from the collate `*_quantile` columns when those columns are present (one distribution per sample, pair, trio, or quartet at that window and step). Otherwise they are computed the same way. A window is an outlier when its quantile is at or above `--high-quantile` or at or below `--low-quantile`. Either threshold can be omitted; the tail that is not given is not flagged. Diversity stats are per sample; FST and LRPI are per pair; PBE is per trio; QIBE is per quartet. LRPI is directed: `Echo:Kjer.lrpi` is ln(π_Echo / π_Kjer). After flagging, every sample's value and quantile is filled in for that window, not only the sample that crossed the threshold.
 
-`--window-size` keeps one window width. If that width was collated at more than one step, pass `--step-size` too; otherwise the overlapping grids would be pooled and the script stops.
+`--window-size` keeps files named with that window width. `fst_single.h5`, `pbe_single.h5`, `qibe_single.h5`, `lrpi_single.h5`, and any other file with no `w####` token are skipped. `--step-size` does the same for the step: a file must contain that `s####` token. If the width was collated at more than one step and `--step-size` is omitted, the script stops instead of pooling the grids.
 
 **Defaults that are already on** when you only pass the two quantiles:
 

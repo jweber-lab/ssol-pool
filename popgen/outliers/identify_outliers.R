@@ -131,9 +131,9 @@ option_list <- list(
     make_option(c("--region-end"), type="numeric", default=NULL,
                 help="Restrict to interval end on --chromosome (requires --chromosome)", metavar="N"),
     make_option(c("--window-size"), type="numeric", default=NULL,
-                help="Filter to specific window size (default: all window sizes)", metavar="NUMBER"),
+                help="Keep files whose name contains this window size. *_single.h5 and other files with no w#### token are skipped", metavar="NUMBER"),
     make_option(c("--step-size"), type="numeric", default=NULL,
-                help="Filter to specific step size (required when several steps exist for --window-size)", metavar="NUMBER"),
+                help="Keep files whose name contains this step size (required when several steps exist for --window-size). Files with no s#### token are skipped", metavar="NUMBER"),
     make_option(c("--statistics"), type="character", default="pi,theta,tajima_d",
                 help="Comma-separated list: pi, theta, tajima_d, pbe, qibe, lrpi, fst (default: pi,theta,tajima_d). Diversity stats use diversity data; fst, pbe, qibe, and lrpi use the matching collate HDF5 when provided.", metavar="LIST"),
     make_option(c("--sample-pairs"), type="character", default="",
@@ -352,10 +352,12 @@ extract_window_size_from_filename <- function(filename) {
     parse_window_step_from_filename(filename)$window_size
 }
 
+# A requested size must be present in the filename and equal. fst_single.h5 and any other
+# file with no w#### or s#### token is not a match for that request.
 file_matches_scale <- function(filename, selected_window_size = NULL, selected_step_size = NULL) {
     ps <- parse_window_step_from_filename(filename)
-    ok_w <- is.null(selected_window_size) || is.na(ps$window_size) || ps$window_size == selected_window_size
-    ok_s <- is.null(selected_step_size) || is.na(ps$step_size) || ps$step_size == selected_step_size
+    ok_w <- is.null(selected_window_size) || (!is.na(ps$window_size) && ps$window_size == selected_window_size)
+    ok_s <- is.null(selected_step_size) || (!is.na(ps$step_size) && ps$step_size == selected_step_size)
     ok_w && ok_s
 }
 
@@ -797,8 +799,9 @@ flag_one_tail <- function(ws_data, value_col, quantile_col, use_quantile, thresh
     }
     hit[is.na(hit)] <- FALSE
     out <- ws_data[hit, , drop = FALSE]
-    out$quantile_type <- direction
-    out$quantile_value <- threshold
+    # A length-1 label cannot be assigned to a 0-row data.frame.
+    out$quantile_type <- rep(direction, nrow(out))
+    out$quantile_value <- rep(threshold, nrow(out))
     out
 }
 

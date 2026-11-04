@@ -92,8 +92,10 @@ Optional:
   --chromosome CHR           Restrict to a single chromosome/scaffold (optional)
   --region-start N           Restrict to interval start on --chromosome (requires --chromosome)
   --region-end N             Restrict to interval end on --chromosome (requires --chromosome)
-  --window-size NUMBER       Filter to specific window size (default: all window sizes)
-  --step-size NUMBER         Filter to specific step size (required when several steps exist for --window-size)
+  --window-size NUMBER       Keep files named with this window size. *_single.h5 and other
+                             files with no w#### token are skipped
+  --step-size NUMBER         Keep files named with this step size (required when several steps
+                             exist for --window-size). Files with no s#### token are skipped
   --statistics LIST          Comma-separated list: pi, theta, tajima_d, pbe, qibe, lrpi, fst (default: pi,theta,tajima_d)
   --sample-pairs LIST        Comma-separated list of FST pairs to process (default: all)
   --top-n-extreme N          Return only the N most extreme values in each quantile (optional)
