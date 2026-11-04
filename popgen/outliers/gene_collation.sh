@@ -20,6 +20,16 @@ GENES=""
 SUMMARY=""
 BLAST_GENES=""
 INCLUDE_NON_OUTLIER=false
+REFERENCE=""
+BLAST_CONFIG=""
+SAMTOOLS="samtools"
+BLAST_CMD=""
+BLAST_TASK=""
+THREADS=""
+PARALLEL_DBS=""
+EVALUE=""
+MAX_TARGET_SEQS=""
+MAX_HSPS=""
 OUTPUT_DIR="."
 RSCRIPT="Rscript"
 VERBOSE=false
@@ -50,6 +60,18 @@ Optional:
   --summary FILE           outlier_csq_summary_*.csv
   --blast-genes FILE       outlier_genes_*.csv (BLAST homologs, joined by region)
   --include-non-outlier    Also list GFF genes that overlap no outlier region
+                           (and BLAST those genes too, when --blast-config is set)
+  --reference FILE         Assembly FASTA, indexed. Required with --blast-config
+  --blast-config FILE      YAML/JSON databases (db_path, name, gff_path, optional annotation_tsv).
+                           Each outlier gene is searched; the best HSP is named from that GFF
+  --samtools PATH          samtools [default: samtools]
+  --blast-cmd CMD          BLAST program [default: blastn]
+  --blast-task TASK        Optional BLAST -task (blastn, megablast, dc-megablast)
+  --threads N              Threads per BLAST process [default: 4]
+  --parallel-dbs N         Databases searched at once [default: 1]
+  --evalue N               BLAST -evalue [default: 1e-5]
+  --max-target-seqs N      BLAST -max_target_seqs [default: 1]
+  --max-hsps N             BLAST -max_hsps [default: 1]
   --output-dir DIR         Output directory [default: .]
   --rscript PATH           Rscript [default: Rscript]
   --verbose                Log which annotation files and how many GFF genes were read
@@ -58,8 +80,9 @@ Optional:
 
 Outputs (suffix copied from the annotation files):
   outlier_gene_summary_*.csv   One row per GFF gene: coordinates, n_regions,
-                               n_sites, coding_effects, outlier_stat, qseqids,
-                               and BLAST homologs collapsed across overlapping regions
+                               n_windows, qseqids, then n_sites, coding_effects, outlier_stat.
+                               Region BLAST homologs stay at the end, then one gene/product/GO/evalue
+                               column set per database and homolog_genes, homolog_products, homolog_go
   outlier_gene_regions_*.csv   One row per (gene, outlier region)
   outlier_gene_sites_*.csv     One row per (gene, site); sites assigned by
                                position in the gene and/or csq gene name
@@ -79,6 +102,16 @@ while [[ $# -gt 0 ]]; do
         --summary) SUMMARY="$2"; shift 2 ;;
         --blast-genes) BLAST_GENES="$2"; shift 2 ;;
         --include-non-outlier) INCLUDE_NON_OUTLIER=true; shift ;;
+        --reference) REFERENCE="$2"; shift 2 ;;
+        --blast-config) BLAST_CONFIG="$2"; shift 2 ;;
+        --samtools) SAMTOOLS="$2"; shift 2 ;;
+        --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
+        --blast-task) BLAST_TASK="$2"; shift 2 ;;
+        --threads) THREADS="$2"; shift 2 ;;
+        --parallel-dbs) PARALLEL_DBS="$2"; shift 2 ;;
+        --evalue) EVALUE="$2"; shift 2 ;;
+        --max-target-seqs) MAX_TARGET_SEQS="$2"; shift 2 ;;
+        --max-hsps) MAX_HSPS="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --rscript) RSCRIPT="$2"; shift 2 ;;
         --verbose) VERBOSE=true; shift ;;
@@ -106,6 +139,34 @@ if [[ -n "$ANNOTATION_DIR" && ! -d "$ANNOTATION_DIR" ]]; then
     log_error "Annotation directory not found: $ANNOTATION_DIR"
     exit 1
 fi
+if [[ -n "$BLAST_CONFIG" && -z "$REFERENCE" ]]; then
+    log_error "--reference is required with --blast-config"
+    exit 1
+fi
+if [[ -n "$BLAST_CONFIG" && ! -f "$BLAST_CONFIG" ]]; then
+    log_error "BLAST config not found: $BLAST_CONFIG"
+    exit 1
+fi
+if [[ -n "$REFERENCE" && ! -f "$REFERENCE" ]]; then
+    log_error "Reference not found: $REFERENCE"
+    exit 1
+fi
+if [[ -n "$THREADS" && ! "$THREADS" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "--threads must be an integer >= 1"
+    exit 1
+fi
+if [[ -n "$PARALLEL_DBS" && ! "$PARALLEL_DBS" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "--parallel-dbs must be an integer >= 1"
+    exit 1
+fi
+if [[ -n "$MAX_TARGET_SEQS" && ! "$MAX_TARGET_SEQS" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "--max-target-seqs must be an integer >= 1"
+    exit 1
+fi
+if [[ -n "$MAX_HSPS" && ! "$MAX_HSPS" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "--max-hsps must be an integer >= 1"
+    exit 1
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 R_FILE="${SCRIPT_DIR}/gene_collation.R"
@@ -126,6 +187,16 @@ R_ARGS=(--gff "$GFF" --output-dir "$OUTPUT_DIR")
 [[ -n "$SUMMARY" ]] && R_ARGS+=(--summary "$SUMMARY")
 [[ -n "$BLAST_GENES" ]] && R_ARGS+=(--blast-genes "$BLAST_GENES")
 [[ "$INCLUDE_NON_OUTLIER" == true ]] && R_ARGS+=(--include-non-outlier)
+[[ -n "$REFERENCE" ]] && R_ARGS+=(--reference "$REFERENCE")
+[[ -n "$BLAST_CONFIG" ]] && R_ARGS+=(--blast-config "$BLAST_CONFIG")
+[[ -n "$BLAST_CONFIG" ]] && R_ARGS+=(--samtools "$SAMTOOLS")
+[[ -n "$BLAST_CMD" ]] && R_ARGS+=(--blast-cmd "$BLAST_CMD")
+[[ -n "$BLAST_TASK" ]] && R_ARGS+=(--blast-task "$BLAST_TASK")
+[[ -n "$THREADS" ]] && R_ARGS+=(--threads "$THREADS")
+[[ -n "$PARALLEL_DBS" ]] && R_ARGS+=(--parallel-dbs "$PARALLEL_DBS")
+[[ -n "$EVALUE" ]] && R_ARGS+=(--evalue "$EVALUE")
+[[ -n "$MAX_TARGET_SEQS" ]] && R_ARGS+=(--max-target-seqs "$MAX_TARGET_SEQS")
+[[ -n "$MAX_HSPS" ]] && R_ARGS+=(--max-hsps "$MAX_HSPS")
 [[ "$VERBOSE" == true ]] && R_ARGS+=(--verbose)
 
 if [[ "$DRY_RUN" == true ]]; then

@@ -14,8 +14,11 @@
 # Outputs (suffix from the annotation files, or "genes"):
 #   outlier_gene_summary_<suffix>.csv  One row per GFF gene that overlaps an
 #     outlier region (or every gene with --include-non-outlier). GFF fields,
-#     n_regions, qseqids, outlier_stat, site counts / coding_effects, and BLAST
+#     n_regions, n_windows, qseqids, outlier_stat, site counts / coding_effects, and BLAST
 #     homologs collapsed across overlapping regions (other-assembly gene_ids).
+#     With --blast-config, each outlier gene sequence is searched and the best
+#     HSP per database adds <name>_gene/product/go/evalue plus homolog_genes,
+#     homolog_products, and homolog_go.
 #   outlier_gene_regions_<suffix>.csv  One row per (gene, region).
 #   outlier_gene_sites_<suffix>.csv    One row per (gene, site): sites whose
 #     position falls in the gene and/or whose csq `genes` field names it.
@@ -164,6 +167,219 @@ safe_sum <- function(x) {
   if (length(x) == 0) NA_real_ else sum(x)
 }
 
+fmt_bp <- function(x) format(x, scientific = FALSE, trim = TRUE)
+
+read_blast_config <- function(path) {
+  if (!file.exists(path)) stop("BLAST config file not found: ", path)
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("yml", "yaml")) {
+    if (!requireNamespace("yaml", quietly = TRUE))
+      stop("Package 'yaml' required for YAML config. Install with: install.packages(\"yaml\")")
+    cfg <- yaml::read_yaml(path)
+  } else if (ext == "json") {
+    if (!requireNamespace("jsonlite", quietly = TRUE))
+      stop("Package 'jsonlite' required for JSON config. Install with: install.packages(\"jsonlite\")")
+    cfg <- jsonlite::read_json(path)
+  } else {
+    stop("BLAST config must be YAML (.yml/.yaml) or JSON (.json)")
+  }
+  dbs <- coalesce_null(cfg$databases, cfg)
+  if (!is.list(dbs)) dbs <- list(dbs)
+  if (length(dbs) > 0 && !is.null(names(dbs)) && !"db_path" %in% names(dbs)) dbs <- list(dbs)
+  if (length(dbs) == 0) stop("BLAST config has no databases")
+  dbs
+}
+
+db_field <- function(db, ...) {
+  for (nm in list(...)) {
+    if (!is.null(db[[nm]]) && !is.na(db[[nm]]) && nzchar(trimws(as.character(db[[nm]]))))
+      return(trimws(as.character(db[[nm]])))
+  }
+  NULL
+}
+
+safe_db_name <- function(name, i) {
+  s <- gsub("[^A-Za-z0-9]+", "_", name)
+  s <- gsub("^_+|_+$", "", s)
+  if (!nzchar(s)) paste0("db", i) else s
+}
+
+normalize_sseqid <- function(x) sub("^[^|]+\\|([^|]+)\\|?$", "\\1", x)
+
+# One FASTA record per gene. Headers are g1, g2, ... so BLAST qseqid matches a lookup.
+write_gene_fasta <- function(genes, reference, out_fasta, samtools) {
+  fai <- paste0(reference, ".fai")
+  if (!file.exists(fai)) stop("Reference index not found: ", fai, " (run samtools faidx)")
+  reg_vec <- paste0(genes$chr, ":", fmt_bp(genes$gene_start), "-", fmt_bp(genes$gene_end))
+  seq <- system2(samtools, c("faidx", reference, reg_vec), stdout = TRUE, stderr = FALSE)
+  status <- attr(seq, "status")
+  if (!is.null(status) && status != 0L) stop("samtools faidx failed for gene sequences")
+  hdr <- which(startsWith(seq, ">"))
+  if (length(hdr) != nrow(genes))
+    stop("samtools faidx returned ", length(hdr), " sequences for ", nrow(genes), " genes")
+  seq[hdr] <- paste0(">", genes$qseqid)
+  writeLines(seq, out_fasta)
+  out_fasta
+}
+
+run_gene_blast <- function(query_fasta, db_path, out_tsv, blast_cmd, threads, evalue, max_target_seqs, max_hsps, blast_task) {
+  extra <- c("-evalue", as.character(evalue),
+             "-max_target_seqs", as.character(max_target_seqs),
+             "-max_hsps", as.character(max_hsps))
+  if (!is.null(blast_task) && nzchar(blast_task)) extra <- c("-task", shQuote(blast_task), extra)
+  cmd <- c(shQuote(blast_cmd),
+           "-query", shQuote(query_fasta),
+           "-db", shQuote(db_path),
+           extra,
+           "-outfmt", shQuote("6 qseqid sseqid pident length qstart qend sstart send evalue"),
+           "-num_threads", as.character(as.integer(threads)),
+           "-out", shQuote(out_tsv))
+  script <- tempfile(pattern = "gene_blast_", fileext = ".sh")
+  on.exit(unlink(script, force = TRUE), add = TRUE)
+  writeLines(paste(cmd, collapse = " "), script)
+  result <- system2("sh", script, stdout = TRUE, stderr = TRUE)
+  exit <- attr(result, "status")
+  if (is.null(exit)) exit <- 0L
+  if (exit != 0L) {
+    message("BLAST failed (", blast_cmd, " exit ", exit, "): ", paste(result, collapse = " "))
+    return(FALSE)
+  }
+  TRUE
+}
+
+fill_blank <- function(x, y) {
+  y <- if (is.null(y) || length(y) == 0) NA_character_ else as.character(y[[1]])
+  if (is.na(y) || !nzchar(y)) return(x)
+  if (is.na(x) || !nzchar(as.character(x))) y else x
+}
+
+# Best HSP per query, then the subject GFF gene with the longest overlap.
+top_hit_annotations <- function(blast_tsv, qmap, subject_genes, anno) {
+  empty <- tibble(gene_id = character(), gene = character(), product = character(), go = character(), evalue = numeric())
+  if (!file.exists(blast_tsv) || file.info(blast_tsv)$size == 0) return(empty)
+  b <- read_tsv(blast_tsv,
+                col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue"),
+                show_col_types = FALSE)
+  if (nrow(b) == 0) return(empty)
+  b$evalue_num <- suppressWarnings(as.numeric(b$evalue))
+  b$length <- as.numeric(b$length)
+  b$hit_start <- pmin(as.numeric(b$sstart), as.numeric(b$send))
+  b$hit_end <- pmax(as.numeric(b$sstart), as.numeric(b$send))
+  b$sseqid_norm <- normalize_sseqid(as.character(b$sseqid))
+  b <- b[order(b$evalue_num, -b$length), , drop = FALSE]
+  b <- b[!duplicated(b$qseqid), , drop = FALSE]
+  genes_by_seq <- if (is.null(subject_genes) || nrow(subject_genes) == 0) list() else split(subject_genes, subject_genes$chr)
+  gene <- product <- go <- rep(NA_character_, nrow(b))
+  for (i in seq_len(nrow(b))) {
+    g <- genes_by_seq[[b$sseqid_norm[i]]]
+    if (is.null(g) || nrow(g) == 0) next
+    ov <- pmin(g$gene_end, b$hit_end[i]) - pmax(g$gene_start, b$hit_start[i]) + 1
+    if (!any(!is.na(ov) & ov > 0)) next
+    pick <- g[which.max(ifelse(is.na(ov) | ov < 1, -Inf, ov)), , drop = FALSE]
+    gene[i] <- if (!is.na(pick$gene_name) && nzchar(pick$gene_name)) pick$gene_name else pick$gene_id
+    product[i] <- pick$product
+    go[i] <- pick$go_terms
+    if (!is.null(anno) && nrow(anno) > 0 && "gene_id" %in% names(anno)) {
+      hit <- match(pick$gene_id, anno$gene_id)
+      if (!is.na(hit)) {
+        if ("gene_name" %in% names(anno)) gene[i] <- fill_blank(gene[i], anno$gene_name[hit])
+        if ("product" %in% names(anno)) product[i] <- fill_blank(product[i], anno$product[hit])
+        go_col <- intersect(c("go_terms", "go"), names(anno))
+        if (length(go_col)) go[i] <- fill_blank(go[i], anno[[go_col[1]]][hit])
+      }
+    }
+  }
+  asm_id <- qmap$gene_id[match(b$qseqid, qmap$qseqid)]
+  tibble(gene_id = asm_id, gene = gene, product = product, go = go, evalue = as.character(b$evalue))
+}
+
+blast_outlier_genes <- function(genes, reference, config_path, out_dir, samtools, blast_cmd, threads,
+                                evalue, max_target_seqs, max_hsps, blast_task, parallel_dbs, verbose) {
+  genes <- genes[!is.na(genes$chr) & !is.na(genes$gene_start) & !is.na(genes$gene_end), , drop = FALSE]
+  genes <- genes[!duplicated(genes$gene_id), , drop = FALSE]
+  if (nrow(genes) == 0) return(NULL)
+  genes$qseqid <- paste0("g", seq_len(nrow(genes)))
+  qmap <- genes[, c("qseqid", "gene_id")]
+  query_fa <- file.path(out_dir, "genes_query.fa")
+  write_gene_fasta(genes, reference, query_fa, samtools)
+  if (verbose) message("BLAST query: ", nrow(genes), " genes in ", query_fa)
+  config <- read_blast_config(config_path)
+  one_db <- function(i) {
+    db <- config[[i]]
+    db_path <- db_field(db, "db_path")
+    if (is.null(db_path)) {
+      message("Skipping BLAST entry ", i, ": db_path missing")
+      return(NULL)
+    }
+    name <- safe_db_name(coalesce_null(db_field(db, "name"), paste0("db", i)), i)
+    if (name == "homolog") name <- "homolog_db"
+    gff_path <- db_field(db, "gff_path")
+    anno_path <- db_field(db, "annotation_tsv", "annotation_table")
+    out_tsv <- file.path(out_dir, paste0("blast_genes_", name, ".tsv"))
+    message("BLAST ", name, ": ", nrow(genes), " genes against ", db_path,
+            " (max_target_seqs=", max_target_seqs, ", max_hsps=", max_hsps, ", evalue=", evalue, ")")
+    ok <- run_gene_blast(query_fa, db_path, out_tsv, blast_cmd, threads, evalue, max_target_seqs, max_hsps, blast_task)
+    if (!ok) return(NULL)
+    subject <- if (!is.null(gff_path) && file.exists(gff_path)) {
+      tryCatch(read_assembly_genes(gff_path, verbose = verbose), error = function(e) {
+        message("Warning: could not read ", gff_path, ": ", conditionMessage(e))
+        NULL
+      })
+    } else {
+      if (!is.null(gff_path)) message("Warning: GFF not found, names left blank: ", gff_path)
+      NULL
+    }
+    anno <- NULL
+    if (!is.null(anno_path)) {
+      if (file.exists(anno_path)) {
+        anno <- tryCatch(read_table_auto(anno_path) %>% rename_all(tolower), error = function(e) {
+          message("Warning: could not read ", anno_path, ": ", conditionMessage(e))
+          NULL
+        })
+      } else {
+        message("Warning: annotation table not found: ", anno_path)
+      }
+    }
+    hits <- top_hit_annotations(out_tsv, qmap, subject, anno)
+    out <- tibble(gene_id = genes$gene_id)
+    if (nrow(hits) > 0) out <- out %>% left_join(hits %>% select("gene_id", "gene", "product", "go", "evalue"), by = "gene_id")
+    if (!"gene" %in% names(out)) out$gene <- NA_character_
+    if (!"product" %in% names(out)) out$product <- NA_character_
+    if (!"go" %in% names(out)) out$go <- NA_character_
+    if (!"evalue" %in% names(out)) out$evalue <- NA_character_
+    renamed <- tibble(gene_id = out$gene_id)
+    renamed[[paste0(name, "_gene")]] <- out$gene
+    renamed[[paste0(name, "_product")]] <- out$product
+    renamed[[paste0(name, "_go")]] <- out$go
+    renamed[[paste0(name, "_evalue")]] <- out$evalue
+    renamed
+  }
+  n_parallel <- max(1L, min(as.integer(parallel_dbs), length(config)))
+  parts <- if (n_parallel > 1L && .Platform$OS.type == "unix") {
+    parallel::mclapply(seq_along(config), one_db, mc.cores = n_parallel)
+  } else {
+    lapply(seq_along(config), one_db)
+  }
+  parts <- parts[vapply(parts, function(p) is.data.frame(p) && nrow(p) > 0, logical(1))]
+  if (length(parts) == 0) return(NULL)
+  hom <- parts[[1]]
+  if (length(parts) > 1L) {
+    for (p in parts[-1]) hom <- hom %>% full_join(p, by = "gene_id")
+  }
+  gene_cols <- grep("_gene$", names(hom), value = TRUE)
+  product_cols <- grep("_product$", names(hom), value = TRUE)
+  go_cols <- grep("_go$", names(hom), value = TRUE)
+  # The collapsed names themselves must not be picked up by the patterns above.
+  row_set <- function(cols) {
+    if (length(cols) == 0) return(rep(NA_character_, nrow(hom)))
+    apply(hom[, cols, drop = FALSE], 1, join_unique)
+  }
+  hom$homolog_genes <- row_set(gene_cols)
+  hom$homolog_products <- row_set(product_cols)
+  hom$homolog_go <- row_set(go_cols)
+  hom
+}
+
 annotation_suffix <- function(path) {
   bn <- tools::file_path_sans_ext(basename(path))
   sub("^outlier_csq_(sites|genes|summary)_", "", bn, perl = TRUE)
@@ -232,7 +448,19 @@ option_list <- list(
   make_option(c("--summary"), type = "character", default = NULL, help = "outlier_csq_summary_*.csv"),
   make_option(c("--blast-genes"), type = "character", default = NULL, help = "outlier_genes_*.csv (BLAST hits)"),
   make_option(c("--include-non-outlier"), action = "store_true", default = FALSE,
-              help = "Keep GFF genes that overlap no outlier region"),
+              help = "Keep GFF genes that overlap no outlier region. With --blast-config, those genes are queried too"),
+  make_option(c("--reference"), type = "character", default = NULL,
+              help = "Assembly FASTA (indexed). Required with --blast-config"),
+  make_option(c("--blast-config"), type = "character", default = NULL,
+              help = "YAML/JSON list of databases (db_path, name, gff_path, optional annotation_tsv). Each outlier gene is searched; the best HSP is named from that genome's GFF"),
+  make_option(c("--samtools"), type = "character", default = "samtools", help = "samtools for faidx [default: %default]"),
+  make_option(c("--blast-cmd"), type = "character", default = "blastn", help = "BLAST program [default: %default]"),
+  make_option(c("--blast-task"), type = "character", default = NULL, help = "Optional -task (e.g. blastn, megablast, dc-megablast)"),
+  make_option(c("--threads"), type = "integer", default = 4L, help = "Threads per BLAST process [default: %default]"),
+  make_option(c("--parallel-dbs"), type = "integer", default = 1L, help = "How many databases to search at once [default: %default]"),
+  make_option(c("--evalue"), type = "double", default = 1e-5, help = "BLAST -evalue [default: %default]"),
+  make_option(c("--max-target-seqs"), type = "integer", default = 1L, help = "BLAST -max_target_seqs [default: %default]"),
+  make_option(c("--max-hsps"), type = "integer", default = 1L, help = "BLAST -max_hsps [default: %default]"),
   make_option(c("--output-dir"), type = "character", default = ".", help = "Output directory [default: %default]"),
   make_option(c("--verbose"), action = "store_true", default = FALSE)
 )
@@ -243,6 +471,12 @@ opts <- parse_args(OptionParser(
 if (is.null(opts$gff)) stop("--gff is required")
 if (is.null(opts$`annotation-dir`) && is.null(opts$sites) && is.null(opts$genes) && is.null(opts$summary))
   stop("Give --annotation-dir or at least one of --sites, --genes, --summary")
+if (!is.null(opts$`blast-config`) && is.null(opts$reference))
+  stop("--reference is required with --blast-config")
+if (!is.null(opts$threads) && opts$threads < 1L) stop("--threads must be >= 1")
+if (!is.null(opts$`parallel-dbs`) && opts$`parallel-dbs` < 1L) stop("--parallel-dbs must be >= 1")
+if (!is.null(opts$`max-target-seqs`) && opts$`max-target-seqs` < 1L) stop("--max-target-seqs must be >= 1")
+if (!is.null(opts$`max-hsps`) && opts$`max-hsps` < 1L) stop("--max-hsps must be >= 1")
 
 found <- discover_annotation(opts$`annotation-dir`, opts$suffix, opts$verbose)
 sites_path <- coalesce_null(opts$sites, found$sites)
@@ -502,15 +736,34 @@ gene_summary$in_outlier <- gene_summary$n_regions > 0 | gene_summary$n_sites > 0
 if ("n_protein_altering" %in% names(gene_summary))
   gene_summary$n_protein_altering <- coalesce(as.integer(gene_summary$n_protein_altering), 0L)
 
+extra_last <- character(0)
+if (!is.null(opts$`blast-config`)) {
+  queries <- if (isTRUE(opts$`include-non-outlier`)) gene_summary else gene_summary[gene_summary$in_outlier %in% TRUE, , drop = FALSE]
+  hom <- blast_outlier_genes(
+    queries, opts$reference, opts$`blast-config`, opts$`output-dir`,
+    opts$samtools, opts$`blast-cmd`, opts$threads, opts$evalue,
+    opts$`max-target-seqs`, opts$`max-hsps`, opts$`blast-task`, opts$`parallel-dbs`, opts$verbose
+  )
+  if (!is.null(hom) && nrow(hom) > 0) {
+    gene_summary <- gene_summary %>% left_join(hom, by = "gene_id")
+    extra_last <- setdiff(names(hom), "gene_id")
+  }
+}
+
 lead <- c("gene_id", "gene_name", "csq_key", "product", "go_terms", "strand",
           "chr", "gene_start", "gene_end", "gene_length", "in_outlier",
-          "n_regions", "n_sites", "n_sites_snp", "n_sites_indel", "n_protein_altering",
-          "coding_effects", "outlier_stat", "n_windows", "qseqids")
-list_last <- intersect(c("blast_gene_ids", "blast_products", "blast_dbs", "qseqids"), names(gene_summary))
+          "n_regions", "n_windows", "qseqids",
+          "n_sites", "n_sites_snp", "n_sites_indel", "n_protein_altering",
+          "coding_effects", "outlier_stat")
+list_last <- c(intersect(c("blast_gene_ids", "blast_products", "blast_dbs"), names(gene_summary)), extra_last)
 gene_summary <- gene_summary %>%
   select(-any_of("seqid")) %>%
-  select(any_of(lead), setdiff(names(gene_summary), c(lead, list_last, "seqid")), any_of(list_last)) %>%
-  arrange(desc(.data$n_protein_altering), desc(.data$n_sites), .data$chr, .data$gene_start)
+  select(any_of(lead), setdiff(names(gene_summary), c(lead, list_last, "seqid")), any_of(list_last))
+gene_summary <- if ("n_protein_altering" %in% names(gene_summary)) {
+  gene_summary %>% arrange(desc(.data$n_protein_altering), desc(.data$n_sites), .data$chr, .data$gene_start)
+} else {
+  gene_summary %>% arrange(desc(.data$n_sites), .data$chr, .data$gene_start)
+}
 
 if (nrow(gene_regions) > 0) {
   gr_lead <- c("gene_id", "gene_name", "csq_key", "chr", "gene_start", "gene_end",

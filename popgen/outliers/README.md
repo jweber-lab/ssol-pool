@@ -125,8 +125,14 @@ Sites are assigned to a gene when the position falls inside the gene (`assigned_
 
 `--include-non-outlier` also writes GFF genes that overlap no outlier region (`in_outlier=FALSE`).
 
+`--blast-config` with `--reference` searches each outlier gene's genomic span (`chr:gene_start-gene_end`, introns included) against every database in the config. The config is the same YAML or JSON used by `outlier_annotation.sh` (`db_path`, `name`, `gff_path`, optional `annotation_tsv`). This does not replace the region search in `outlier_annotation.sh`. Without `--blast-config` the summary columns are unchanged. `--include-non-outlier` also queries genes that overlap no outlier region.
+
+Defaults keep the search small: `--threads 4`, `--parallel-dbs 1`, `--evalue 1e-5`, `--max-target-seqs 1`, `--max-hsps 1`. Each of those is a flag, as are `--blast-cmd` (default `blastn`) and `--blast-task`. The best HSP per gene per database is the lowest evalue. Its subject coordinates are overlapped with that genome's GFF; the gene with the longest overlap supplies the name, product, and GO terms, and `annotation_tsv` fills any of those the GFF line lacks. A database with no hit leaves its four columns empty and is omitted from the collapsed sets.
+
+Those columns sit at the end of `outlier_gene_summary_*.csv`, after the region-joined `blast_gene_ids` / `blast_products` / `blast_dbs`: `<name>_gene`, `<name>_product`, `<name>_go`, `<name>_evalue` for each configured genome, then `homolog_genes`, `homolog_products`, and `homolog_go` (unique semicolon lists). The query FASTA is `genes_query.fa` and each database writes `blast_genes_<name>.tsv` in the output directory.
+
 Outputs, suffix copied from the annotation files:
 
-- `outlier_gene_summary_*.csv`: one row per gene. GFF identity and coordinates, `n_regions`, `n_sites`, `n_protein_altering`, `coding_effects`, `outlier_stat`, `qseqids`, and BLAST homologs collapsed across those regions (`blast_gene_ids`, `blast_products`, `best_evalue`).
+- `outlier_gene_summary_*.csv`: one row per gene. GFF identity and coordinates, then `n_regions`, `n_windows`, and `qseqids`, then `n_sites`, `n_protein_altering`, `coding_effects`, and `outlier_stat`. Region-joined BLAST columns (`blast_gene_ids`, `blast_products`, `blast_dbs`) stay at the end, followed by the per-database gene search columns and `homolog_genes`, `homolog_products`, `homolog_go` when `--blast-config` is set.
 - `outlier_gene_regions_*.csv`: one row per gene × outlier region, with that region's stats and the site counts for the gene in the region.
 - `outlier_gene_sites_*.csv`: one row per gene × site. `qseqids` are semicolon-collapsed when the site sits in more than one region. `assigned_by` records whether the link was position, csq, or both.
