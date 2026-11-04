@@ -22,8 +22,10 @@ BLAST_GENES=""
 INCLUDE_NON_OUTLIER=false
 REFERENCE=""
 BLAST_CONFIG=""
+SWISSPROT_DB=""
 SAMTOOLS="samtools"
 BLAST_CMD=""
+BLASTX_CMD=""
 BLAST_TASK=""
 THREADS=""
 PARALLEL_DBS=""
@@ -61,12 +63,14 @@ Optional:
   --blast-genes FILE       outlier_genes_*.csv (BLAST homologs, joined by region)
   --include-non-outlier    Also list GFF genes that overlap no outlier region
                            (and BLAST those genes too, when --blast-config is set)
-  --reference FILE         Assembly FASTA, indexed. Required with --blast-config
+  --reference FILE         Assembly FASTA, indexed. Required with --blast-config or --swissprot-db
   --blast-config FILE      YAML/JSON databases (db_path, name, gff_path, optional annotation_tsv).
                            Each outlier gene is searched; the best HSP is named from that GFF
+  --swissprot-db PREFIX    Swiss-Prot protein BLAST database. Spliced CDS are searched with blastx
   --samtools PATH          samtools [default: samtools]
-  --blast-cmd CMD          BLAST program [default: blastn]
-  --blast-task TASK        Optional BLAST -task (blastn, megablast, dc-megablast)
+  --blast-cmd CMD          BLAST program for --blast-config [default: blastn]
+  --blastx-cmd CMD         blastx program for --swissprot-db [default: blastx]
+  --blast-task TASK        Nucleotide BLAST -task [default: blastn]. Pass megablast to restore the old default
   --threads N              Threads per BLAST process [default: 4]
   --parallel-dbs N         Databases searched at once [default: 1]
   --evalue N               BLAST -evalue [default: 1e-5]
@@ -82,7 +86,8 @@ Outputs (suffix copied from the annotation files):
   outlier_gene_summary_*.csv   One row per GFF gene: coordinates, n_regions,
                                n_windows, qseqids, then n_sites, coding_effects, outlier_stat.
                                Region BLAST homologs stay at the end, then one gene/product/GO/evalue
-                               column set per database and homolog_genes, homolog_products, homolog_go
+                               column set per database, homolog_genes/products/go, and with
+                               --swissprot-db the top blastx hit (gene, product, organism, accession, evalue)
   outlier_gene_regions_*.csv   One row per (gene, outlier region)
   outlier_gene_sites_*.csv     One row per (gene, site); sites assigned by
                                position in the gene and/or csq gene name
@@ -104,8 +109,10 @@ while [[ $# -gt 0 ]]; do
         --include-non-outlier) INCLUDE_NON_OUTLIER=true; shift ;;
         --reference) REFERENCE="$2"; shift 2 ;;
         --blast-config) BLAST_CONFIG="$2"; shift 2 ;;
+        --swissprot-db) SWISSPROT_DB="$2"; shift 2 ;;
         --samtools) SAMTOOLS="$2"; shift 2 ;;
         --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
+        --blastx-cmd) BLASTX_CMD="$2"; shift 2 ;;
         --blast-task) BLAST_TASK="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
         --parallel-dbs) PARALLEL_DBS="$2"; shift 2 ;;
@@ -139,8 +146,12 @@ if [[ -n "$ANNOTATION_DIR" && ! -d "$ANNOTATION_DIR" ]]; then
     log_error "Annotation directory not found: $ANNOTATION_DIR"
     exit 1
 fi
-if [[ -n "$BLAST_CONFIG" && -z "$REFERENCE" ]]; then
-    log_error "--reference is required with --blast-config"
+if [[ ( -n "$BLAST_CONFIG" || -n "$SWISSPROT_DB" ) && -z "$REFERENCE" ]]; then
+    log_error "--reference is required with --blast-config or --swissprot-db"
+    exit 1
+fi
+if [[ -n "$SWISSPROT_DB" && ! -e "${SWISSPROT_DB}.phr" && ! -e "${SWISSPROT_DB}.pin" && ! -e "${SWISSPROT_DB}.psq" && ! -e "${SWISSPROT_DB}.pdb" ]]; then
+    log_error "Swiss-Prot BLAST database not found at prefix: $SWISSPROT_DB"
     exit 1
 fi
 if [[ -n "$BLAST_CONFIG" && ! -f "$BLAST_CONFIG" ]]; then
@@ -189,8 +200,10 @@ R_ARGS=(--gff "$GFF" --output-dir "$OUTPUT_DIR")
 [[ "$INCLUDE_NON_OUTLIER" == true ]] && R_ARGS+=(--include-non-outlier)
 [[ -n "$REFERENCE" ]] && R_ARGS+=(--reference "$REFERENCE")
 [[ -n "$BLAST_CONFIG" ]] && R_ARGS+=(--blast-config "$BLAST_CONFIG")
-[[ -n "$BLAST_CONFIG" ]] && R_ARGS+=(--samtools "$SAMTOOLS")
+[[ -n "$SWISSPROT_DB" ]] && R_ARGS+=(--swissprot-db "$SWISSPROT_DB")
+[[ -n "$BLAST_CONFIG" || -n "$SWISSPROT_DB" ]] && R_ARGS+=(--samtools "$SAMTOOLS")
 [[ -n "$BLAST_CMD" ]] && R_ARGS+=(--blast-cmd "$BLAST_CMD")
+[[ -n "$BLASTX_CMD" ]] && R_ARGS+=(--blastx-cmd "$BLASTX_CMD")
 [[ -n "$BLAST_TASK" ]] && R_ARGS+=(--blast-task "$BLAST_TASK")
 [[ -n "$THREADS" ]] && R_ARGS+=(--threads "$THREADS")
 [[ -n "$PARALLEL_DBS" ]] && R_ARGS+=(--parallel-dbs "$PARALLEL_DBS")

@@ -18,7 +18,9 @@
 #     homologs collapsed across overlapping regions (other-assembly gene_ids).
 #     With --blast-config, each outlier gene sequence is searched and the best
 #     HSP per database adds <name>_gene/product/go/evalue plus homolog_genes,
-#     homolog_products, and homolog_go.
+#     homolog_products, and homolog_go. Nucleotide task defaults to blastn.
+#     With --swissprot-db, blastx of the spliced CDS adds the closest Swiss-Prot
+#     protein (gene, product, organism, accession, evalue).
 #   outlier_gene_regions_<suffix>.csv  One row per (gene, region).
 #   outlier_gene_sites_<suffix>.csv    One row per (gene, site): sites whose
 #     position falls in the gene and/or whose csq `genes` field names it.
@@ -222,16 +224,21 @@ write_gene_fasta <- function(genes, reference, out_fasta, samtools) {
   out_fasta
 }
 
-run_gene_blast <- function(query_fasta, db_path, out_tsv, blast_cmd, threads, evalue, max_target_seqs, max_hsps, blast_task) {
+# NCBI warns that -max_target_seqs below 5 can drop the best hit during the search.
+# The summary still keeps one HSP per gene. A requested value above 5 is left as given.
+search_target_seqs <- function(max_target_seqs) max(as.integer(max_target_seqs), 5L)
+
+run_gene_blast <- function(query_fasta, db_path, out_tsv, blast_cmd, threads, evalue, max_target_seqs, max_hsps, blast_task,
+                           outfmt = "6 qseqid sseqid pident length qstart qend sstart send evalue") {
   extra <- c("-evalue", as.character(evalue),
-             "-max_target_seqs", as.character(max_target_seqs),
+             "-max_target_seqs", as.character(search_target_seqs(max_target_seqs)),
              "-max_hsps", as.character(max_hsps))
   if (!is.null(blast_task) && nzchar(blast_task)) extra <- c("-task", shQuote(blast_task), extra)
   cmd <- c(shQuote(blast_cmd),
            "-query", shQuote(query_fasta),
            "-db", shQuote(db_path),
            extra,
-           "-outfmt", shQuote("6 qseqid sseqid pident length qstart qend sstart send evalue"),
+           "-outfmt", shQuote(outfmt),
            "-num_threads", as.character(as.integer(threads)),
            "-out", shQuote(out_tsv))
   script <- tempfile(pattern = "gene_blast_", fileext = ".sh")
@@ -303,6 +310,10 @@ blast_outlier_genes <- function(genes, reference, config_path, out_dir, samtools
   query_fa <- file.path(out_dir, "genes_query.fa")
   write_gene_fasta(genes, reference, query_fa, samtools)
   if (verbose) message("BLAST query: ", nrow(genes), " genes in ", query_fa)
+  targets <- search_target_seqs(max_target_seqs)
+  if (targets > as.integer(max_target_seqs))
+    message("Searching with -max_target_seqs ", targets,
+            " (values below 5 can drop the best hit). One hit per gene is kept.")
   config <- read_blast_config(config_path)
   one_db <- function(i) {
     db <- config[[i]]
@@ -380,6 +391,160 @@ blast_outlier_genes <- function(genes, reference, config_path, out_dir, samtools
   hom
 }
 
+revcomp_dna <- function(s) {
+  if (is.na(s) || !nzchar(s)) return(s)
+  chartr("ACGTNacgtn", "TGCANtgcan", paste(rev(strsplit(s, "", fixed = TRUE)[[1]]), collapse = ""))
+}
+
+# Spliced CDS for each gene, longest transcript. Headers are g1, g2, ...
+write_cds_fasta <- function(genes, gff_path, reference, samtools, out_fasta) {
+  d <- read_tsv(gff_path, comment = "#",
+                col_names = c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attr"),
+                show_col_types = FALSE, na = ".")
+  d <- d %>% filter(.data$type %in% c("gene", "mRNA", "CDS"))
+  d$start <- as.numeric(d$start)
+  d$end <- as.numeric(d$end)
+  d <- d %>% filter(!is.na(.data$start), !is.na(.data$end))
+  if (!any(d$type == "CDS")) return(NULL)
+  feat_id <- extract_attr_first(d$attr, "^(?:.*;)?ID=([^;]+)")
+  feat_name <- extract_attr_first(d$attr, "^(?:.*;)?Name=([^;]+)")
+  feat_gene <- extract_gff_gene_id(d$attr)
+  feat_parent <- extract_attr_first(d$attr, "^(?:.*;)?Parent=([^;]+)")
+  key_to_gene <- character(0)
+  add_key <- function(key, gene) {
+    ok <- !is.na(key) & nzchar(key) & !is.na(gene) & nzchar(gene)
+    if (!any(ok)) return()
+    key_to_gene[key[ok]] <<- gene[ok]
+  }
+  is_gene <- d$type == "gene"
+  if (any(is_gene)) {
+    add_key(feat_gene[is_gene], feat_gene[is_gene])
+    add_key(feat_id[is_gene], feat_gene[is_gene])
+    add_key(sub("^gene:", "", feat_id[is_gene]), feat_gene[is_gene])
+    add_key(feat_name[is_gene], feat_gene[is_gene])
+  }
+  is_tx <- d$type == "mRNA"
+  tx_gene <- rep(NA_character_, nrow(d))
+  if (any(is_tx)) {
+    parents <- strsplit(ifelse(is.na(feat_parent), "", feat_parent), ",", fixed = TRUE)
+    tx_gene[is_tx] <- vapply(which(is_tx), function(i) {
+      hit <- key_to_gene[trimws(parents[[i]])]
+      hit <- hit[!is.na(hit) & nzchar(hit)]
+      if (length(hit)) hit[[1]] else NA_character_
+    }, character(1))
+    add_key(feat_id[is_tx], tx_gene[is_tx])
+  }
+  is_cds <- d$type == "CDS"
+  cds <- d[is_cds, , drop = FALSE]
+  cds$tx <- feat_parent[is_cds]
+  cds$gene_id <- ifelse(!is.na(feat_parent[is_cds]) & feat_parent[is_cds] %in% names(key_to_gene),
+                        key_to_gene[feat_parent[is_cds]],
+                        ifelse(!is.na(feat_gene[is_cds]) & feat_gene[is_cds] %in% names(key_to_gene),
+                               key_to_gene[feat_gene[is_cds]], feat_gene[is_cds]))
+  # Parent can list several ids. Use the first one that maps.
+  unresolved <- is.na(cds$gene_id) | !nzchar(cds$gene_id)
+  if (any(unresolved)) {
+    cds$gene_id[unresolved] <- vapply(which(unresolved), function(i) {
+      parts <- trimws(strsplit(ifelse(is.na(cds$tx[i]), "", cds$tx[i]), ",", fixed = TRUE)[[1]])
+      hit <- key_to_gene[parts]
+      hit <- hit[!is.na(hit) & nzchar(hit)]
+      if (length(hit)) hit[[1]] else NA_character_
+    }, character(1))
+  }
+  cds <- cds[!is.na(cds$gene_id) & cds$gene_id %in% genes$gene_id, , drop = FALSE]
+  if (nrow(cds) == 0) return(NULL)
+  cds$tx <- ifelse(is.na(cds$tx) | !nzchar(cds$tx), cds$gene_id, cds$tx)
+  cds$width <- cds$end - cds$start + 1
+  tx_len <- cds %>% group_by(.data$gene_id, .data$tx) %>% summarise(width = sum(.data$width), .groups = "drop")
+  best_tx <- tx_len %>% group_by(.data$gene_id) %>% slice_max(.data$width, n = 1, with_ties = FALSE)
+  cds <- cds %>% inner_join(best_tx %>% select("gene_id", "tx"), by = c("gene_id", "tx"))
+  cds <- cds[order(match(cds$gene_id, genes$gene_id), cds$start), , drop = FALSE]
+  pieces <- lapply(split(cds, cds$gene_id), function(ex) {
+    if (any(ex$strand == "-")) ex <- ex[order(-ex$start), , drop = FALSE]
+    reg <- paste0(ex$seqid, ":", fmt_bp(ex$start), "-", fmt_bp(ex$end))
+    raw <- system2(samtools, c("faidx", reference, reg), stdout = TRUE, stderr = FALSE)
+    if (!is.null(attr(raw, "status")) && attr(raw, "status") != 0L) return(NA_character_)
+    hdr <- which(startsWith(raw, ">"))
+    if (length(hdr) != length(reg)) return(NA_character_)
+    seqs <- character(length(hdr))
+    for (i in seq_along(hdr)) {
+      end <- if (i == length(hdr)) length(raw) else hdr[i + 1] - 1L
+      seqs[i] <- paste(raw[(hdr[i] + 1L):end], collapse = "")
+    }
+    if (any(ex$strand == "-")) seqs <- vapply(seqs, revcomp_dna, character(1))
+    paste(seqs, collapse = "")
+  })
+  keep_ids <- names(pieces)[!is.na(pieces) & nzchar(unlist(pieces, use.names = FALSE))]
+  if (length(keep_ids) == 0) return(NULL)
+  qmap <- tibble(qseqid = paste0("g", seq_along(keep_ids)), gene_id = keep_ids)
+  seqs <- unname(unlist(pieces[keep_ids]))
+  lines <- unlist(Map(c, paste0(">", qmap$qseqid), seqs), use.names = FALSE)
+  writeLines(lines, out_fasta)
+  qmap
+}
+
+parse_swissprot_title <- function(sseqid, stitle) {
+  sseqid <- ifelse(is.na(sseqid), "", sseqid)
+  stitle <- ifelse(is.na(stitle), "", stitle)
+  full <- ifelse(nzchar(stitle) & !grepl(sseqid, stitle, fixed = TRUE) & nzchar(sseqid),
+                 paste(sseqid, stitle), ifelse(nzchar(stitle), stitle, sseqid))
+  gn <- ifelse(grepl("GN=", full), sub(".*\\bGN=(\\S+).*", "\\1", full), NA_character_)
+  org <- ifelse(grepl("OS=", full), sub(".*\\bOS=(.*?)\\s+(?:OX=|GN=|PE=|SV=).*$", "\\1", full), NA_character_)
+  prod <- sub("\\s+OS=.*$", "", full)
+  prod <- ifelse(grepl("\\|", prod), sub("^\\S+\\s+", "", prod), prod)
+  prod <- ifelse(nzchar(prod), prod, NA_character_)
+  acc <- ifelse(grepl("\\|", sseqid), sub("^[^|]*\\|([^|]+)\\|.*", "\\1", sseqid), sseqid)
+  entry <- sub("^.*\\|", "", sseqid)
+  gn <- ifelse(is.na(gn) & grepl("_", entry), sub("_[A-Za-z0-9]+$", "", entry), gn)
+  tibble(gene = gn, product = prod, organism = org, accession = acc)
+}
+
+blast_swissprot <- function(genes, gff_path, reference, db_path, out_dir, samtools, blastx_cmd, threads,
+                            evalue, max_target_seqs, max_hsps, verbose) {
+  genes <- genes[!is.na(genes$gene_id), , drop = FALSE]
+  genes <- genes[!duplicated(genes$gene_id), , drop = FALSE]
+  if (nrow(genes) == 0) return(NULL)
+  query_fa <- file.path(out_dir, "genes_cds_query.fa")
+  qmap <- write_cds_fasta(genes, gff_path, reference, samtools, query_fa)
+  empty <- tibble(gene_id = genes$gene_id, swissprot_gene = NA_character_, swissprot_product = NA_character_,
+                  swissprot_organism = NA_character_, swissprot_accession = NA_character_, swissprot_evalue = NA_character_)
+  if (is.null(qmap) || nrow(qmap) == 0) {
+    message("Swiss-Prot blastx: no CDS features for the outlier genes")
+    return(empty)
+  }
+  if (verbose) message("Swiss-Prot query: ", nrow(qmap), " spliced CDS in ", query_fa,
+                       " (", nrow(genes) - nrow(qmap), " genes had no CDS)")
+  targets <- search_target_seqs(max_target_seqs)
+  if (targets > as.integer(max_target_seqs))
+    message("Swiss-Prot search uses -max_target_seqs ", targets, ". One hit per gene is kept.")
+  out_tsv <- file.path(out_dir, "blast_genes_swissprot.tsv")
+  message("blastx ", nrow(qmap), " CDS against ", db_path, " (evalue=", evalue, ")")
+  ok <- run_gene_blast(query_fa, db_path, out_tsv, blastx_cmd, threads, evalue, max_target_seqs, max_hsps,
+                       blast_task = NULL,
+                       outfmt = "6 qseqid sseqid pident length qstart qend sstart send evalue bitscore stitle")
+  if (!ok || !file.exists(out_tsv) || file.info(out_tsv)$size == 0) return(empty)
+  b <- read_tsv(out_tsv,
+                col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "stitle"),
+                show_col_types = FALSE)
+  if (nrow(b) == 0) return(empty)
+  b$evalue_num <- suppressWarnings(as.numeric(b$evalue))
+  b$bitscore <- as.numeric(b$bitscore)
+  b <- b[order(b$evalue_num, -b$bitscore), , drop = FALSE]
+  b <- b[!duplicated(b$qseqid), , drop = FALSE]
+  parsed <- parse_swissprot_title(b$sseqid, b$stitle)
+  parsed$gene_id <- qmap$gene_id[match(b$qseqid, qmap$qseqid)]
+  parsed$swissprot_evalue <- as.character(b$evalue)
+  parsed <- parsed %>% transmute(
+    gene_id = .data$gene_id,
+    swissprot_gene = .data$gene,
+    swissprot_product = .data$product,
+    swissprot_organism = .data$organism,
+    swissprot_accession = .data$accession,
+    swissprot_evalue = .data$swissprot_evalue
+  )
+  empty %>% select("gene_id") %>% left_join(parsed, by = "gene_id")
+}
+
 annotation_suffix <- function(path) {
   bn <- tools::file_path_sans_ext(basename(path))
   sub("^outlier_csq_(sites|genes|summary)_", "", bn, perl = TRUE)
@@ -450,12 +615,16 @@ option_list <- list(
   make_option(c("--include-non-outlier"), action = "store_true", default = FALSE,
               help = "Keep GFF genes that overlap no outlier region. With --blast-config, those genes are queried too"),
   make_option(c("--reference"), type = "character", default = NULL,
-              help = "Assembly FASTA (indexed). Required with --blast-config"),
+              help = "Assembly FASTA (indexed). Required with --blast-config or --swissprot-db"),
   make_option(c("--blast-config"), type = "character", default = NULL,
               help = "YAML/JSON list of databases (db_path, name, gff_path, optional annotation_tsv). Each outlier gene is searched; the best HSP is named from that genome's GFF"),
+  make_option(c("--swissprot-db"), type = "character", default = NULL,
+              help = "Swiss-Prot protein BLAST database prefix. Spliced CDS are searched with blastx; the top hit supplies gene, product, and organism"),
+  make_option(c("--blastx-cmd"), type = "character", default = "blastx", help = "blastx program for --swissprot-db [default: %default]"),
   make_option(c("--samtools"), type = "character", default = "samtools", help = "samtools for faidx [default: %default]"),
-  make_option(c("--blast-cmd"), type = "character", default = "blastn", help = "BLAST program [default: %default]"),
-  make_option(c("--blast-task"), type = "character", default = NULL, help = "Optional -task (e.g. blastn, megablast, dc-megablast)"),
+  make_option(c("--blast-cmd"), type = "character", default = "blastn", help = "BLAST program for --blast-config [default: %default]"),
+  make_option(c("--blast-task"), type = "character", default = "blastn",
+              help = "BLAST -task for nucleotide databases [default: %default]. megablast misses divergent hits; pass megablast to restore it"),
   make_option(c("--threads"), type = "integer", default = 4L, help = "Threads per BLAST process [default: %default]"),
   make_option(c("--parallel-dbs"), type = "integer", default = 1L, help = "How many databases to search at once [default: %default]"),
   make_option(c("--evalue"), type = "double", default = 1e-5, help = "BLAST -evalue [default: %default]"),
@@ -471,8 +640,8 @@ opts <- parse_args(OptionParser(
 if (is.null(opts$gff)) stop("--gff is required")
 if (is.null(opts$`annotation-dir`) && is.null(opts$sites) && is.null(opts$genes) && is.null(opts$summary))
   stop("Give --annotation-dir or at least one of --sites, --genes, --summary")
-if (!is.null(opts$`blast-config`) && is.null(opts$reference))
-  stop("--reference is required with --blast-config")
+if ((!is.null(opts$`blast-config`) || !is.null(opts$`swissprot-db`)) && is.null(opts$reference))
+  stop("--reference is required with --blast-config or --swissprot-db")
 if (!is.null(opts$threads) && opts$threads < 1L) stop("--threads must be >= 1")
 if (!is.null(opts$`parallel-dbs`) && opts$`parallel-dbs` < 1L) stop("--parallel-dbs must be >= 1")
 if (!is.null(opts$`max-target-seqs`) && opts$`max-target-seqs` < 1L) stop("--max-target-seqs must be >= 1")
@@ -747,6 +916,18 @@ if (!is.null(opts$`blast-config`)) {
   if (!is.null(hom) && nrow(hom) > 0) {
     gene_summary <- gene_summary %>% left_join(hom, by = "gene_id")
     extra_last <- setdiff(names(hom), "gene_id")
+  }
+}
+if (!is.null(opts$`swissprot-db`)) {
+  queries <- if (isTRUE(opts$`include-non-outlier`)) gene_summary else gene_summary[gene_summary$in_outlier %in% TRUE, , drop = FALSE]
+  sw <- blast_swissprot(
+    queries, opts$gff, opts$reference, opts$`swissprot-db`, opts$`output-dir`,
+    opts$samtools, opts$`blastx-cmd`, opts$threads, opts$evalue,
+    opts$`max-target-seqs`, opts$`max-hsps`, opts$verbose
+  )
+  if (!is.null(sw) && nrow(sw) > 0) {
+    gene_summary <- gene_summary %>% left_join(sw, by = "gene_id")
+    extra_last <- c(extra_last, setdiff(names(sw), "gene_id"))
   }
 }
 
