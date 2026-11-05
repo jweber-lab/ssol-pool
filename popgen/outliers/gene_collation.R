@@ -19,8 +19,9 @@
 #     With --blast-config, each outlier gene sequence is searched and the best
 #     HSP per database adds <name>_gene/product/go/evalue plus homolog_genes,
 #     homolog_products, and homolog_go. Nucleotide task defaults to blastn.
-#     With --swissprot-db, blastx of the spliced CDS adds the closest Swiss-Prot
-#     protein (gene, product, organism, accession, evalue).
+#     With --proteome-config, blastx of the spliced CDS searches each protein
+#     database and adds <name>_gene/product/go/accession/evalue plus the
+#     collapsed proteome_genes, proteome_products, and proteome_go columns.
 #   outlier_gene_regions_<suffix>.csv  One row per (gene, region).
 #   outlier_gene_sites_<suffix>.csv    One row per (gene, site): sites whose
 #     position falls in the gene and/or whose csq `genes` field names it.
@@ -483,66 +484,265 @@ write_cds_fasta <- function(genes, gff_path, reference, samtools, out_fasta) {
   qmap
 }
 
-parse_swissprot_title <- function(sseqid, stitle) {
-  sseqid <- ifelse(is.na(sseqid), "", sseqid)
-  stitle <- ifelse(is.na(stitle), "", stitle)
-  full <- ifelse(nzchar(stitle) & !grepl(sseqid, stitle, fixed = TRUE) & nzchar(sseqid),
+parse_protein_title <- function(sseqid, stitle) {
+  sseqid <- ifelse(is.na(sseqid), "", as.character(sseqid))
+  stitle <- ifelse(is.na(stitle), "", as.character(stitle))
+  full <- ifelse(nzchar(stitle) & nzchar(sseqid) & !grepl(sseqid, stitle, fixed = TRUE),
                  paste(sseqid, stitle), ifelse(nzchar(stitle), stitle, sseqid))
-  gn <- ifelse(grepl("GN=", full), sub(".*\\bGN=(\\S+).*", "\\1", full), NA_character_)
-  org <- ifelse(grepl("OS=", full), sub(".*\\bOS=(.*?)\\s+(?:OX=|GN=|PE=|SV=).*$", "\\1", full), NA_character_)
-  prod <- sub("\\s+OS=.*$", "", full)
-  prod <- ifelse(grepl("\\|", prod), sub("^\\S+\\s+", "", prod), prod)
-  prod <- ifelse(nzchar(prod), prod, NA_character_)
-  acc <- ifelse(grepl("\\|", sseqid), sub("^[^|]*\\|([^|]+)\\|.*", "\\1", sseqid), sseqid)
+  gn <- rep(NA_character_, length(full))
+  has_sym <- grepl("gene_symbol:", full, fixed = TRUE)
+  gn[has_sym] <- sub(".*\\bgene_symbol:(\\S+).*", "\\1", full[has_sym])
+  has_gn <- is.na(gn) & grepl("GN=", full, fixed = TRUE)
+  gn[has_gn] <- sub(".*\\bGN=(\\S+).*", "\\1", full[has_gn])
+  has_gene <- is.na(gn) & grepl("gene:", full, fixed = TRUE)
+  gn[has_gene] <- sub(".*\\bgene:(\\S+).*", "\\1", full[has_gene])
+  prod <- rep(NA_character_, length(full))
+  has_desc <- grepl("description:", full, fixed = TRUE)
+  if (any(has_desc)) {
+    desc <- sub(".*\\bdescription:", "", full[has_desc])
+    prod[has_desc] <- trimws(sub("\\s+\\[Source:.*$", "", desc))
+  }
+  has_os <- is.na(prod) & grepl("OS=", full, fixed = TRUE)
+  if (any(has_os)) {
+    tmp <- sub("\\s+OS=.*$", "", full[has_os])
+    tmp <- ifelse(grepl("|", tmp, fixed = TRUE), sub("^\\S+\\s+", "", tmp), tmp)
+    prod[has_os] <- tmp
+  }
+  prod[!nzchar(prod)] <- NA_character_
+  org <- ifelse(grepl("OS=", full, fixed = TRUE),
+                sub(".*\\bOS=(.*?)\\s+(?:OX=|GN=|PE=|SV=).*$", "\\1", full), NA_character_)
+  acc <- ifelse(grepl("|", sseqid, fixed = TRUE), sub("^[^|]*\\|([^|]+)\\|.*", "\\1", sseqid), sseqid)
+  acc <- sub("\\s.*$", "", acc)
   entry <- sub("^.*\\|", "", sseqid)
-  gn <- ifelse(is.na(gn) & grepl("_", entry), sub("_[A-Za-z0-9]+$", "", entry), gn)
+  gn <- ifelse(is.na(gn) & nzchar(entry) & grepl("_", entry, fixed = TRUE) & !grepl("\\s", entry),
+               sub("_[A-Za-z0-9]+$", "", entry), gn)
   tibble(gene = gn, product = prod, organism = org, accession = acc)
 }
 
-blast_swissprot <- function(genes, gff_path, reference, db_path, out_dir, samtools, blastx_cmd, threads,
-                            evalue, max_target_seqs, max_hsps, verbose) {
+present_cols <- function(d, candidates) {
+  if (is.null(d) || ncol(d) == 0) return(character(0))
+  low <- gsub("[^a-z0-9]+", "_", tolower(names(d)))
+  cands <- gsub("[^a-z0-9]+", "_", tolower(candidates))
+  names(d)[low %in% cands]
+}
+
+first_present <- function(d, candidates) {
+  if (is.null(d) || ncol(d) == 0) return(NA_character_)
+  low <- gsub("[^a-z0-9]+", "_", tolower(names(d)))
+  for (cnd in candidates) {
+    hit <- which(low == gsub("[^a-z0-9]+", "_", tolower(cnd)))
+    if (length(hit)) return(names(d)[hit[1]])
+  }
+  NA_character_
+}
+
+merge_proteome_rec <- function(old, new) {
+  one <- function(a, b) {
+    a <- if (is.null(a) || length(a) == 0 || is.na(a[[1]]) || !nzchar(as.character(a[[1]]))) NA_character_ else as.character(a[[1]])
+    b <- if (is.null(b) || length(b) == 0 || is.na(b[[1]]) || !nzchar(as.character(b[[1]]))) NA_character_ else as.character(b[[1]])
+    if (is.na(a)) b else a
+  }
+  go <- sort(unique(c(split_semicolon(as.character(old$go)), split_semicolon(as.character(new$go)))))
+  list(gene = one(old$gene, new$gene), product = one(old$product, new$product),
+       go = if (length(go) == 0) NA_character_ else paste(go, collapse = ";"))
+}
+
+put_proteome_key <- function(lookup, key, rec) {
+  key <- as.character(key)
+  if (is.na(key) || !nzchar(key)) return()
+  keys <- unique(c(key, sub("\\.\\d+$", "", key)))
+  if (grepl("|", key, fixed = TRUE)) {
+    parts <- strsplit(key, "|", fixed = TRUE)[[1]]
+    keys <- unique(c(keys, parts, sub("\\.\\d+$", "", parts)))
+  }
+  for (k in keys) {
+    if (is.na(k) || !nzchar(k)) next
+    if (exists(k, lookup, inherits = FALSE)) {
+      assign(k, merge_proteome_rec(get(k, lookup, inherits = FALSE), rec), envir = lookup)
+    } else {
+      assign(k, rec, envir = lookup)
+    }
+  }
+}
+
+# Annotation rows win over the FASTA title. id_map connects a BLAST sseqid to that row.
+load_proteome_lookup <- function(anno_path, map_path, label) {
+  lookup <- new.env(parent = emptyenv())
+  anno <- NULL
+  if (!is.null(anno_path)) {
+    if (!file.exists(anno_path)) {
+      message("Warning: proteome annotation table not found: ", anno_path)
+    } else {
+      anno <- read_table_auto(anno_path)
+      if (!is.null(anno)) names(anno) <- tolower(names(anno))
+    }
+  }
+  if (!is.null(anno) && nrow(anno) > 0) {
+    id_cols <- present_cols(anno, c("gene_id", "protein_id", "accession", "transcript_id", "seq_id",
+                                    "entry", "gene_stable_id", "protein_stable_id", "id"))
+    gene_col <- first_present(anno, c("gene_name", "gene_symbol", "symbol", "gene_names", "name"))
+    product_col <- first_present(anno, c("product", "protein_name", "protein_names", "description", "function"))
+    go_col <- first_present(anno, c("go_terms", "go_term_accession", "go_term_accessions", "go", "go_ids", "go_id", "gene_ontology", "gene_ontology_ids"))
+    if (length(id_cols) == 0) {
+      message("Warning: ", label, " annotation has no gene/protein id column: ", paste(names(anno), collapse = ", "))
+    } else {
+      message(label, " annotation: id=", paste(id_cols, collapse = "/"),
+              ", gene=", ifelse(is.na(gene_col), "(none)", gene_col),
+              ", product=", ifelse(is.na(product_col), "(none)", product_col),
+              ", go=", ifelse(is.na(go_col), "(none)", go_col))
+      gene <- if (is.na(gene_col)) rep(NA_character_, nrow(anno)) else as.character(anno[[gene_col]])
+      product <- if (is.na(product_col)) rep(NA_character_, nrow(anno)) else as.character(anno[[product_col]])
+      go <- if (is.na(go_col)) rep(NA_character_, nrow(anno)) else gsub("|", ";", as.character(anno[[go_col]]), fixed = TRUE)
+      for (i in seq_len(nrow(anno))) {
+        rec <- list(gene = gene[[i]], product = product[[i]], go = go[[i]])
+        for (col in id_cols) put_proteome_key(lookup, anno[[col]][[i]], rec)
+      }
+    }
+  }
+  if (!is.null(map_path)) {
+    if (!file.exists(map_path)) {
+      message("Warning: proteome id map not found: ", map_path)
+    } else {
+      map <- read_table_auto(map_path)
+      if (!is.null(map) && nrow(map) > 0) {
+        names(map) <- tolower(names(map))
+        from_cols <- present_cols(map, c("seq_id", "sseqid", "protein_id", "transcript_id", "accession",
+                                         "fasta_id", "entry", "protein_stable_id", "id"))
+        to_col <- first_present(map, c("gene_id", "annotation_id", "gene_stable_id", "gene_name", "gene_symbol"))
+        from_cols <- setdiff(from_cols, to_col)
+        if (length(from_cols) == 0) from_cols <- setdiff(names(map), to_col)[1]
+        if (is.na(to_col) || length(from_cols) == 0 || is.na(from_cols[[1]])) {
+          message("Warning: ", label, " id map needs a sequence id and a gene id: ", paste(names(map), collapse = ", "))
+        } else {
+          message(label, " id map: ", paste(from_cols, collapse = "/"), " -> ", to_col)
+          for (i in seq_len(nrow(map))) {
+            target <- as.character(map[[to_col]][[i]])
+            rec <- if (!is.na(target) && nzchar(target) && exists(target, lookup, inherits = FALSE)) {
+              get(target, lookup, inherits = FALSE)
+            } else {
+              list(gene = target, product = NA_character_, go = NA_character_)
+            }
+            for (col in from_cols) put_proteome_key(lookup, map[[col]][[i]], rec)
+          }
+        }
+      }
+    }
+  }
+  lookup
+}
+
+lookup_proteome <- function(lookup, sseqid, accession) {
+  keys <- unique(c(sseqid, accession, sub("\\.\\d+$", "", c(sseqid, accession))))
+  parts <- unlist(lapply(keys, function(x) if (grepl("|", x, fixed = TRUE)) strsplit(x, "|", fixed = TRUE)[[1]] else character()))
+  keys <- unique(c(keys, parts))
+  keys <- keys[!is.na(keys) & nzchar(keys)]
+  for (k in keys) {
+    if (exists(k, lookup, inherits = FALSE)) return(get(k, lookup, inherits = FALSE))
+  }
+  NULL
+}
+
+fill_from_lookup <- function(title_value, rec_value) {
+  if (is.null(rec_value) || length(rec_value) == 0 || is.na(rec_value) || !nzchar(as.character(rec_value)))
+    return(title_value)
+  as.character(rec_value)
+}
+
+blast_proteomes <- function(genes, gff_path, reference, config_path, out_dir, samtools, blastx_cmd, threads,
+                            evalue, max_target_seqs, max_hsps, parallel_dbs, verbose) {
   genes <- genes[!is.na(genes$gene_id), , drop = FALSE]
   genes <- genes[!duplicated(genes$gene_id), , drop = FALSE]
   if (nrow(genes) == 0) return(NULL)
+  config <- read_blast_config(config_path)
   query_fa <- file.path(out_dir, "genes_cds_query.fa")
   qmap <- write_cds_fasta(genes, gff_path, reference, samtools, query_fa)
-  empty <- tibble(gene_id = genes$gene_id, swissprot_gene = NA_character_, swissprot_product = NA_character_,
-                  swissprot_organism = NA_character_, swissprot_accession = NA_character_, swissprot_evalue = NA_character_)
-  if (is.null(qmap) || nrow(qmap) == 0) {
-    message("Swiss-Prot blastx: no CDS features for the outlier genes")
-    return(empty)
-  }
-  if (verbose) message("Swiss-Prot query: ", nrow(qmap), " spliced CDS in ", query_fa,
-                       " (", nrow(genes) - nrow(qmap), " genes had no CDS)")
+  if (is.null(qmap) || nrow(qmap) == 0)
+    message("Proteome blastx: no CDS features for the outlier genes")
+  else if (verbose)
+    message("Proteome query: ", nrow(qmap), " spliced CDS in ", query_fa,
+            " (", nrow(genes) - nrow(qmap), " genes had no CDS)")
   targets <- search_target_seqs(max_target_seqs)
   if (targets > as.integer(max_target_seqs))
-    message("Swiss-Prot search uses -max_target_seqs ", targets, ". One hit per gene is kept.")
-  out_tsv <- file.path(out_dir, "blast_genes_swissprot.tsv")
-  message("blastx ", nrow(qmap), " CDS against ", db_path, " (evalue=", evalue, ")")
-  ok <- run_gene_blast(query_fa, db_path, out_tsv, blastx_cmd, threads, evalue, max_target_seqs, max_hsps,
-                       blast_task = NULL,
-                       outfmt = "6 qseqid sseqid pident length qstart qend sstart send evalue bitscore stitle")
-  if (!ok || !file.exists(out_tsv) || file.info(out_tsv)$size == 0) return(empty)
-  b <- read_tsv(out_tsv,
-                col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "stitle"),
-                show_col_types = FALSE)
-  if (nrow(b) == 0) return(empty)
-  b$evalue_num <- suppressWarnings(as.numeric(b$evalue))
-  b$bitscore <- as.numeric(b$bitscore)
-  b <- b[order(b$evalue_num, -b$bitscore), , drop = FALSE]
-  b <- b[!duplicated(b$qseqid), , drop = FALSE]
-  parsed <- parse_swissprot_title(b$sseqid, b$stitle)
-  parsed$gene_id <- qmap$gene_id[match(b$qseqid, qmap$qseqid)]
-  parsed$swissprot_evalue <- as.character(b$evalue)
-  parsed <- parsed %>% transmute(
-    gene_id = .data$gene_id,
-    swissprot_gene = .data$gene,
-    swissprot_product = .data$product,
-    swissprot_organism = .data$organism,
-    swissprot_accession = .data$accession,
-    swissprot_evalue = .data$swissprot_evalue
-  )
-  empty %>% select("gene_id") %>% left_join(parsed, by = "gene_id")
+    message("Proteome search uses -max_target_seqs ", targets, ". One hit per proteome is kept.")
+  one_db <- function(i) {
+    db <- config[[i]]
+    db_path <- db_field(db, "db_path")
+    name <- safe_db_name(coalesce_null(db_field(db, "name"), paste0("proteome", i)), i)
+    if (name == "proteome") name <- "proteome_db"
+    empty <- tibble(gene_id = genes$gene_id)
+    empty[[paste0(name, "_gene")]] <- NA_character_
+    empty[[paste0(name, "_product")]] <- NA_character_
+    empty[[paste0(name, "_go")]] <- NA_character_
+    empty[[paste0(name, "_accession")]] <- NA_character_
+    empty[[paste0(name, "_evalue")]] <- NA_character_
+    if (is.null(db_path)) {
+      message("Skipping proteome ", name, ": db_path missing")
+      return(empty)
+    }
+    db_files <- paste0(db_path, c(".phr", ".pin", ".psq", ".pdb", ".pal"))
+    if (!any(file.exists(db_files))) {
+      message("Skipping proteome ", name, ": BLAST database not found at ", db_path)
+      return(empty)
+    }
+    if (is.null(qmap) || nrow(qmap) == 0) return(empty)
+    out_tsv <- file.path(out_dir, paste0("blast_genes_", name, ".tsv"))
+    message("blastx ", nrow(qmap), " CDS against ", name, " (", db_path, ", evalue=", evalue, ")")
+    ok <- run_gene_blast(query_fa, db_path, out_tsv, blastx_cmd, threads, evalue, max_target_seqs, max_hsps,
+                         blast_task = NULL,
+                         outfmt = "6 qseqid sseqid pident length qstart qend sstart send evalue bitscore stitle")
+    if (!ok || !file.exists(out_tsv) || file.info(out_tsv)$size == 0) return(empty)
+    b <- read_tsv(out_tsv,
+                  col_names = c("qseqid", "sseqid", "pident", "length", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "stitle"),
+                  show_col_types = FALSE)
+    if (nrow(b) == 0) return(empty)
+    b$evalue_num <- suppressWarnings(as.numeric(b$evalue))
+    b$bitscore <- suppressWarnings(as.numeric(b$bitscore))
+    b <- b[order(b$evalue_num, -b$bitscore), , drop = FALSE]
+    b <- b[!duplicated(b$qseqid), , drop = FALSE]
+    parsed <- parse_protein_title(b$sseqid, b$stitle)
+    lookup <- load_proteome_lookup(db_field(db, "annotation_tsv", "annotation_table"),
+                                   db_field(db, "id_map", "id_map_tsv"), name)
+    gene <- product <- go <- accession <- character(nrow(b))
+    for (j in seq_len(nrow(b))) {
+      rec <- lookup_proteome(lookup, b$sseqid[[j]], parsed$accession[[j]])
+      gene[[j]] <- fill_from_lookup(parsed$gene[[j]], if (is.null(rec)) NA_character_ else rec$gene)
+      product[[j]] <- fill_from_lookup(parsed$product[[j]], if (is.null(rec)) NA_character_ else rec$product)
+      go[[j]] <- fill_from_lookup(NA_character_, if (is.null(rec)) NA_character_ else rec$go)
+      accession[[j]] <- parsed$accession[[j]]
+    }
+    out <- empty
+    hit_row <- match(qmap$gene_id[match(b$qseqid, qmap$qseqid)], out$gene_id)
+    ok_hit <- !is.na(hit_row)
+    out[[paste0(name, "_gene")]][hit_row[ok_hit]] <- gene[ok_hit]
+    out[[paste0(name, "_product")]][hit_row[ok_hit]] <- product[ok_hit]
+    out[[paste0(name, "_go")]][hit_row[ok_hit]] <- go[ok_hit]
+    out[[paste0(name, "_accession")]][hit_row[ok_hit]] <- accession[ok_hit]
+    out[[paste0(name, "_evalue")]][hit_row[ok_hit]] <- as.character(b$evalue)[ok_hit]
+    out
+  }
+  n_parallel <- max(1L, min(as.integer(parallel_dbs), length(config)))
+  parts <- if (n_parallel > 1L && .Platform$OS.type == "unix") {
+    parallel::mclapply(seq_along(config), one_db, mc.cores = n_parallel)
+  } else {
+    lapply(seq_along(config), one_db)
+  }
+  parts <- parts[vapply(parts, function(p) is.data.frame(p) && nrow(p) > 0, logical(1))]
+  if (length(parts) == 0) return(NULL)
+  hom <- parts[[1]]
+  if (length(parts) > 1L) {
+    for (p in parts[-1]) hom <- hom %>% left_join(p, by = "gene_id")
+  }
+  gene_cols <- grep("_gene$", names(hom), value = TRUE)
+  product_cols <- grep("_product$", names(hom), value = TRUE)
+  go_cols <- grep("_go$", names(hom), value = TRUE)
+  row_set <- function(cols) {
+    if (length(cols) == 0) return(rep(NA_character_, nrow(hom)))
+    apply(hom[, cols, drop = FALSE], 1, join_unique)
+  }
+  hom$proteome_genes <- row_set(gene_cols)
+  hom$proteome_products <- row_set(product_cols)
+  hom$proteome_go <- row_set(go_cols)
+  hom
 }
 
 annotation_suffix <- function(path) {
@@ -615,12 +815,12 @@ option_list <- list(
   make_option(c("--include-non-outlier"), action = "store_true", default = FALSE,
               help = "Keep GFF genes that overlap no outlier region. With --blast-config, those genes are queried too"),
   make_option(c("--reference"), type = "character", default = NULL,
-              help = "Assembly FASTA (indexed). Required with --blast-config or --swissprot-db"),
+              help = "Assembly FASTA (indexed). Required with --blast-config or --proteome-config"),
   make_option(c("--blast-config"), type = "character", default = NULL,
-              help = "YAML/JSON list of databases (db_path, name, gff_path, optional annotation_tsv). Each outlier gene is searched; the best HSP is named from that genome's GFF"),
-  make_option(c("--swissprot-db"), type = "character", default = NULL,
-              help = "Swiss-Prot protein BLAST database prefix. Spliced CDS are searched with blastx; the top hit supplies gene, product, and organism"),
-  make_option(c("--blastx-cmd"), type = "character", default = "blastx", help = "blastx program for --swissprot-db [default: %default]"),
+              help = "YAML/JSON list of nucleotide databases (db_path, name, gff_path, optional annotation_tsv). Each outlier gene span is searched; the best HSP is named from that genome's GFF"),
+  make_option(c("--proteome-config"), type = "character", default = NULL,
+              help = "YAML/JSON list of protein databases (db_path, name, optional annotation_tsv, id_map). Spliced CDS are searched with blastx"),
+  make_option(c("--blastx-cmd"), type = "character", default = "blastx", help = "blastx program for --proteome-config [default: %default]"),
   make_option(c("--samtools"), type = "character", default = "samtools", help = "samtools for faidx [default: %default]"),
   make_option(c("--blast-cmd"), type = "character", default = "blastn", help = "BLAST program for --blast-config [default: %default]"),
   make_option(c("--blast-task"), type = "character", default = "blastn",
@@ -640,8 +840,8 @@ opts <- parse_args(OptionParser(
 if (is.null(opts$gff)) stop("--gff is required")
 if (is.null(opts$`annotation-dir`) && is.null(opts$sites) && is.null(opts$genes) && is.null(opts$summary))
   stop("Give --annotation-dir or at least one of --sites, --genes, --summary")
-if ((!is.null(opts$`blast-config`) || !is.null(opts$`swissprot-db`)) && is.null(opts$reference))
-  stop("--reference is required with --blast-config or --swissprot-db")
+if ((!is.null(opts$`blast-config`) || !is.null(opts$`proteome-config`)) && is.null(opts$reference))
+  stop("--reference is required with --blast-config or --proteome-config")
 if (!is.null(opts$threads) && opts$threads < 1L) stop("--threads must be >= 1")
 if (!is.null(opts$`parallel-dbs`) && opts$`parallel-dbs` < 1L) stop("--parallel-dbs must be >= 1")
 if (!is.null(opts$`max-target-seqs`) && opts$`max-target-seqs` < 1L) stop("--max-target-seqs must be >= 1")
@@ -918,12 +1118,12 @@ if (!is.null(opts$`blast-config`)) {
     extra_last <- setdiff(names(hom), "gene_id")
   }
 }
-if (!is.null(opts$`swissprot-db`)) {
+if (!is.null(opts$`proteome-config`)) {
   queries <- if (isTRUE(opts$`include-non-outlier`)) gene_summary else gene_summary[gene_summary$in_outlier %in% TRUE, , drop = FALSE]
-  sw <- blast_swissprot(
-    queries, opts$gff, opts$reference, opts$`swissprot-db`, opts$`output-dir`,
+  sw <- blast_proteomes(
+    queries, opts$gff, opts$reference, opts$`proteome-config`, opts$`output-dir`,
     opts$samtools, opts$`blastx-cmd`, opts$threads, opts$evalue,
-    opts$`max-target-seqs`, opts$`max-hsps`, opts$verbose
+    opts$`max-target-seqs`, opts$`max-hsps`, opts$`parallel-dbs`, opts$verbose
   )
   if (!is.null(sw) && nrow(sw) > 0) {
     gene_summary <- gene_summary %>% left_join(sw, by = "gene_id")

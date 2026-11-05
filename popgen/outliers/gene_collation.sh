@@ -22,7 +22,7 @@ BLAST_GENES=""
 INCLUDE_NON_OUTLIER=false
 REFERENCE=""
 BLAST_CONFIG=""
-SWISSPROT_DB=""
+PROTEOME_CONFIG=""
 SAMTOOLS="samtools"
 BLAST_CMD=""
 BLASTX_CMD=""
@@ -63,13 +63,14 @@ Optional:
   --blast-genes FILE       outlier_genes_*.csv (BLAST homologs, joined by region)
   --include-non-outlier    Also list GFF genes that overlap no outlier region
                            (and BLAST those genes too, when --blast-config is set)
-  --reference FILE         Assembly FASTA, indexed. Required with --blast-config or --swissprot-db
-  --blast-config FILE      YAML/JSON databases (db_path, name, gff_path, optional annotation_tsv).
-                           Each outlier gene is searched; the best HSP is named from that GFF
-  --swissprot-db PREFIX    Swiss-Prot protein BLAST database. Spliced CDS are searched with blastx
+  --reference FILE         Assembly FASTA, indexed. Required with --blast-config or --proteome-config
+  --blast-config FILE      YAML/JSON nucleotide databases (db_path, name, gff_path, optional annotation_tsv).
+                           Each outlier gene span is searched; the best HSP is named from that GFF
+  --proteome-config FILE   YAML/JSON protein databases (db_path, name, optional annotation_tsv, id_map).
+                           Spliced CDS are searched with blastx, one top hit per proteome
   --samtools PATH          samtools [default: samtools]
   --blast-cmd CMD          BLAST program for --blast-config [default: blastn]
-  --blastx-cmd CMD         blastx program for --swissprot-db [default: blastx]
+  --blastx-cmd CMD         blastx program for --proteome-config [default: blastx]
   --blast-task TASK        Nucleotide BLAST -task [default: blastn]. Pass megablast to restore the old default
   --threads N              Threads per BLAST process [default: 4]
   --parallel-dbs N         Databases searched at once [default: 1]
@@ -87,7 +88,7 @@ Outputs (suffix copied from the annotation files):
                                n_windows, qseqids, then n_sites, coding_effects, outlier_stat.
                                Region BLAST homologs stay at the end, then one gene/product/GO/evalue
                                column set per database, homolog_genes/products/go, and with
-                               --swissprot-db the top blastx hit (gene, product, organism, accession, evalue)
+                               --proteome-config one gene/product/GO/accession/evalue set per proteome
   outlier_gene_regions_*.csv   One row per (gene, outlier region)
   outlier_gene_sites_*.csv     One row per (gene, site); sites assigned by
                                position in the gene and/or csq gene name
@@ -109,7 +110,7 @@ while [[ $# -gt 0 ]]; do
         --include-non-outlier) INCLUDE_NON_OUTLIER=true; shift ;;
         --reference) REFERENCE="$2"; shift 2 ;;
         --blast-config) BLAST_CONFIG="$2"; shift 2 ;;
-        --swissprot-db) SWISSPROT_DB="$2"; shift 2 ;;
+        --proteome-config) PROTEOME_CONFIG="$2"; shift 2 ;;
         --samtools) SAMTOOLS="$2"; shift 2 ;;
         --blast-cmd) BLAST_CMD="$2"; shift 2 ;;
         --blastx-cmd) BLASTX_CMD="$2"; shift 2 ;;
@@ -146,12 +147,12 @@ if [[ -n "$ANNOTATION_DIR" && ! -d "$ANNOTATION_DIR" ]]; then
     log_error "Annotation directory not found: $ANNOTATION_DIR"
     exit 1
 fi
-if [[ ( -n "$BLAST_CONFIG" || -n "$SWISSPROT_DB" ) && -z "$REFERENCE" ]]; then
-    log_error "--reference is required with --blast-config or --swissprot-db"
+if [[ ( -n "$BLAST_CONFIG" || -n "$PROTEOME_CONFIG" ) && -z "$REFERENCE" ]]; then
+    log_error "--reference is required with --blast-config or --proteome-config"
     exit 1
 fi
-if [[ -n "$SWISSPROT_DB" && ! -e "${SWISSPROT_DB}.phr" && ! -e "${SWISSPROT_DB}.pin" && ! -e "${SWISSPROT_DB}.psq" && ! -e "${SWISSPROT_DB}.pdb" ]]; then
-    log_error "Swiss-Prot BLAST database not found at prefix: $SWISSPROT_DB"
+if [[ -n "$PROTEOME_CONFIG" && ! -f "$PROTEOME_CONFIG" ]]; then
+    log_error "Proteome config not found: $PROTEOME_CONFIG"
     exit 1
 fi
 if [[ -n "$BLAST_CONFIG" && ! -f "$BLAST_CONFIG" ]]; then
@@ -200,8 +201,8 @@ R_ARGS=(--gff "$GFF" --output-dir "$OUTPUT_DIR")
 [[ "$INCLUDE_NON_OUTLIER" == true ]] && R_ARGS+=(--include-non-outlier)
 [[ -n "$REFERENCE" ]] && R_ARGS+=(--reference "$REFERENCE")
 [[ -n "$BLAST_CONFIG" ]] && R_ARGS+=(--blast-config "$BLAST_CONFIG")
-[[ -n "$SWISSPROT_DB" ]] && R_ARGS+=(--swissprot-db "$SWISSPROT_DB")
-[[ -n "$BLAST_CONFIG" || -n "$SWISSPROT_DB" ]] && R_ARGS+=(--samtools "$SAMTOOLS")
+[[ -n "$PROTEOME_CONFIG" ]] && R_ARGS+=(--proteome-config "$PROTEOME_CONFIG")
+[[ -n "$BLAST_CONFIG" || -n "$PROTEOME_CONFIG" ]] && R_ARGS+=(--samtools "$SAMTOOLS")
 [[ -n "$BLAST_CMD" ]] && R_ARGS+=(--blast-cmd "$BLAST_CMD")
 [[ -n "$BLASTX_CMD" ]] && R_ARGS+=(--blastx-cmd "$BLASTX_CMD")
 [[ -n "$BLAST_TASK" ]] && R_ARGS+=(--blast-task "$BLAST_TASK")

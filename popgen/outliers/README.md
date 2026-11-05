@@ -125,16 +125,28 @@ Sites are assigned to a gene when the position falls inside the gene (`assigned_
 
 `--include-non-outlier` also writes GFF genes that overlap no outlier region (`in_outlier=FALSE`).
 
-`--blast-config` with `--reference` searches each outlier gene's genomic span (`chr:gene_start-gene_end`, introns included) against every database in the config. The config is the same YAML or JSON used by `outlier_annotation.sh` (`db_path`, `name`, `gff_path`, optional `annotation_tsv`). This does not replace the region search in `outlier_annotation.sh`. Without `--blast-config` and without `--swissprot-db` the summary columns are unchanged. `--include-non-outlier` also queries genes that overlap no outlier region.
+`--blast-config` with `--reference` searches each outlier gene's genomic span (`chr:gene_start-gene_end`, introns included) against every nucleotide database in the config. The config is the same YAML or JSON used by `outlier_annotation.sh` (`db_path`, `name`, `gff_path`, optional `annotation_tsv`). This does not replace the region search in `outlier_annotation.sh`. Without `--blast-config` and without `--proteome-config` the summary columns are unchanged. `--include-non-outlier` also queries genes that overlap no outlier region.
 
 The nucleotide task defaults to `blastn` (word size 11). `megablast`, which is what `blastn` does when no task is set, misses divergent homologs, so pass `--blast-task megablast` only for a near-identical genome. `--evalue` defaults to `1e-5`. `--max-hsps` defaults to 1. `--max-target-seqs` defaults to 1 reported hit, but the search itself uses at least 5 targets, because a limit below 5 can drop the best alignment before it is reported. `--threads` defaults to 4 and `--parallel-dbs` to 1. The best HSP per gene per database is the lowest evalue. Its subject coordinates are overlapped with that genome's GFF; the gene with the longest overlap supplies the name, product, and GO terms, and `annotation_tsv` fills any of those the GFF line lacks. A database with no hit leaves its four columns empty and is omitted from the collapsed sets.
 
-`--swissprot-db` runs `blastx` of the spliced CDS (longest transcript; introns removed) against a Swiss-Prot protein database. The top hit is the closest curated protein. Its definition line supplies `swissprot_gene`, `swissprot_product`, `swissprot_organism`, `swissprot_accession`, and `swissprot_evalue`. That hit is often a model organism, and the organism column says which one. GO terms are not in the BLAST record. The query FASTA is `genes_cds_query.fa` and the hits are `blast_genes_swissprot.tsv`.
+`--proteome-config` runs `blastx` of the spliced CDS (longest transcript; introns removed) against each protein database in a second YAML or JSON file. One top hit is kept per proteome. A UniProt definition line (`GN=`, the protein name, `OS=`) and an Ensembl definition line (`gene_symbol:`, `description:`) are both read. `annotation_tsv` supplies the gene name, product, and GO terms when those columns are present (`gene_id`, `gene_name`, `gene_symbol`, `product`, `protein_names`, `go_terms`, `go`, or the UniProt headers `Entry`, `Gene names`, `Protein names`, `Gene Ontology IDs`). `id_map` connects the BLAST sequence id (`seq_id`, `protein_id`, or `accession`) to that annotation row. The query FASTA is `genes_cds_query.fa` and each proteome writes `blast_genes_<name>.tsv`.
 
-Those columns sit at the end of `outlier_gene_summary_*.csv`, after the region-joined `blast_gene_ids` / `blast_products` / `blast_dbs`: `<name>_gene`, `<name>_product`, `<name>_go`, `<name>_evalue` for each configured genome, then `homolog_genes`, `homolog_products`, and `homolog_go` (unique semicolon lists), then the Swiss-Prot columns. The nucleotide query FASTA is `genes_query.fa` and each database writes `blast_genes_<name>.tsv` in the output directory.
+```yaml
+databases:
+  - name: emul
+    db_path: /work/shared/genomes/blast_db/proteome/emul/sequences
+    annotation_tsv: /work/shared/genomes/blast_db/proteome/emul/annotations.tsv
+    id_map: /work/shared/genomes/blast_db/proteome/emul/id_map.tsv
+  - name: smed
+    db_path: /work/shared/genomes/blast_db/proteome/smed/sequences
+    annotation_tsv: /work/shared/genomes/blast_db/proteome/smed/annotations.tsv
+    id_map: /work/shared/genomes/blast_db/proteome/smed/id_map.tsv
+```
+
+Those columns sit at the end of `outlier_gene_summary_*.csv`, after the region-joined `blast_gene_ids` / `blast_products` / `blast_dbs`: `<name>_gene`, `<name>_product`, `<name>_go`, `<name>_evalue` for each configured genome, then `homolog_genes`, `homolog_products`, and `homolog_go` (unique semicolon lists), then `<name>_gene`, `<name>_product`, `<name>_go`, `<name>_accession`, and `<name>_evalue` for each proteome, then `proteome_genes`, `proteome_products`, and `proteome_go`. The nucleotide query FASTA is `genes_query.fa` and each database writes `blast_genes_<name>.tsv` in the output directory.
 
 Outputs, suffix copied from the annotation files:
 
-- `outlier_gene_summary_*.csv`: one row per gene. GFF identity and coordinates, then `n_regions`, `n_windows`, and `qseqids`, then `n_sites`, `n_protein_altering`, `coding_effects`, and `outlier_stat`. Region-joined BLAST columns (`blast_gene_ids`, `blast_products`, `blast_dbs`) stay at the end, followed by the per-database gene search columns and `homolog_genes`, `homolog_products`, `homolog_go` when `--blast-config` is set, then `swissprot_gene`, `swissprot_product`, `swissprot_organism`, `swissprot_accession`, and `swissprot_evalue` when `--swissprot-db` is set.
+- `outlier_gene_summary_*.csv`: one row per gene. GFF identity and coordinates, then `n_regions`, `n_windows`, and `qseqids`, then `n_sites`, `n_protein_altering`, `coding_effects`, and `outlier_stat`. Region-joined BLAST columns (`blast_gene_ids`, `blast_products`, `blast_dbs`) stay at the end, followed by the per-database gene search columns and `homolog_genes`, `homolog_products`, `homolog_go` when `--blast-config` is set, then `<name>_gene`, `<name>_product`, `<name>_go`, `<name>_accession`, `<name>_evalue`, `proteome_genes`, `proteome_products`, and `proteome_go` when `--proteome-config` is set.
 - `outlier_gene_regions_*.csv`: one row per gene × outlier region, with that region's stats and the site counts for the gene in the region.
 - `outlier_gene_sites_*.csv`: one row per gene × site. `qseqids` are semicolon-collapsed when the site sits in more than one region. `assigned_by` records whether the link was position, csq, or both.
