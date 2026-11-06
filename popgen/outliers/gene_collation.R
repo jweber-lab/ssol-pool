@@ -801,6 +801,9 @@ gene_keys_row <- function(gene_id, csq_key, gene_name) {
 }
 
 # ---------------------------------------------------------------------------
+# gene_report.R sources this file for the functions above. Set
+# GENE_COLLATION_FUNCS_ONLY to skip the collation run.
+if (!isTRUE(get0("GENE_COLLATION_FUNCS_ONLY", ifnotfound = FALSE))) {
 option_list <- list(
   make_option(c("--gff"), type = "character", default = NULL,
               help = "Assembly GFF3 (the one given to variant_csq.sh / outlier_annotation.sh)"),
@@ -1179,3 +1182,4 @@ message("Wrote ", out_summary, " (", nrow(gene_summary), " genes)")
 message("Wrote ", out_regions, " (", nrow(gene_regions), " gene-region rows)")
 message("Wrote ", out_sites, " (", nrow(gene_sites), " gene-site rows)")
 message("Done.")
+}
