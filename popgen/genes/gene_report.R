@@ -18,7 +18,8 @@
 # Stat values and quantiles come from the single-site and windowed HDF5 files,
 # not from the outlier table that supplied the gene. Each new gene folder holds
 # the genomic sequence, the spliced CDS when a GFF is given, the windows and
-# sites from the gene table, and the proteome blastx hits.
+# sites from the gene table, gene_stats.csv (average, maximum, and maximum
+# quantile, including sequence-quality measures), and the proteome blastx hits.
 ###############################################################################
 
 GENE_COLLATION_FUNCS_ONLY <- TRUE
@@ -83,25 +84,32 @@ normalize_wide_stat <- function(col) {
   paste0(gsub("_", ":", rest, fixed = TRUE), ".", stat)
 }
 
+SEQ_QUAL_COLS <- c("mean_coverage", "mean_mapping_quality", "mean_coverage_hq", "frac_mapq0", "breadth",
+                   "rel_coverage", "n_reads", "frac_proper_pair", "frac_mate_other_chr")
+
 empty_stats <- function() {
   data.frame(
-    scale = character(), stat = character(),
+    scale = character(), stat = character(), role = character(),
     n_high_0.99 = integer(), n_high_0.999 = integer(),
     n_low_0.99 = integer(), n_low_0.999 = integer(),
+    n_values = integer(), sum_value = numeric(),
     max_value = numeric(), max_quantile = numeric(),
     stringsAsFactors = FALSE
   )
 }
 
-append_scores <- function(bucket, gene_id, scale, stat, value, quant) {
+append_scores <- function(bucket, gene_id, scale, stat, value, quant, role = "stat") {
   q <- as.numeric(quant)
   v <- as.numeric(value)
+  finite <- is.finite(v)
   row <- data.frame(
-    scale = scale, stat = stat,
+    scale = scale, stat = stat, role = role,
     n_high_0.99 = sum(q >= 0.99, na.rm = TRUE),
     n_high_0.999 = sum(q >= 0.999, na.rm = TRUE),
     n_low_0.99 = sum(q <= 0.01, na.rm = TRUE),
     n_low_0.999 = sum(q <= 0.001, na.rm = TRUE),
+    n_values = sum(finite),
+    sum_value = if (any(finite)) sum(v[finite]) else 0,
     max_value = safe_max(v), max_quantile = safe_max(q),
     stringsAsFactors = FALSE
   )
@@ -111,18 +119,28 @@ append_scores <- function(bucket, gene_id, scale, stat, value, quant) {
 
 consolidate_stats <- function(df) {
   if (is.null(df) || nrow(df) == 0) return(empty_stats())
+  if (!"role" %in% names(df)) df$role <- "stat"
+  if (!"n_values" %in% names(df)) df$n_values <- NA_integer_
+  if (!"sum_value" %in% names(df)) df$sum_value <- NA_real_
   df %>%
-    group_by(.data$scale, .data$stat) %>%
+    group_by(.data$scale, .data$stat, .data$role) %>%
     summarise(
       n_high_0.99 = sum(.data$n_high_0.99),
       n_high_0.999 = sum(.data$n_high_0.999),
       n_low_0.99 = sum(.data$n_low_0.99),
       n_low_0.999 = sum(.data$n_low_0.999),
+      n_values = sum(.data$n_values),
+      sum_value = sum(.data$sum_value),
       max_value = safe_max(.data$max_value),
       max_quantile = safe_max(.data$max_quantile),
       .groups = "drop"
     ) %>%
     as.data.frame()
+}
+
+popgen_stats <- function(stats) {
+  if (is.null(stats) || nrow(stats) == 0 || !"role" %in% names(stats)) return(stats)
+  stats[is.na(stats$role) | stats$role == "stat", , drop = FALSE]
 }
 
 score_rows <- function(bucket, genes, genes_by_chr, chr, start, end, value, quant, stat, scale) {
@@ -141,7 +159,8 @@ score_rows <- function(bucket, genes, genes_by_chr, chr, start, end, value, quan
       parts <- split(seq_len(sum(hit)), ss[hit])
       for (nm in names(parts)) {
         ii <- which(hit)[parts[[nm]]]
-        append_scores(bucket, genes$gene_id[[gi]], scale, nm, vv[ii], qq[ii])
+        append_scores(bucket, genes$gene_id[[gi]], scale, nm, vv[ii], qq[ii],
+                      role = if (sub("^.*\\.", "", nm) %in% SEQ_QUAL_COLS) "seq_qual" else "stat")
       }
     }
   }
@@ -190,7 +209,7 @@ score_h5_file <- function(path, genes, genes_by_chr, bucket) {
 
   if ("sample" %in% gnames && any(c("pi", "theta", "tajima_d") %in% gnames)) {
     sample <- strip_sample(h5_col(grp, "sample", idx))
-    for (col in c("pi", "theta", "tajima_d")) {
+    for (col in c("pi", "theta", "tajima_d", SEQ_QUAL_COLS)) {
       if (!col %in% gnames) next
       score_rows(bucket, genes, genes_by_chr, chr, start, end,
                  as.numeric(h5_col(grp, col, idx)), quant_or_na(paste0(col, "_quantile")),
@@ -402,6 +421,10 @@ stat_measures <- c("n_high_0.99", "n_high_0.999", "n_low_0.99", "n_low_0.999", "
 
 write_summaries <- function(caches, out_dir) {
   if (length(caches) == 0) stop("No genes to summarize")
+  caches <- lapply(caches, function(z) {
+    z$stats <- popgen_stats(z$stats)
+    z
+  })
   metas <- bind_rows(lapply(caches, `[[`, "meta"))
   metas <- metas[order(metas$chr, metas$gene_start, metas$gene_id), , drop = FALSE]
   by_id <- setNames(caches, vapply(caches, function(z) z$meta$gene_id[[1]], ""))
@@ -448,10 +471,58 @@ write_summaries <- function(caches, out_dir) {
   invisible(list(brief = brief, full = full))
 }
 
+gene_stat_table <- function(stats) {
+  empty <- data.frame(statistic = character(), average = numeric(), max = numeric(), max_quantile = numeric(),
+                      stringsAsFactors = FALSE)
+  if (is.null(stats) || nrow(stats) == 0) return(empty)
+  n <- if ("n_values" %in% names(stats)) stats$n_values else rep(NA_integer_, nrow(stats))
+  total <- if ("sum_value" %in% names(stats)) stats$sum_value else rep(NA_real_, nrow(stats))
+  tab <- data.frame(
+    statistic = paste(stats$scale, stats$stat, sep = "|"),
+    average = ifelse(!is.na(n) & n > 0, total / n, NA_real_),
+    max = stats$max_value,
+    max_quantile = stats$max_quantile,
+    stringsAsFactors = FALSE
+  )
+  tab <- tab[is.finite(tab$average) | is.finite(tab$max) | is.finite(tab$max_quantile), , drop = FALSE]
+  tab[order(tab$statistic), , drop = FALSE]
+}
+
+write_gene_stat_tables <- function(cache_dir, out_dir) {
+  files <- list.files(cache_dir, pattern = "\\.rds$", full.names = TRUE)
+  files <- files[basename(files) != "hdf5_stamp.rds"]
+  for (f in files) {
+    obj <- load_cache(f)
+    dest_dir <- file.path(out_dir, sub("\\.rds$", "", basename(f)))
+    if (!dir.exists(dest_dir)) next
+    write_csv(gene_stat_table(obj$stats), file.path(dest_dir, "gene_stats.csv"), na = "")
+    unlink(file.path(dest_dir, c("gene_id.txt", "gene_summary_row.csv")))
+  }
+}
+
 existing_gene_folders <- function(out_dir) {
   if (!dir.exists(out_dir)) return(list(ids = character(0), folders = character(0)))
   ids <- character(0)
   folders <- character(0)
+  add <- function(id, bn) {
+    if (is.na(id) || !nzchar(id)) return()
+    hit <- match(id, ids)
+    if (!is.na(hit)) {
+      if (!identical(folders[[hit]], bn)) message("Repeated gene id ", id, "; keeping folder ", folders[[hit]])
+      return()
+    }
+    ids <<- c(ids, id)
+    folders <<- c(folders, bn)
+  }
+  cache_dir <- file.path(out_dir, "stat_cache")
+  if (dir.exists(cache_dir)) {
+    for (f in list.files(cache_dir, pattern = "\\.rds$", full.names = TRUE)) {
+      if (basename(f) == "hdf5_stamp.rds") next
+      obj <- tryCatch(readRDS(f), error = function(e) NULL)
+      if (is.null(obj) || is.null(obj$meta) || !"gene_id" %in% names(obj$meta)) next
+      add(as.character(obj$meta$gene_id[[1]]), sub("\\.rds$", "", basename(f)))
+    }
+  }
   for (d in list.dirs(out_dir, recursive = FALSE, full.names = TRUE)) {
     bn <- basename(d)
     if (bn %in% c("log", "stat_cache")) next
@@ -464,13 +535,10 @@ existing_gene_folders <- function(out_dir) {
       row <- tryCatch(read_csv(row_file, n_max = 1L, show_col_types = FALSE), error = function(e) NULL)
       if (!is.null(row) && "gene_id" %in% names(row)) id <- as.character(row$gene_id[[1]])
     }
-    if (is.na(id) || !nzchar(id)) next
-    ids <- c(ids, id)
-    folders <- c(folders, bn)
+    add(id, bn)
   }
-  if (any(duplicated(ids))) message("Repeated gene ids in the output directory; keeping the first folder")
-  keep <- !duplicated(ids)
-  list(ids = ids[keep], folders = setNames(folders[keep], ids[keep]))
+  if (length(ids) == 0) return(list(ids = character(0), folders = character(0)))
+  list(ids = ids, folders = setNames(folders, ids))
 }
 
 load_cache <- function(path) {
@@ -717,9 +785,6 @@ for (i in seq_len(nrow(new_genes))) {
   dest <- file.path(out_dir, folder_name)
   new_folders[gid] <- dest
   dir.create(dest, showWarnings = FALSE, recursive = TRUE)
-  writeLines(gid, file.path(dest, "gene_id.txt"))
-  row <- new_genes[i, setdiff(names(new_genes), ".source"), drop = FALSE]
-  write_csv(row, file.path(dest, "gene_summary_row.csv"), na = "")
   if (!is.null(regions) && "gene_id" %in% names(regions)) {
     write_csv(regions[regions$gene_id == gid, , drop = FALSE], file.path(dest, "windows.csv"), na = "")
   }
@@ -758,11 +823,17 @@ cache_dir <- file.path(out_dir, "stat_cache")
 dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
 cached <- load_caches(cache_dir)
 cached_ids <- if (length(cached) == 0) character(0) else vapply(cached, function(z) as.character(z$meta$gene_id[[1]]), "")
+cache_by_id <- if (length(cached) == 0) list() else setNames(cached, cached_ids)
 hdf5_dir <- opts$`hdf5-dir`
 stamp_path <- file.path(cache_dir, "hdf5_stamp.rds")
 old_stamp <- if (!is.null(hdf5_dir) && file.exists(stamp_path)) readRDS(stamp_path) else NULL
 new_stamp <- if (!is.null(hdf5_dir)) h5_stamp(hdf5_dir) else NULL
-rescore <- !is.null(hdf5_dir) && !identical(old_stamp, new_stamp)
+cache_has_means <- function(obj) {
+  st <- obj$stats
+  is.data.frame(st) && all(c("sum_value", "n_values") %in% names(st))
+}
+needs_means <- length(cached) > 0 && !all(vapply(cached, cache_has_means, logical(1)))
+rescore <- !is.null(hdf5_dir) && (!identical(old_stamp, new_stamp) || needs_means)
 
 folder_of <- existing$folders
 if (length(new_folders) > 0) folder_of[names(new_folders)] <- new_folders
@@ -778,7 +849,11 @@ for (gid in want) {
     score_parts[[gid]] <- genes[genes$gene_id == gid, , drop = FALSE]
     next
   }
-  row_file <- file.path(out_dir, folder_of[[gid]], "gene_summary_row.csv")
+  if (!is.null(cache_by_id[[gid]]) && all(c("chr", "gene_start", "gene_end") %in% names(cache_by_id[[gid]]$meta))) {
+    score_parts[[gid]] <- cache_by_id[[gid]]$meta
+    next
+  }
+  row_file <- file.path(out_dir, basename(folder_of[[gid]]), "gene_summary_row.csv")
   if (!file.exists(row_file)) {
     message("No coordinates for ", gid, "; its previous summary is unchanged")
     next
@@ -836,5 +911,6 @@ if (!is.null(hdf5_dir) && length(setdiff(want, score_genes$gene_id)) == 0)
 
 caches <- load_caches(cache_dir)
 if (length(caches) == 0) stop("No genes to summarize")
+write_gene_stat_tables(cache_dir, out_dir)
 write_summaries(caches, out_dir)
 message("Done.")

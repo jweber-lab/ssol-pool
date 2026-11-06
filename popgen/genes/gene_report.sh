@@ -80,8 +80,11 @@ Outputs, in --output-dir:
   gene_summary_full.csv    The same genes, plus per-stat pass counts, maximum
                            overlapping value and quantile, and consequence counts
   <gene_id>/               Created only for genes that were not already present:
-                           gene_summary_row.csv, windows.csv, sites.csv, gene.fa,
+                           gene_stats.csv, windows.csv, sites.csv, gene.fa,
                            cds.fa, and blast_<name>.csv
+                           gene_stats.csv columns: statistic, average, max, max_quantile.
+                           Sequence-quality measures (coverage, mapping quality, breadth)
+                           are included. The statistic is <scale>|<name>.
 
 A stat key is <scale>|<name>, for example w1000_s500|Echo.pi or
 single|Cheney:Echo.fst. High 0.99 means quantile >= 0.99. High 0.999 means

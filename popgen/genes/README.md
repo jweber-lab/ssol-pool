@@ -32,10 +32,10 @@ A window overlaps a gene when it is on the same chromosome and the intervals ove
 
 Each new `<gene_id>/` folder contains:
 
-- `gene_id.txt` and `gene_summary_row.csv`, the input row
+- `gene_stats.csv`, one row per overlapping statistic: `statistic`, `average`, `max`, and `max_quantile`. The statistic is `<scale>|<name>`, for example `w1000_s500|Echo.pi` or `w1000_s500|Echo.mean_coverage`. Sequence-quality columns from the diversity HDF5 (`mean_coverage`, `mean_mapping_quality`, `mean_coverage_hq`, `frac_mapq0`, `breadth`, `rel_coverage`, `n_reads`, `frac_proper_pair`, `frac_mate_other_chr`) are included. `average` is the mean of the overlapping windows. `max` and `max_quantile` are independent.
 - `windows.csv` and, when present, `sites.csv`
 - `gene.fa`, the genomic span, when `--reference` is set
 - `cds.fa`, the spliced CDS of the longest transcript, when `--gff` is also set
 - `blast_<name>.csv` for each proteome, every HSP returned by `blastx` with gene, product, and GO filled from that proteome's annotation table
 
-Proteome `blastx` defaults are `--evalue 1e-5`, `--max-target-seqs 25`, and `--max-hsps 5`. A requested target count below 5 is raised for the search. The proteome config is the same YAML or JSON used by `gene_collation.sh`. Sequence and blastx run only for genes added in that invocation.
+Proteome `blastx` defaults are `--evalue 1e-5`, `--max-target-seqs 25`, and `--max-hsps 5`. A requested target count below 5 is raised for the search so the best hit is not dropped. The e-value is the filter that drops weak hits; 25 targets and 5 HSPs keep the additional alignments. The proteome config is the same YAML or JSON used by `gene_collation.sh`. An `id_map` is used only when it has a BLAST sequence id and a column that matches an annotation id. The annotation table is used on its own when the BLAST id already matches that table. Sequence and blastx run only for genes added in that invocation.

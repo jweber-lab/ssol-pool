@@ -487,7 +487,13 @@ write_cds_fasta <- function(genes, gff_path, reference, samtools, out_fasta) {
 parse_protein_title <- function(sseqid, stitle) {
   sseqid <- ifelse(is.na(sseqid), "", as.character(sseqid))
   stitle <- ifelse(is.na(stitle), "", as.character(stitle))
-  full <- ifelse(nzchar(stitle) & nzchar(sseqid) & !grepl(sseqid, stitle, fixed = TRUE),
+  n <- max(length(sseqid), length(stitle))
+  if (length(sseqid) == 1L && n > 1L) sseqid <- rep(sseqid, n)
+  if (length(stitle) == 1L && n > 1L) stitle <- rep(stitle, n)
+  already <- vapply(seq_len(n), function(i) {
+    nzchar(sseqid[[i]]) && nzchar(stitle[[i]]) && grepl(sseqid[[i]], stitle[[i]], fixed = TRUE)
+  }, logical(1))
+  full <- ifelse(nzchar(stitle) & nzchar(sseqid) & !already,
                  paste(sseqid, stitle), ifelse(nzchar(stitle), stitle, sseqid))
   gn <- rep(NA_character_, length(full))
   has_sym <- grepl("gene_symbol:", full, fixed = TRUE)
@@ -612,7 +618,8 @@ load_proteome_lookup <- function(anno_path, map_path, label) {
         from_cols <- setdiff(from_cols, to_col)
         if (length(from_cols) == 0) from_cols <- setdiff(names(map), to_col)[1]
         if (is.na(to_col) || length(from_cols) == 0 || is.na(from_cols[[1]])) {
-          message("Warning: ", label, " id map needs a sequence id and a gene id: ", paste(names(map), collapse = ", "))
+          message("Warning: ", label, " id map was not used. It needs a BLAST sequence id and a column that matches the annotation id. Columns: ",
+                  paste(names(map), collapse = ", "))
         } else {
           message(label, " id map: ", paste(from_cols, collapse = "/"), " -> ", to_col)
           for (i in seq_len(nrow(map))) {
