@@ -20,7 +20,7 @@ usage() {
 Usage: $0 -i repeatmasker.out -o repeats.bed [options]
 
 Convert RepeatMasker .out to BED (0-based, half-open). Merged output is suitable
-for --filter-mask-total-bed in popgen/stats/ and popgen/variants/.
+for --filter-mask-total-bed in pop-gen/stats/ and pop-gen/variants/.
 
 Options:
   -i FILE               RepeatMasker .out input (required)

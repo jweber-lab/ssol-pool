@@ -151,4 +151,4 @@ Outputs, suffix copied from the annotation files:
 - `outlier_gene_regions_*.csv`: one row per gene × outlier region, with that region's stats and the site counts for the gene in the region.
 - `outlier_gene_sites_*.csv`: one row per gene × site. `qseqids` are semicolon-collapsed when the site sits in more than one region. `assigned_by` records whether the link was position, csq, or both.
 
-`popgen/genes/gene_report.sh` reads one or more of these summaries into a shared output directory. Genes already present are left in place. `gene_summary_brief.csv` and `gene_summary_full.csv` are rewritten from the single-site and windowed HDF5 statistics, so the stat columns do not depend on which outlier run supplied the gene list.
+`pop-gen/genes/gene_report.sh` reads one or more of these summaries into a shared output directory. Genes already present are left in place. `gene_summary_brief.csv` and `gene_summary_full.csv` are rewritten from the single-site and windowed HDF5 statistics, so the stat columns do not depend on which outlier run supplied the gene list.

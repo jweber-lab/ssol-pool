@@ -185,7 +185,7 @@ Or a specific region and TSV inputs:
   --region chr2:5000000-6000000 \
   --diversity-dir ../stats/diversity \
   --fst-dir ../stats/fst \
-  --seq-qual-dir ../alignment/seq_qual \
+  --seq-qual-dir ../../alignment/seq_qual \
   --output-dir ./region_plots
 ```
 

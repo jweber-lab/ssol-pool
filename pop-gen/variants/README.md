@@ -1,6 +1,6 @@
 # Variant Calling and Annotation for Poolseq Data
 
-This directory contains scripts for finding variant sites in the processed pool-seq BAMs, annotating their functional consequences, and summarizing those annotations per window so they can be joined with the population genetics statistics in [popgen/stats/](../stats/).
+This directory contains scripts for finding variant sites in the processed pool-seq BAMs, annotating their functional consequences, and summarizing those annotations per window so they can be joined with the population genetics statistics in [pop-gen/stats/](../stats/).
 
 1. **Site discovery**:
    - **`snp_call.sh`** (SNPs): BAM(s) → SNP sites from **grenedalf** read counts, using the same filters as `calculate_fst.sh`, so the sites are the SNPs behind FST/diversity. Writes sync, TSV, and BCF (per-pool allele depths, no genotypes).
@@ -20,9 +20,9 @@ This directory contains scripts for finding variant sites in the processed pool-
 
 ## Reference assemblies and repeat masking
 
-These scripts follow the repository-wide repeat-masking policy described in [popgen/stats/README.md](../stats/README.md#repeat-masking-and-reference-assemblies):
+These scripts follow the repository-wide repeat-masking policy described in [pop-gen/stats/README.md](../stats/README.md#repeat-masking-and-reference-assemblies):
 
-- **Variants** (`snp_call.sh` / `indel_call.sh`): use the **same unmasked** reference as alignment; drop masked sites with the combined `mask.bed` from [`build_mask.sh`](../alignment/README.md#combined-mask-build_masksh) (repeats plus poorly mapping windows; a plain RepeatMasker BED from [`repeatmasker_bed.sh`](../alignment/repeatmasker_bed.sh) also works), via **`--filter-mask-total-bed`**. Use the same file as diversity/FST so sites and window statistics exclude the same positions.
+- **Variants** (`snp_call.sh` / `indel_call.sh`): use the **same unmasked** reference as alignment; drop masked sites with the combined `mask.bed` from [`build_mask.sh`](../../alignment/README.md#combined-mask-build_masksh) (repeats plus poorly mapping windows; a plain RepeatMasker BED from [`repeatmasker_bed.sh`](../../alignment/repeatmasker_bed.sh) also works), via **`--filter-mask-total-bed`**. Use the same file as diversity/FST so sites and window statistics exclude the same positions.
 - **Functional annotation** (`variant_csq.sh`): **`--reference` must be the unmasked assembly that matches your GFF** (not hard-masked). Run csq on a BCF that still has the same `chr`/`pos` as that assembly.
 
 ### Example
@@ -51,7 +51,7 @@ These scripts follow the repository-wide repeat-masking policy described in [pop
 
 ### Into collate and outliers
 
-- **Single-site HDF5**: [`collate.sh`](../stats/README.md#collatesh--collater) `--variant-tsv-dir` (a directory holding `snp_sites.tsv` and `indel_sites.tsv`) with `--variant-csq` (a `variants.csq.tsv` file, or a directory containing one) writes `variants.h5`. `--single-position-merged` writes that table as `single_position.h5` instead and adds per-locus FST, PBE, QIBE, and LRPI on SNP rows only. Neither flag is applied to window HDF5.
+- **Single-site HDF5**: [`collate.sh`](../collation/README.md#collatesh--collater) `--variant-tsv-dir` (a directory holding `snp_sites.tsv` and `indel_sites.tsv`) with `--variant-csq` (a `variants.csq.tsv` file, or a directory containing one) writes `variants.h5`. `--single-position-merged` writes that table as `single_position.h5` instead and adds per-locus FST, PBE, QIBE, and LRPI on SNP rows only. Neither flag is applied to window HDF5.
 - **Window HDF5**: `--variant-feature-dir variant_features` adds the `n_sites*` and `n_csq_*` / `n_region_*` / `n_effect_*` counts and the `genes` / `genes_protein_altering` lists to `diversity_w*.h5`, `fst_w*.h5`, `pbe_w*.h5`, `qibe_w*.h5`, and `lrpi_w*.h5` only. `fst_single.h5` and `single_position.h5` do not get those columns.
 - **Outliers**: `identify_outliers.R` ranks windows on the diversity, FST, PBE, QIBE, and LRPI quantiles when those names are in `--statistics`. Variant counts and gene lists are not carried into `outlier_windows_*.csv` / `outlier_regions_*.csv`. [`outlier_annotation.sh`](../outliers/README.md#2-outlier_annotationsh) `--variant-csq csq_snps --variant-csq csq_indels --gff annotation.gff3` adds the sites, consequences and genes inside each outlier interval, and copies FST/PBE/QIBE/LRPI site columns from `single_position.h5`. [`gene_collation.sh`](../outliers/README.md#3-gene_collationsh) then lists those results by GFF gene.
 - **Plots**: [`plot_outlier_csq.sh`](../plotting/README.md#7-plot_outlier_csqr--plot_outlier_csqsh) shows the consequence composition and enrichment of each outlier statistic's sites. [`plot_fst_csq.sh`](../plotting/README.md#8-plot_fst_csqr--plot_fst_csqsh) shows per-site FST by consequence class from the collated HDF5.
@@ -149,4 +149,4 @@ Aggregates annotated sites into **per-window count tables** on grenedalf's inter
   --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 ```
 
-The output directory can be passed to `collate.sh --variant-feature-dir` in [popgen/stats/](../stats/README.md#collatesh--collater), which left-joins these columns onto the diversity, FST and PBE windows.
+The output directory can be passed to `collate.sh --variant-feature-dir` in [pop-gen/collation/](../collation/README.md#collatesh--collater), which left-joins these columns onto the diversity, FST and PBE windows.

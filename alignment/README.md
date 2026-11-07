@@ -74,7 +74,7 @@ Recommended order:
 3. Run `seq_qual_metrics.sh` at a finely overlapping scale for the mask (e.g. `-w 1000 --step-size 250`).
 4. Build one mask: `build_mask.sh` → `mask.bed`.
 5. Pass the same `mask.bed` and the same `--reference-genome` to diversity, FST, SNP and indel calling.
-6. Run `variant_csq_windows.sh` at the analysis scales with the same reference, then collate. Collate can take the mask-scale `seq_qual_metrics` TSV and keep the analysis-grid windows (e.g. 500 bp steps from a 250 bp step, same 1000 bp window); a second `seq_qual_metrics.sh` run is only needed if you want a different window width. See [window boundaries](../stats/README.md#window-boundaries).
+6. Run `variant_csq_windows.sh` at the analysis scales with the same reference, then collate. Collate can take the mask-scale `seq_qual_metrics` TSV and keep the analysis-grid windows (e.g. 500 bp steps from a 250 bp step, same 1000 bp window); a second `seq_qual_metrics.sh` run is only needed if you want a different window width. See [window boundaries](../pop-gen/stats/README.md#window-boundaries).
 
 **Post-alignment BAM filtering** (`process_poolseq.sh`, after merge):
 
@@ -270,7 +270,7 @@ Optional: `--reference ref.fa` (with `ref.fa.fai`) adds an `estimated_mean_depth
 
 ### Per-window coverage and mapping quality (seq_qual_metrics.sh)
 
-**`seq_qual_metrics.sh`** computes per-window alignment-quality metrics with samtools + awk. Output TSV is compatible with collate (in popgen/stats/) for merging into diversity HDF5 via `--seq-qual-dir`.
+**`seq_qual_metrics.sh`** computes per-window alignment-quality metrics with samtools + awk. Output TSV is compatible with collate (in [pop-gen/collation/](../pop-gen/collation/)) for merging into diversity HDF5 via `--seq-qual-dir`.
 
 - **Input**: BAM file(s) via `--bam` or `--sample-info` CSV (columns: sample_name, bam_file). When `X.unfiltered.bam` exists beside a listed `X.bam` (kept by `process_poolseq.sh` with a MAPQ / primary-only filter), it is used instead, so `frac_mapq0` and `mean_coverage` count the reads the filter removed; `--no-unfiltered` turns this off. Missing BAM indexes are created.
 - **Output**: `{output_dir}/{sample}/seq_qual_metrics_w{W}_s{S}.tsv`, one per window/step pair. Reads with flags 0x704 (unmapped, secondary, QC-fail, duplicate) are ignored; supplementary alignments add coverage but are not counted as reads.
@@ -348,7 +348,7 @@ done
 
 ## Downstream Analyses
 
-After alignment, continue with the [recommended order](#reference-genome-and-repeat-masking): `seq_qual_metrics.sh` and `build_mask.sh` here, then diversity, FST and PBE in [popgen/stats/](../stats/README.md) and SNP / indel calling in [popgen/variants/](../variants/README.md). All of them take the same `--sample-info` CSV (its `bam_file` column) and the same reference FASTA; grenedalf reads the BAMs directly, so no mpileup or sync file is needed.
+After alignment, continue with the [recommended order](#reference-genome-and-repeat-masking): `seq_qual_metrics.sh` and `build_mask.sh` here, then diversity, FST and PBE in [pop-gen/stats/](../pop-gen/stats/README.md), collation in [pop-gen/collation/](../pop-gen/collation/README.md), and SNP / indel calling in [pop-gen/variants/](../pop-gen/variants/README.md). All of them take the same `--sample-info` CSV (its `bam_file` column) and the same reference FASTA; grenedalf reads the BAMs directly, so no mpileup or sync file is needed.
 
 ## Dry-Run Mode
 

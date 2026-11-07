@@ -35,7 +35,7 @@ The analysis scripts calculate:
 
 **Common Requirements:**
 - **samtools** - Required for BAM file processing (if using grenedalf)
-- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr**, **hdf5r**, **tibble** - Required for `calculate_pbe.R`, `calculate_qibe.R`, `calculate_lrpi.R`, and `collate.R` (requirements for the variant scripts are in [popgen/variants/README.md](../variants/README.md))
+- **R** with packages **dplyr**, **readr**, **optparse**, **tidyr** - Required for `calculate_pbe.R`, `calculate_qibe.R`, and `calculate_lrpi.R` (variant scripts: [pop-gen/variants/README.md](../variants/README.md); collation: [pop-gen/collation/README.md](../collation/README.md))
 
 ### Input Files
 
@@ -57,8 +57,8 @@ The analysis scripts calculate:
 
 After **RepeatModeler / RepeatMasker**, you may have soft-masked and hard-masked FASTA files. This pipeline follows a single coherent policy:
 
-1. **Alignment** ([`process_poolseq.sh`](../alignment/process_poolseq.sh)): use the **unmasked** reference. Optionally apply **`--bam-min-mapq 20 --bam-primary-only`** so the BAMs passed to stats exclude low-MAPQ and non-primary alignments.
-2. **Diversity (π, θ, Tajima's D)** (`calculate_pi_theta.sh`): BAM input; exclude masked positions with **`--filter-mask-total-bed`** (same BED as below). Use the combined `mask.bed` from [`build_mask.sh`](../alignment/README.md#combined-mask-build_masksh) (repeats plus poorly mapping windows), or a plain RepeatMasker BED.
+1. **Alignment** ([`process_poolseq.sh`](../../alignment/process_poolseq.sh)): use the **unmasked** reference. Optionally apply **`--bam-min-mapq 20 --bam-primary-only`** so the BAMs passed to stats exclude low-MAPQ and non-primary alignments.
+2. **Diversity (π, θ, Tajima's D)** (`calculate_pi_theta.sh`): BAM input; exclude masked positions with **`--filter-mask-total-bed`** (same BED as below). Use the combined `mask.bed` from [`build_mask.sh`](../../alignment/README.md#combined-mask-build_masksh) (repeats plus poorly mapping windows), or a plain RepeatMasker BED.
 3. **FST** (`calculate_fst.sh`): same **`--filter-mask-total-bed`** (or `--filter-mask-total-fasta`) as diversity. Per-locus (`--window-type single`) and windowed FST keep **biallelic SNPs** and drop all-NA windows/sites by default (`--filter-total-only-biallelic-snps`, `--no-nan-windows`). Turn those off with `--no-filter-total-only-biallelic-snps` / `--keep-nan-windows`. **`--no-extra-columns`** drops grenedalf's per-pair filter-count columns.
 4. **Variants** ([`snp_call.sh`](../variants/README.md#snp_callsh) for SNPs, [`indel_call.sh`](../variants/README.md#indel_callsh) for indels): **same unmasked** reference as alignment; same **`--filter-mask-total-bed`** as diversity/FST.
 5. **Functional annotation** ([`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr)): **`--reference` must be the unmasked assembly that matches your GFF** (not hard-masked). Run csq on a BCF that still has the same `chr`/`pos` as that assembly.
@@ -85,10 +85,10 @@ Use the same reference FASTA (or its `.fai`) and the same window width for every
 
 ### End-to-end example
 
-Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/README.md#combined-mask-build_masksh), and BAMs from alignment.
+Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../../alignment/README.md#combined-mask-build_masksh), and BAMs from alignment.
 
 ```bash
-# 1–2. Alignment and mask (in popgen/alignment/)
+# 1–2. Alignment and mask (in alignment/)
 ./process_poolseq.sh --reference ref.unmasked.fa --bam-min-mapq 20 --bam-primary-only ...
 ./seq_qual_metrics.sh --sample-info ../../sample_info.csv --reference-genome ref.unmasked.fa \
   -w 1000 --step-size 250 -o seq_qual_mask
@@ -106,7 +106,7 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
   --pop1-name Echo --pop2-name Kjer --pop3-name Cheney --pop4-name Myv -o qibe_out
 ./calculate_lrpi.sh --diversity-dir pi_out --sample-info ../../sample_info.csv -o lrpi_out
 
-# 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in popgen/variants/
+# 4. Pooled SNP and indel sites (unmasked ref; same repeat BED and filters as FST) - scripts in pop-gen/variants/
 ../variants/snp_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
   --filter-mask-total-bed mask/mask.bed --output-dir snps_out
 ../variants/indel_call.sh --sample-info ../../sample_info.csv --reference ref.unmasked.fa \
@@ -124,33 +124,22 @@ Assume `ref.unmasked.fa`, `mask/mask.bed` from [`build_mask.sh`](../alignment/RE
   -w 1000 --step-size 500 --template-dir pi_out \
   --filter-mask-total-bed mask/mask.bed --output-dir variant_features
 mkdir -p sites && cp snps_out/snp_sites.tsv indels_out/indel_sites.tsv sites/
-./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --qibe-dir qibe_out --lrpi-dir lrpi_out --seq-qual-dir seq_qual_mask \
+../collation/collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --qibe-dir qibe_out --lrpi-dir lrpi_out --seq-qual-dir seq_qual_mask \
   --variant-tsv-dir sites --variant-csq csq_snps --variant-csq csq_indels \
   --variant-feature-dir variant_features -o collated
 ```
 
-**Traceability:** `region_category` / `coding_effect` in csq output are plotting summaries; **`bcsq`** and **`csq_consequences`** retain full bcftools csq detail. See [popgen/alignment/README.md](../alignment/README.md) for BAM-filter details.
+**Traceability:** `region_category` / `coding_effect` in csq output are plotting summaries; **`bcsq`** and **`csq_consequences`** retain full bcftools csq detail. See [alignment/README.md](../../alignment/README.md) for BAM-filter details.
 
 ## Scripts
 
-**Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [popgen/alignment/](popgen/alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`. A mask-scale table (e.g. `-w 1000 --step-size 250`) is enough when the analysis window matches and the analysis step is a multiple of that step.
+**Note:** Per-window coverage and mapping quality are computed by `seq_qual_metrics.sh` in [alignment/](../../alignment/). Its output TSV can be passed to collate via `--seq-qual-dir`. A mask-scale table (e.g. `-w 1000 --step-size 250`) is enough when the analysis window matches and the analysis step is a multiple of that step.
 
-**Variant sites and annotation** (`snp_call.sh`, `indel_call.sh`, `variant_csq.sh`, `variant_csq_windows.sh`) live in [popgen/variants/](../variants/README.md); their site tables and consequence annotations are collated with `--variant-tsv-dir` / `--variant-csq`, and their per-window feature tables with `--variant-feature-dir`.
+**Variant sites and annotation** (`snp_call.sh`, `indel_call.sh`, `variant_csq.sh`, `variant_csq_windows.sh`) live in [pop-gen/variants/](../variants/README.md); their site tables and consequence annotations are collated with `--variant-tsv-dir` / `--variant-csq`, and their per-window feature tables with `--variant-feature-dir`.
 
-### collate.sh / collate.R
+### Collation
 
-Collates diversity, FST, PBE, QIBE, and LRPI TSV/CSV into **HDF5** with `/windows` group(s). Computes integer rank (1..N) and 0–1 quantile per stat within (sample, window_size) for diversity, within the window for FST, within each pair file for LRPI, within each trio file for PBE, and within each quartet file for QIBE.
-
-- **Input**: `--diversity-dir`, `--fst-dir`, `--pbe-dir`, `--qibe-dir`, `--lrpi-dir` (at least one); optional `--seq-qual-dir`, `--variant-tsv-dir`, `--variant-csq`, **`--variant-feature-dir`** (directory containing `variant_features_wW_sS.tsv` from `variant_csq_windows`). `--qibe-dir` is the `calculate_qibe.sh` output; collate reads `*_qibe.tsv` (not `*_qibs.tsv`). `--lrpi-dir` is the `calculate_lrpi.sh` output; collate reads `*_lrpi.tsv`.
-- **Scale matching**: diversity / FST / PBE / QIBE / LRPI are grouped by exact `w{W}_s{S}`. Seq-qual and variant-feature tables prefer that exact filename; if it is missing, collate uses a finer same-window table whose step divides the analysis step and keeps rows with `(start - 1) %% S == 0` (and `end - start + 1 == W`). So `seq_qual_metrics_w1000_s250.tsv` can fill `diversity_w1000_s500`. A different window width, or a step that is not a multiple of the source step, is not used.
-- **Output**: In `--output-dir`: `diversity_w{W}_s{S}.h5`, `fst_w{W}_s{S}.h5`, `pbe_w{W}_s{S}.h5`, `qibe_w{W}_s{S}.h5`, `lrpi_w{W}_s{S}.h5` (group `/windows`) and, unless `--single-position-merged`, `fst_single.h5` / `pbe_single.h5` / `qibe_single.h5` / `lrpi_single.h5` (group `/sites`). Columns are chr, start, end, sample or pairs (pop1, pop2 for LRPI, plus `pi_pop1` and `pi_pop2`; pop1, pop2, pop3 for PBE; pop1–pop4 for QIBE), stat values, and `*_rank`, `*_quantile`. LRPI is ranked within each pair file.
-- **Window consequences** (`--variant-feature-dir` only): matching-scale `variant_features_*.tsv` columns are **left-joined** on `(chr, start, end)` into **windowed** diversity, FST, PBE, QIBE, and LRPI, adding `n_sites`, `n_sites_snp`, `n_sites_indel`, `n_csq_*`, `n_region_*`, `n_effect_*`, and `genes` / `genes_protein_altering`. They are not added to `fst_single.h5`, `pbe_single.h5`, `qibe_single.h5`, `lrpi_single.h5`, or `single_position.h5`. Build the feature tables with the same windows as the stats (`variant_csq_windows.sh --template-dir`, and `--no-nan-windows` on by default in diversity and FST); a left join still runs if a window is missing, and that row's counts are NA. Collate's window check names the mismatch.
-- **Site consequences** (`variants.h5`, group `/sites`): `--variant-tsv-dir` and `--variant-csq` do not touch window HDF5. `--variant-tsv-dir` is a directory with `snp_sites.tsv` and/or `indel_sites.tsv` ([`snp_call.sh`](../variants/README.md#snp_callsh) / [`indel_call.sh`](../variants/README.md#indel_callsh)). Rows are stacked, one per site and ALT allele, with `variant_type` (`snp` or `indel`), `ref`, `alt`, `dp`, `alt_freq`, `indel_len` (indels) and per-pool `<sample>_AD` (`ref,alt`) and `<sample>_alt_freq`. `--variant-csq` (repeatable in `collate.sh`; comma-separated in `collate.R`) is a site TSV from [`variant_csq.sh`](../variants/README.md#variant_csqsh--variant_csqr) or a directory of them. A file path is used as given. A directory contributes TSVs whose names contain `variant`, `sites`, `calls`, or `csq` (so `variants.csq.tsv` and `variants_csq.tsv` both match); `*_long.tsv` is ignored. Tables with a `bcsq` or `csq_consequences` column are annotation: `bcsq`, `csq_consequences`, `region_category`, `coding_effect`, `genes`, and `genes_protein_altering` are joined onto the sites by `chr`, `pos`, `ref`, `alt` (by `chr`, `pos` only if `ref`/`alt` are absent). The same discovery applies inside `--variant-tsv-dir`. With no site TSV, the csq table is the site table.
-- **`--single-position-merged`**: window HDF5 files are unchanged (and still receive `--variant-feature-dir`). `fst_single.h5`, `pbe_single.h5`, `qibe_single.h5`, `lrpi_single.h5`, and `variants.h5` are replaced by one `single_position.h5` (`/sites`): the site table, including csq columns, with per-locus FST, PBE, QIBE, and LRPI as wide columns (`Pop1:Pop2.fst`, `Pop1:Pop2:Pop3.pbe`, `Pop1:Pop2:Pop3:Pop4.qibe`, `Pop1:Pop2.lrpi`, with `_rank` / `_quantile`) on SNP rows only. An indel at the same position as a SNP does not inherit the SNP's values. Per-locus FST positions that are not in the site table are dropped when a site table is present. With no site or csq table, the rows are the per-locus FST (or PBE, QIBE, or LRPI) positions and have no consequence columns.
-- **Masking and windows**: diversity and FST windows carry **`n_masked`** (masked bp, from grenedalf `total.masked`). Every windowed input is checked against the shared grid; see [Window boundaries](#window-boundaries).
-- **Options**: `--drop-all-na` — drop rows/sites where every statistic value (e.g. every pair's FST, or PBE, QIBE, or LRPI) is NA/NaN before ranking and collation.
-- **Sample names** keep their case from the input (FST pairs such as `Echo:Kjer`, `<sample>_AD` columns); standard column names (`chr`, `pos`, `ref`, ...) are lowercased.
-- **Run**: `./collate.sh --diversity-dir pi_out --fst-dir fst_out --pbe-dir pbe_out --qibe-dir qibe_out --lrpi-dir lrpi_out -o collated`
+`collate.sh` and `collate.R` are in [pop-gen/collation/](../collation/README.md). They join the tables from this directory into HDF5 and can attach sequence-quality and variant tables.
 
 ### calculate_pi_theta.sh
 

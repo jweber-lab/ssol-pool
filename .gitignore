@@ -88,7 +88,7 @@ renv/library/
 *.yaml
 *.yml
 !sample_info.csv
-!popgen/stats/pbe_comparisons.csv
+!pop-gen/stats/pbe_comparisons.csv
 
 # --- Project-specific ---
 scratch.md
@@ -99,7 +99,7 @@ help/
 reads/*
 primers/*
 */ptg*
-popgen/alignment/masking*
+alignment/masking*
 
 # --- Optional: job logs and large generated files ---
 *.log

@@ -29,7 +29,7 @@
 # Samples from Schistocephalus solidus poolseq analysis:
 #
 sample_name,read1_file,read2_file,pool_size,bam_file,collection_date,region,location,latitude,longitude,collector,permit_holder,notes
-Echo,reads/Echo_Pool_S1_L001_R1_001.fastq.gz,reads/Echo_Pool_S1_L001_R2_001.fastq.gz,200,popgen/alignment/Echo/Echo_All_seq.dedup.bam,Spring 2014,Vancouver Island,,,,Thor Veen,Dan Bolnick,Permit info available from Dan Bolnick
-Myv,reads/Myv_Pool_S2_L001_R1_001.fastq.gz,reads/Myv_Pool_S2_L001_R2_001.fastq.gz,180,popgen/alignment/Myv/Myv_All_seq.dedup.bam,June 2010-June 2020,Iceland,,,,Holar Univ collaborators,,Metadata with Emily; no permit required
-Cheney,reads/Cheney_Pool_S3_L001_R1_001.fastq.gz,reads/Cheney_Pool_S3_L001_R2_001.fastq.gz,192,popgen/alignment/Cheney/Cheney_All_seq.dedup.bam,Summer 2019 (likely July),Alaska,,,,Weber lab,Weber lab (amended permit),Permit attached
-Kjer,reads/Kjer_Pool_S4_L001_R1_001.fastq.gz,reads/Kjer_Pool_S4_L001_R2_001.fastq.gz,106,popgen/alignment/Kjer/Kjer_All_seq.dedup.bam,Sept 2022,Norway,,,,Cole Wolf,Joost Andre M Raeymaekers (PI) / Marijn Kuizenga (grad student) - Nord University,Permit/collection info attached
+Echo,reads/Echo_Pool_S1_L001_R1_001.fastq.gz,reads/Echo_Pool_S1_L001_R2_001.fastq.gz,200,alignment/Echo/Echo_All_seq.dedup.bam,Spring 2014,Vancouver Island,,,,Thor Veen,Dan Bolnick,Permit info available from Dan Bolnick
+Myv,reads/Myv_Pool_S2_L001_R1_001.fastq.gz,reads/Myv_Pool_S2_L001_R2_001.fastq.gz,180,alignment/Myv/Myv_All_seq.dedup.bam,June 2010-June 2020,Iceland,,,,Holar Univ collaborators,,Metadata with Emily; no permit required
+Cheney,reads/Cheney_Pool_S3_L001_R1_001.fastq.gz,reads/Cheney_Pool_S3_L001_R2_001.fastq.gz,192,alignment/Cheney/Cheney_All_seq.dedup.bam,Summer 2019 (likely July),Alaska,,,,Weber lab,Weber lab (amended permit),Permit attached
+Kjer,reads/Kjer_Pool_S4_L001_R1_001.fastq.gz,reads/Kjer_Pool_S4_L001_R2_001.fastq.gz,106,alignment/Kjer/Kjer_All_seq.dedup.bam,Sept 2022,Norway,,,,Cole Wolf,Joost Andre M Raeymaekers (PI) / Marijn Kuizenga (grad student) - Nord University,Permit/collection info attached
